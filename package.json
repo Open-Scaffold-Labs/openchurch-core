@@ -1,0 +1,33 @@
+{
+  "name": "openchurch",
+  "version": "1.0.0",
+  "private": true,
+  "description": "OpenChurch — a warm, native-auth SaaS for church operations. Deployed as a monorepo on Vercel (client build + api serverless).",
+  "type": "module",
+  "engines": {
+    "node": "22.x"
+  },
+  "scripts": {
+    "dev": "echo 'Run `npm run dev` separately in client/ and server/ — this root package is for Vercel only.' && exit 1",
+    "build": "cd client && npm install && npm run build",
+    "install:all": "npm install && cd client && npm install && cd ../server && npm install",
+    "migrate": "node --env-file-if-exists=server/.env server/src/migrate-cli.js",
+    "lint:operator": "node scripts/operator-lint.mjs",
+    "lint:operator:list": "node scripts/operator-lint.mjs --list",
+    "lint:operator:baseline": "node scripts/operator-lint.mjs --baseline"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.111.0",
+    "@sentry/node": "^10.65.0",
+    "bcryptjs": "^3.0.3",
+    "cors": "^2.8.5",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.5.2",
+    "ical-generator": "^11.0.0",
+    "jsonwebtoken": "^9.0.2",
+    "openai": "^6.46.0",
+    "pg": "^8.22.0",
+    "web-push": "^3.6.7"
+  }
+}

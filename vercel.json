@@ -1,0 +1,42 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "cd client && npm install && npm run build",
+  "outputDirectory": "client/dist",
+  "git": {
+    "deploymentEnabled": {
+      "main": false
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "/api/index"
+    },
+    {
+      "source": "/:path*",
+      "destination": "/index.html"
+    }
+  ],
+  "crons": [
+    {
+      "path": "/api/cron/drain-notifications",
+      "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/cron/enqueue-birthdays",
+      "schedule": "0 5 * * *"
+    },
+    {
+      "path": "/api/cron/retention-prune",
+      "schedule": "0 4 * * *"
+    },
+    {
+      "path": "/api/cron/enqueue-sacrament-anniversaries",
+      "schedule": "0 6 * * 1"
+    },
+    {
+      "path": "/api/cron/backup-digest",
+      "schedule": "0 8 * * 6"
+    }
+  ]
+}

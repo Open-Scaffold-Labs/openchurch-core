@@ -1,0 +1,169 @@
+import { useEffect, useState, useCallback } from 'react'
+import { ClipboardCheck, Plus, X, Loader2, Settings2 } from 'lucide-react'
+import { apiUrl } from '../api'
+import { useAuth } from '../context/AuthContext'
+import { useToast } from '../components/ToastProvider'
+import { useLocale } from '../i18n'
+import { useConfirm } from './ConfirmProvider'
+
+// Daily operational checklists (OPS.1) — the dashboard widget. Renders
+// nothing at all when the org has no active templates and the viewer
+// can't create one; otherwise: today's runs with tickable items, and a
+// quiet manage mode for staff to shape the routines.
+
+export default function DailyChecklists() {
+  const { user } = useAuth()
+  const { t } = useLocale()
+  const toast = useToast()
+  const ask = useConfirm()
+  const canWrite = user?.role === 'admin' || user?.role === 'staff'
+
+  const [runs, setRuns] = useState(null)
+  const [templates, setTemplates] = useState([])
+  const [managing, setManaging] = useState(false)
+  const [form, setForm] = useState({ title: '', items: '' })
+  const [busy, setBusy] = useState(false)
+
+  const load = useCallback(() => {
+    fetch(apiUrl('/api/checklists/today'))
+      .then(r => (r.ok ? r.json() : { runs: [] }))
+      .then(d => setRuns(d.runs ?? []))
+      .catch(() => setRuns([]))
+    if (canWrite) {
+      fetch(apiUrl('/api/checklists/templates'))
+        .then(r => (r.ok ? r.json() : { templates: [] }))
+        .then(d => setTemplates(d.templates ?? []))
+        .catch(() => {})
+    }
+  }, [canWrite])
+  useEffect(() => { load() }, [load])
+
+  const toggle = async (run, index, done) => {
+    // Optimistic tick — the whole point of a checklist is that it
+    // responds like paper.
+    setRuns(rs => rs.map(r => r.id === run.id
+      ? { ...r, items: r.items.map((it, i) => (i === index ? { ...it, done } : it)) }
+      : r))
+    try {
+      const res = await fetch(apiUrl(`/api/checklists/runs/${run.id}`), {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ index, done }),
+      })
+      if (!res.ok) throw new Error()
+    } catch {
+      toast.error(t('chk.saveError'))
+      load()
+    }
+  }
+
+  const addTemplate = async (e) => {
+    e.preventDefault()
+    const items = form.items.split('\n').map(s => s.trim()).filter(Boolean)
+    if (!form.title.trim() || !items.length) return
+    setBusy(true)
+    try {
+      const res = await fetch(apiUrl('/api/checklists/templates'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: form.title.trim(), items }),
+      })
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}))
+        throw new Error(d.error || t('chk.saveError'))
+      }
+      setForm({ title: '', items: '' })
+      toast.success(t('chk.created'))
+      load()
+    } catch (err) { toast.error(err.message) } finally { setBusy(false) }
+  }
+
+  const removeTemplate = async (id) => {
+    if (!(await ask({ title: t('chk.deleteConfirm'), confirmLabel: t('common.delete') || 'Delete' }))) return
+    try {
+      const res = await fetch(apiUrl(`/api/checklists/templates/${id}`), { method: 'DELETE' })
+      if (!res.ok && res.status !== 204) throw new Error()
+      load()
+    } catch { toast.error(t('chk.saveError')) }
+  }
+
+  if (runs === null) return null
+  if (runs.length === 0 && !canWrite) return null
+
+  const inputCls = 'w-full px-3 py-2 text-sm rounded-lg border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-100 dark:bg-ink-800 text-ink-900 dark:text-parchment-50 focus:outline-none focus:ring-2 focus:ring-church-500'
+
+  return (
+    <div className="rounded-2xl border border-parchment-300/60 dark:border-brass-900/30 bg-parchment-50 dark:bg-ink-900 shadow-warm p-4">
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2">
+          <ClipboardCheck size={16} className="text-church-700 dark:text-brass-300" />
+          <p className="text-[11px] font-semibold uppercase tracking-widest text-brass-700 dark:text-brass-300">{t('chk.title')}</p>
+        </div>
+        {canWrite && (
+          <button type="button" onClick={() => setManaging(m => !m)} aria-label={t('chk.manage')}
+            className="p-1.5 rounded-lg text-ink-400 hover:text-church-700 dark:hover:text-brass-300">
+            <Settings2 size={14} />
+          </button>
+        )}
+      </div>
+
+      {runs.length === 0 && (
+        <p className="text-sm text-ink-500 dark:text-parchment-300/70">{t('chk.empty')}</p>
+      )}
+
+      <div className="space-y-4">
+        {runs.map(run => {
+          const done = run.items.filter(i => i.done).length
+          return (
+            <div key={run.id}>
+              <p className="text-sm font-semibold text-ink-800 dark:text-parchment-100 mb-1.5">
+                {run.title}
+                <span className={`ml-2 text-[11px] font-normal ${done === run.items.length ? 'text-brass-700 dark:text-brass-300' : 'text-ink-400 dark:text-parchment-400/60'}`}>
+                  {done}/{run.items.length}
+                </span>
+              </p>
+              <ul className="space-y-1">
+                {run.items.map((item, i) => (
+                  <li key={i}>
+                    <label className={`flex items-start gap-2 text-sm cursor-pointer ${item.done ? 'text-ink-400 dark:text-parchment-400/50 line-through' : 'text-ink-700 dark:text-parchment-200'}`}>
+                      <input type="checkbox" checked={item.done} disabled={!canWrite && false}
+                        onChange={e => toggle(run, i, e.target.checked)}
+                        className="mt-0.5 h-4 w-4 accent-church-700" />
+                      <span>{item.text}</span>
+                    </label>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )
+        })}
+      </div>
+
+      {canWrite && managing && (
+        <div className="mt-4 pt-4 border-t border-parchment-300/60 dark:border-brass-900/25 space-y-3">
+          {templates.length > 0 && (
+            <ul className="space-y-1">
+              {templates.map(tp => (
+                <li key={tp.id} className="flex items-center justify-between text-sm text-ink-700 dark:text-parchment-200">
+                  <span>{tp.title} <span className="text-[11px] text-ink-400">({tp.items.length})</span></span>
+                  <button type="button" onClick={() => removeTemplate(tp.id)} aria-label={`${t('chk.delete')} ${tp.title}`}
+                    className="p-1 text-ink-400 hover:text-rose-700 dark:hover:text-rose-300"><X size={13} /></button>
+                </li>
+              ))}
+            </ul>
+          )}
+          <form onSubmit={addTemplate} className="space-y-2">
+            <input type="text" value={form.title} placeholder={t('chk.newTitle')}
+              onChange={e => setForm(f => ({ ...f, title: e.target.value }))} className={inputCls} />
+            <textarea rows={3} value={form.items} placeholder={t('chk.newItems')}
+              onChange={e => setForm(f => ({ ...f, items: e.target.value }))} className={inputCls} />
+            <button type="submit" disabled={busy}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[12px] font-semibold rounded-lg bg-church-800 text-parchment-50 hover:bg-church-900 disabled:opacity-60">
+              {busy ? <Loader2 size={12} className="animate-spin" /> : <Plus size={12} />} {t('chk.add')}
+            </button>
+          </form>
+        </div>
+      )}
+    </div>
+  )
+}

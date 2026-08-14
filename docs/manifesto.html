@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>The OpenChurch Manifesto</title>
+<!--
+  The frameable one-pager (Constitution → Manual §20).
+  Print on heavy stock, US Letter or A4, default margins off (the page
+  carries its own). One color of ink would also do — the design survives
+  grayscale by intention, per the four-surfaces test.
+-->
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,500;0,600;1,500&family=Inter:wght@400;500&display=swap');
+
+  :root {
+    --burgundy: #7B2D26;
+    --parchment: #FAF6EE;
+    --parchment-deep: #F3ECDD;
+    --brass: #9F8240;
+    --ink: #2E2A26;
+    --ink-soft: #6B6257;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { background: var(--parchment-deep); }
+  body {
+    font-family: 'Inter', sans-serif;
+    color: var(--ink);
+    display: flex; justify-content: center; align-items: center;
+    min-height: 100vh; padding: 2rem;
+  }
+  .sheet {
+    background: var(--parchment);
+    width: 100%; max-width: 8.5in; aspect-ratio: 8.5 / 11;
+    padding: 0.9in 0.95in;
+    box-shadow: 0 18px 50px rgba(46, 42, 38, 0.18);
+    display: flex; flex-direction: column;
+    border: 1px solid rgba(159, 130, 64, 0.25);
+    position: relative;
+  }
+  .sheet::after {
+    /* the inner hairline — a certificate's quiet double border */
+    content: ''; position: absolute; inset: 0.55in;
+    border: 1px solid rgba(159, 130, 64, 0.35);
+    pointer-events: none;
+  }
+  .inner { position: relative; z-index: 1; display: flex; flex-direction: column; height: 100%; text-align: center; }
+
+  .wordmark {
+    font-family: 'Cormorant Garamond', serif;
+    font-weight: 600; letter-spacing: 0.32em; text-transform: uppercase;
+    font-size: 1.05rem; color: var(--burgundy); margin-top: 0.55in;
+  }
+  .rule {
+    width: 1.4in; height: 1px; background: var(--brass);
+    margin: 0.16in auto;
+  }
+  .tagline {
+    font-family: 'Cormorant Garamond', serif; font-style: italic;
+    font-size: 1.28rem; color: var(--ink-soft); margin-bottom: 0.32in;
+  }
+  .body {
+    flex: 1; display: flex; flex-direction: column; justify-content: center; gap: 0.26in;
+  }
+  .stanza {
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 1.06rem; line-height: 1.62; color: var(--ink);
+  }
+  .stanza strong {
+    font-weight: 600; color: var(--burgundy);
+  }
+  .creed {
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 1.18rem; line-height: 1.75; color: var(--burgundy); font-weight: 500;
+  }
+  .closing {
+    font-family: 'Cormorant Garamond', serif; font-style: italic;
+    font-size: 1.12rem; color: var(--ink);
+  }
+  .foot {
+    margin-bottom: 0.5in;
+    font-size: 0.62rem; letter-spacing: 0.18em; text-transform: uppercase;
+    color: var(--ink-soft);
+  }
+  .foot .dagger { color: var(--brass); letter-spacing: 0; }
+
+  @media print {
+    body { padding: 0; background: white; }
+    .sheet { box-shadow: none; max-width: none; width: 100%; height: 100vh; aspect-ratio: auto; border: none; }
+    @page { margin: 0; }
+  }
+</style>
+</head>
+<body>
+  <div class="sheet">
+    <div class="inner">
+      <div>
+        <div class="wordmark">OpenChurch</div>
+        <div class="rule"></div>
+        <div class="tagline">The parish office, kept well.</div>
+      </div>
+
+      <div class="body">
+        <p class="stanza">
+          We build for the Church, which has kept its books<br>
+          for four hundred years without us.<br>
+          We are not here to replace what has lasted.<br>
+          <strong>We are here to help it last.</strong>
+        </p>
+
+        <p class="stanza">
+          The record belongs to the parish.<br>
+          The register is written by a human hand, or not at all.<br>
+          The physical artifact is sacred;<br>
+          the digital exists to preserve it.
+        </p>
+
+        <p class="creed">
+          We do not optimize for engagement.<br>
+          We optimize for stewardship.
+        </p>
+
+        <p class="stanza">
+          Anxiety is a defect. Warmth is a feature.<br>
+          Artifacts outlive dashboards.<br>
+          The software should disappear;<br>
+          the ministry should remain.
+        </p>
+
+        <p class="stanza">
+          Nothing here blinks, counts, or competes for attention.<br>
+          Like a well-kept book, it waits until it is needed.
+        </p>
+
+        <p class="closing">
+          Honor tradition. Protect it with modern tools.<br>
+          When in doubt: quieter, warmer, fewer.
+        </p>
+      </div>
+
+      <div class="foot">
+        <span class="dagger">†</span>&nbsp;&nbsp;Adopted MMXXVI · Amended only as a deliberate act&nbsp;&nbsp;<span class="dagger">†</span>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

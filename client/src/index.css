@@ -1,0 +1,42 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  }
+
+  * {
+    transition-property: background-color, border-color, color, box-shadow;
+    transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+    transition-duration: 150ms;
+  }
+
+  /* Warm parchment in light mode; warm near-black in dark mode. */
+  body {
+    @apply bg-parchment-50 text-ink-800 dark:bg-ink-950 dark:text-parchment-100;
+  }
+}
+
+@layer utilities {
+  .card-glow {
+    @apply shadow-warm dark:shadow-black/40;
+  }
+
+  /* Opt-in serif — apply to headlines, the wordmark, stat numerals. We
+     don't force serif on every h1/h2 because some existing screens lean
+     on tight sans-serif stat typography that would look off in a serif. */
+  .font-display {
+    font-family: 'Cormorant Garamond', Georgia, Cambria, 'Times New Roman', serif;
+    letter-spacing: 0.005em;
+    font-feature-settings: 'liga' 1, 'kern' 1;
+  }
+
+  /* Subtle hairline divider with a brass tint — for quiet separators. */
+  .divider-brass {
+    @apply border-t border-brass-200/60 dark:border-brass-900/40;
+  }
+}

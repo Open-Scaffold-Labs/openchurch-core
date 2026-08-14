@@ -1,0 +1,31 @@
+{
+  "name": "openchurch-server",
+  "version": "1.0.0",
+  "type": "module",
+  "engines": {
+    "node": "22.x"
+  },
+  "scripts": {
+    "dev": "node --watch src/index.js",
+    "start": "node src/index.js",
+    "test": "vitest run --testTimeout=15000"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.111.0",
+    "@sentry/node": "^10.65.0",
+    "bcryptjs": "^3.0.3",
+    "cors": "^2.8.5",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.5.2",
+    "ical-generator": "^11.0.0",
+    "jsonwebtoken": "^9.0.2",
+    "openai": "^6.46.0",
+    "pg": "^8.22.0",
+    "web-push": "^3.6.7"
+  },
+  "devDependencies": {
+    "supertest": "^7.0.0",
+    "vitest": "^4.1.9"
+  }
+}

@@ -1,0 +1,20 @@
+# Dependencies + build output
+node_modules
+dist
+.vercel
+
+# Env — never commit; use .env.example as the template
+.env
+.env.local
+.env.*.local
+
+# OS / editor cruft
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/
+
+# Logs
+*.log
+npm-debug.log*

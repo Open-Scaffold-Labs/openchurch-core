@@ -1,0 +1,129 @@
+name: CI
+
+# Run the real smoke suite against a throwaway Postgres, and prove both
+# clients still build — the check that the code actually works before it
+# can merge. Needs no secrets, so it passes on a fork as-is.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  server-tests:
+    name: Server smoke tests (real Postgres)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: openchurch_test
+        ports:
+          - 5432:5432
+        # Wait until Postgres is accepting connections before the job runs.
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      # localhost host → db.js turns SSL off automatically.
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/openchurch_test
+      # A real secret so the production-fail-closed guard is satisfied and
+      # tokens sign/verify. Not a real deployment secret.
+      JWT_SECRET: ci-test-secret-not-used-in-prod
+      # Pepper for the child pickup-code HMAC — deterministic in CI so the
+      # hash-at-rest assertions are stable. Not a real deployment secret.
+      CHECKIN_CODE_PEPPER: ci-test-pepper-not-used-in-prod
+      NODE_ENV: test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Install server dependencies
+        working-directory: server
+        run: npm install --no-audit --no-fund
+
+      - name: Tenancy audit (static)
+        working-directory: server
+        run: node scripts/audit-tenancy.mjs
+
+      - name: Run smoke tests
+        working-directory: server
+        # runAllMigrations() builds the schema against the fresh service DB
+        # via the new migration ledger; the suite then runs against it.
+        run: npm test
+
+  client-build:
+    name: Client build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      # Machine enforcement for OPERATOR.md's hard bans. Runs before the
+      # build because it needs no dependencies and fails in about a second.
+      #
+      # It is a RATCHET, not a clean bill: scripts/operator-lint-baseline.json
+      # records the known backlog per file, and this fails only when a file
+      # gets WORSE. New code is held to the standard from today; the backlog
+      # is paid down deliberately and locked in by re-baselining.
+      - name: OPERATOR lint (design-system bans)
+        run: npm run lint:operator
+
+      - name: Install client dependencies
+        working-directory: client
+        run: npm install --no-audit --no-fund
+
+      - name: Build client
+        working-directory: client
+        run: npm run build
+
+  client-diocese-build:
+    name: Chancery client build (client-diocese)
+    # client-diocese/ (the OpenDiocese chancery app, port 5204) shipped in
+    # DIO.2 with no CI coverage at all — it wasn't referenced in this
+    # workflow, vercel.json, or the root package.json, so a commit that broke
+    # it could merge and "pass". It builds from its own package.json, exactly
+    # like client/, and belongs to its own Vercel project per the blueprint
+    # (diocese.openchurch.app). Deployment is configured outside this repo.
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Install client-diocese dependencies
+        working-directory: client-diocese
+        run: npm install --no-audit --no-fund
+
+      - name: Build client-diocese
+        working-directory: client-diocese
+        run: npm run build
+
