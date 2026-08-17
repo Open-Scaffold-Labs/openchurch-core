@@ -6,10 +6,19 @@
 // title, notes — so the whole set can be wiped via
 // POST /api/onboarding/clear-samples.
 //
-// Intentionally denomination-neutral: "Sunday Service" rather than
-// "Mass," generic categories, widely-applicable roles. The point is
-// to show the shape and flow of the product, not preload the admin's
-// real data.
+// TRADITION-AWARE (TRAD.2). This file used to declare itself
+// "intentionally denomination-neutral" and then seed *tithe*, *Sunday
+// School Teacher*, *Worship Leader*, *Prayer Team*, *Fellowship Hall* and
+// *Bible Study* — which is not neutral, it is low-church Protestant. A
+// brand-new Catholic parish met that seed inside a Catholic shell: the nav
+// said Intentions and Register while the sample data said Fellowship Hall.
+// First impressions of a product that claims to understand parish life
+// should not open with somebody else's parish.
+//
+// The override is SPARSE, the same principle as the i18n tradition
+// overlay: only the words that actually read wrong are per-tradition.
+// Names, phone numbers, amounts, dates and structure are shared, because
+// none of those belong to a tradition.
 //
 // Called *after* the signup transaction commits — a seed failure
 // should never block account creation. See server/src/routes/auth.js.
@@ -23,6 +32,61 @@
 //
 // Birthdays computed relative to "today" so the demo always has
 // upcoming birthdays regardless of when the signup happens.
+
+// Only the words that would read wrong to the parish that receives them.
+// 'general' is the neutral set — a congregation that has not told us its
+// tradition should not be handed anybody else's vocabulary either.
+const SEED_VOCAB = {
+  catholic: {
+    service: 'Sunday Mass', worship: 'Worship', sanctuary: 'Church',
+    hall: 'Parish Hall', study: 'Scripture Study', formation: 'Faith Formation',
+    clergy: 'Fr. James Wright', clergyRole: 'Pastor',
+    giving: 'offertory', secondGiving: 'special collection',
+    roles: ['Choir Member', 'Usher', 'Finance Council', 'Youth Minister',
+            'Catechist', 'Deacon', 'Cantor', 'Hospitality', 'Parishioner',
+            'Tech / AV', 'Sacristan', 'Parishioner'],
+  },
+  episcopal: {
+    service: 'Holy Eucharist', worship: 'Worship', sanctuary: 'Nave',
+    hall: 'Parish Hall', study: 'Adult Formation', formation: 'Christian Formation',
+    clergy: 'The Rev. James Wright', clergyRole: 'Rector',
+    giving: 'pledge', secondGiving: 'special offering',
+    roles: ['Choir Member', 'Usher', 'Vestry', 'Youth Leader',
+            'Church School Teacher', 'Deacon', 'Lay Reader', 'Hospitality',
+            'Parishioner', 'Tech / AV', 'Altar Guild', 'Parishioner'],
+  },
+  anglican: {
+    service: 'Holy Communion', worship: 'Worship', sanctuary: 'Nave',
+    hall: 'Parish Hall', study: 'Adult Formation', formation: 'Christian Formation',
+    clergy: 'The Rev. James Wright', clergyRole: 'Rector',
+    giving: 'pledge', secondGiving: 'special offering',
+    roles: ['Choir Member', 'Sidesperson', 'Parochial Church Council', 'Youth Leader',
+            'Sunday School Teacher', 'Deacon', 'Lay Reader', 'Hospitality',
+            'Parishioner', 'Tech / AV', 'Altar Guild', 'Parishioner'],
+  },
+  lutheran: {
+    service: 'Sunday Worship', worship: 'Worship', sanctuary: 'Sanctuary',
+    hall: 'Fellowship Hall', study: 'Bible Study', formation: 'Faith Formation',
+    clergy: 'Pastor James Wright', clergyRole: 'Pastor',
+    giving: 'offering', secondGiving: 'special offering',
+    roles: ['Choir Member', 'Usher', 'Congregation Council', 'Youth Leader',
+            'Sunday School Teacher', 'Deacon', 'Worship Assistant', 'Hospitality',
+            'Member', 'Tech / AV', 'Altar Guild', 'Member'],
+  },
+  general: {
+    service: 'Sunday Service', worship: 'Worship', sanctuary: 'Sanctuary',
+    hall: 'Fellowship Hall', study: 'Bible Study', formation: 'Formation',
+    clergy: 'Pastor James Wright', clergyRole: 'Pastor',
+    giving: 'offering', secondGiving: 'special offering',
+    roles: ['Choir Member', 'Usher', 'Finance Committee', 'Youth Leader',
+            'Sunday School Teacher', 'Deacon', 'Worship Leader', 'Hospitality',
+            'Member', 'Tech / AV', 'Prayer Team', 'Member'],
+  },
+}
+
+export function seedVocab(tradition) {
+  return SEED_VOCAB[tradition] ?? SEED_VOCAB.general
+}
 
 function daysFromNow(n) {
   const d = new Date()
@@ -38,79 +102,79 @@ function birthYearOffsetFrom(mdRef, yearsAgo) {
   return d.toISOString().slice(0, 10)
 }
 
-function buildSampleMembers() {
+function buildSampleMembers(v) {
   const upcoming1 = daysFromNow(2)   // birthday in 2 days — demos birthday job
   const upcoming2 = daysFromNow(5)   // birthday in 5 days
   return [
     {
       name: '[Sample] Maria Garcia', email: 'maria.sample@example.com',
-      phone: '(555) 010-2031', role: 'Choir Member', tags: 'music,volunteer',
+      phone: '(555) 010-2031', role: v.roles[0], tags: 'music,volunteer',
       birth_date: birthYearOffsetFrom(upcoming1, 47),
       joined_date: '2018-09-15',
     },
     {
       name: '[Sample] John Rivera', email: 'john.sample@example.com',
-      phone: '(555) 010-2032', role: 'Usher', tags: 'sunday-service,greeter',
+      phone: '(555) 010-2032', role: v.roles[1], tags: 'sunday-service,greeter',
       birth_date: '1972-04-12',
       joined_date: '2014-03-22',
     },
     {
       name: '[Sample] Sarah Chen', email: 'sarah.sample@example.com',
-      phone: '(555) 010-2033', role: 'Finance Committee', tags: 'leadership,volunteer',
+      phone: '(555) 010-2033', role: v.roles[2], tags: 'leadership,volunteer',
       birth_date: '1985-11-03',
       joined_date: '2019-01-08',
     },
     {
       name: '[Sample] David Okafor', email: 'david.sample@example.com',
-      phone: '(555) 010-2034', role: 'Youth Leader', tags: 'youth,leadership',
+      phone: '(555) 010-2034', role: v.roles[3], tags: 'youth,leadership',
       birth_date: birthYearOffsetFrom(upcoming2, 35),
       joined_date: '2021-08-30',
     },
     {
       name: '[Sample] Priya Patel', email: 'priya.sample@example.com',
-      phone: '(555) 010-2035', role: 'Sunday School Teacher', tags: 'children,formation',
+      phone: '(555) 010-2035', role: v.roles[4], tags: 'children,formation',
       birth_date: '1990-02-19',
       joined_date: '2017-05-14',
     },
     {
       name: '[Sample] Michael O’Connor', email: 'michael.sample@example.com',
-      phone: '(555) 010-2036', role: 'Deacon', tags: 'leadership,sunday-service',
+      phone: '(555) 010-2036', role: v.roles[5], tags: 'leadership,sunday-service',
       birth_date: '1965-06-27',
       joined_date: '2008-10-05',
     },
     {
       name: '[Sample] Aaliyah Jackson', email: 'aaliyah.sample@example.com',
-      phone: '(555) 010-2037', role: 'Worship Leader', tags: 'music,leadership',
+      phone: '(555) 010-2037', role: v.roles[6], tags: 'music,leadership',
       birth_date: '1992-09-14',
       joined_date: '2020-02-23',
     },
     {
       name: '[Sample] Tomas Nguyen', email: 'tomas.sample@example.com',
-      phone: '(555) 010-2038', role: 'Hospitality', tags: 'volunteer,greeter',
+      phone: '(555) 010-2038', role: v.roles[7], tags: 'volunteer,greeter',
       birth_date: '1978-12-08',
       joined_date: '2015-11-10',
     },
     {
       name: '[Sample] Rachel Goldberg', email: 'rachel.sample@example.com',
-      phone: '(555) 010-2039', role: 'Member', tags: 'newcomer',
+      phone: '(555) 010-2039', role: v.roles[8], tags: 'newcomer',
       birth_date: '1995-07-22',
       joined_date: daysFromNow(-90),                // joined recently
     },
     {
       name: '[Sample] Daniel Martinez', email: 'daniel.sample@example.com',
-      phone: '(555) 010-2040', role: 'Tech / AV', tags: 'sunday-service,volunteer',
+      phone: '(555) 010-2040', role: v.roles[9], tags: 'sunday-service,volunteer',
       birth_date: '1988-03-15',
       joined_date: '2016-04-19',
     },
     {
       name: '[Sample] Eleanor Smith', email: 'eleanor.sample@example.com',
-      phone: '(555) 010-2041', role: 'Prayer Team', tags: 'volunteer',
+      phone: '(555) 010-2041', role: v.roles[10], tags: 'volunteer',
       birth_date: '1948-08-04',
       joined_date: '2002-09-08',                    // long-tenure
     },
     {
       name: '[Sample] Hassan Ahmed', email: 'hassan.sample@example.com',
-      phone: '(555) 010-2042', role: 'Member', tags: 'newcomer',
+      phone: '(555) 010-2042', role: v.roles[11], tags: 'newcomer',
       birth_date: '2001-10-30',
       joined_date: daysFromNow(-30),                // very new
     },
@@ -119,13 +183,13 @@ function buildSampleMembers() {
 
 // ── Tasks ────────────────────────────────────────────────────
 
-const SAMPLE_TASKS = [
+function buildSampleTasks(v) { return [
   { slug: 'bulletins',  title: '[Sample] Prepare Sunday bulletins',       category: 'SERVICE_PREP', priority: 'MEDIUM', description: 'Print the week’s bulletins and fold them before Saturday night.' },
-  { slug: 'cleaning',   title: '[Sample] Clean sanctuary before service', category: 'CLEANING',     priority: 'HIGH',   description: 'Vacuum, wipe pews, restock tissue boxes at entrances.' },
+  { slug: 'cleaning',   title: `[Sample] Clean the ${v.sanctuary.toLowerCase()} before ${v.service}`, category: 'CLEANING', priority: 'HIGH', description: 'Vacuum, wipe pews, restock tissue boxes at entrances.' },
   { slug: 'av-check',   title: '[Sample] Check projector + sound system', category: 'MAINTENANCE',  priority: 'LOW',    description: 'Verify mics, projector, and live-stream feed an hour before service.' },
   { slug: 'snacks',     title: '[Sample] Pick up coffee + snacks',        category: 'SERVICE_PREP', priority: 'MEDIUM', description: 'Coffee, tea, light snacks for hospitality table after service.' },
   { slug: 'newsletter', title: '[Sample] Send weekly newsletter',         category: 'COMMUNICATIONS', priority: 'HIGH', description: 'Compose, schedule, and send the weekly email to all members.' },
-]
+] }
 
 // ── Events (ochr_events) ─────────────────────────────────────
 //
@@ -142,12 +206,12 @@ function nextDowStr(dow) {
   return d.toISOString().slice(0, 10)
 }
 
-function buildSampleEvents() {
+function buildSampleEvents(v) {
   return [
-    { title: '[Sample] Sunday Service',        service_division: 'Worship',   date: nextDowStr(0),     time: '10:00', location: 'Main Sanctuary' },
-    { title: '[Sample] Wednesday Bible Study', service_division: 'Formation', date: nextDowStr(3),     time: '19:00', location: 'Fellowship Hall' },
-    { title: '[Sample] Parish Potluck',        service_division: 'Community', date: nextDowStr(6),     time: '17:30', location: 'Parish Hall' },
-    { title: '[Sample] Volunteer Training',    service_division: 'Formation', date: daysFromNow(14),   time: '14:00', location: 'Fellowship Hall' },
+    { title: `[Sample] ${v.service}`,               service_division: v.worship,   date: nextDowStr(0),   time: '10:00', location: `Main ${v.sanctuary}` },
+    { title: `[Sample] Wednesday ${v.study}`,       service_division: v.formation, date: nextDowStr(3),   time: '19:00', location: v.hall },
+    { title: '[Sample] Potluck Supper',             service_division: 'Community', date: nextDowStr(6),   time: '17:30', location: v.hall },
+    { title: '[Sample] Volunteer Training',         service_division: v.formation, date: daysFromNow(14), time: '14:00', location: v.hall },
   ]
 }
 
@@ -181,33 +245,33 @@ function buildRecurringSundayDates(weekCount = 8) {
 // fresh signups. Cash-only walk-in style donors stay anonymous (no
 // email/address) so the preview list shows both branches —
 // 'grouped-by-email' and 'grouped-by-name' donors side by side.
-function buildSampleDonations() {
+function buildSampleDonations(v) {
   return [
-    { donor_name: 'Maria Garcia',    amount: 150,  category: 'tithe',           method: 'cash',  daysAgo: 2,  notes: '[Sample] Sunday offering' },
-    { donor_name: 'John Rivera',     amount: 75,   category: 'tithe',           method: 'cash',  daysAgo: 2,  notes: '[Sample] Sunday offering' },
-    { donor_name: 'Sarah Chen',      amount: 500,  category: 'tithe',           method: 'check', daysAgo: 9,  notes: '[Sample] Monthly tithe',
+    { donor_name: 'Maria Garcia',    amount: 150,  category: v.giving,           method: 'cash',  daysAgo: 2,  notes: `[Sample] ${v.service} offering` },
+    { donor_name: 'John Rivera',     amount: 75,   category: v.giving,           method: 'cash',  daysAgo: 2,  notes: `[Sample] ${v.service} offering` },
+    { donor_name: 'Sarah Chen',      amount: 500,  category: v.giving,           method: 'check', daysAgo: 9,  notes: '[Sample] Monthly',
       donor_email: 'sarah.chen@example.org', donor_address: '142 Olive St, Austin TX 78701' },
-    { donor_name: 'David Okafor',    amount: 50,   category: 'special offering', method: 'cash', daysAgo: 9,  notes: '[Sample] Building fund' },
-    { donor_name: 'Priya Patel',     amount: 200,  category: 'tithe',           method: 'check', daysAgo: 16, notes: '[Sample] Bi-weekly',
+    { donor_name: 'David Okafor',    amount: 50,   category: v.secondGiving, method: 'cash', daysAgo: 9,  notes: '[Sample] Building fund' },
+    { donor_name: 'Priya Patel',     amount: 200,  category: v.giving,           method: 'check', daysAgo: 16, notes: '[Sample] Bi-weekly',
       donor_email: 'priya.patel@example.org', donor_address: '88 Riverbend Dr, Austin TX 78703' },
-    { donor_name: 'Michael O’Connor', amount: 1000, category: 'special offering', method: 'check', daysAgo: 16, notes: '[Sample] Year-end gift',
+    { donor_name: 'Michael O’Connor', amount: 1000, category: v.secondGiving, method: 'check', daysAgo: 16, notes: '[Sample] Year-end gift',
       donor_email: 'michael.oconnor@example.org', donor_address: '4 Cedarbrook Ln, Austin TX 78759' },
-    { donor_name: 'Aaliyah Jackson', amount: 60,   category: 'tithe',           method: 'cash',  daysAgo: 23, notes: '[Sample] Sunday offering' },
-    { donor_name: 'Tomas Nguyen',    amount: 125,  category: 'tithe',           method: 'check', daysAgo: 30, notes: '[Sample] Monthly',
+    { donor_name: 'Aaliyah Jackson', amount: 60,   category: v.giving,           method: 'cash',  daysAgo: 23, notes: `[Sample] ${v.service} offering` },
+    { donor_name: 'Tomas Nguyen',    amount: 125,  category: v.giving,           method: 'check', daysAgo: 30, notes: '[Sample] Monthly',
       donor_email: 'tomas.nguyen@example.org', donor_address: '21 Maple Ct, Austin TX 78704' },
     // A second gift from Sarah Chen so the per-donor breakdown
     // shows multiple line items for at least one donor.
-    { donor_name: 'Sarah Chen',      amount: 250,  category: 'tithe',           method: 'check', daysAgo: 40, notes: '[Sample] Monthly tithe',
+    { donor_name: 'Sarah Chen',      amount: 250,  category: v.giving,           method: 'check', daysAgo: 40, notes: '[Sample] Monthly',
       donor_email: 'sarah.chen@example.org', donor_address: '142 Olive St, Austin TX 78701' },
   ]
 }
 
 // ── Payroll staff ────────────────────────────────────────────
 
-const SAMPLE_STAFF = [
-  { name: '[Sample] Pastor James Wright', role: 'Pastor',          pay_rate: 0,    status: 'active' },
-  { name: '[Sample] Linda Park',          role: 'Office Manager',  pay_rate: 22.5, status: 'active' },
-]
+function buildSampleStaff(v) { return [
+  { name: `[Sample] ${v.clergy}`, role: v.clergyRole,     pay_rate: 0,    status: 'active' },
+  { name: '[Sample] Linda Park',  role: 'Office Manager',  pay_rate: 22.5, status: 'active' },
+] }
 
 // ─────────────────────────────────────────────────────────────
 // Seeds sample members, events, schedule entries, donations,
@@ -238,7 +302,8 @@ const SAMPLE_STAFF = [
 // marker is set BEFORE the rows are written — a seed that crashes
 // half-way leaves the org marked, which is the safe direction to fail
 // (a partial sample set is cosmetic; a resurrected one is data loss).
-export async function seedSampleData(db, organizationId) {
+export async function seedSampleData(db, organizationId, tradition = 'general') {
+  const v = seedVocab(tradition)
   const { rows: claimed } = await db.query(
     `UPDATE ochr_organizations
         SET samples_seeded_at = NOW()
@@ -251,7 +316,7 @@ export async function seedSampleData(db, organizationId) {
   // Members — keep insertion order so we can grab the first three
   // ids for the assignment list below.
   const memberIds = []
-  for (const m of buildSampleMembers()) {
+  for (const m of buildSampleMembers(v)) {
     const { rows } = await db.query(
       `INSERT INTO ochr_clients (organization_id, name, email, phone, role, tags, birth_date, joined_date)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
@@ -263,7 +328,7 @@ export async function seedSampleData(db, organizationId) {
   // Events page entries (ochr_events) + roster assignments on the
   // Sunday service so the personal calendar feed has content for
   // those members.
-  const events = buildSampleEvents()
+  const events = buildSampleEvents(v)
   for (const e of events) {
     const { rows } = await db.query(
       `INSERT INTO ochr_events (organization_id, title, service_division, date, time, location)
@@ -292,9 +357,9 @@ export async function seedSampleData(db, organizationId) {
   const { rows: seedRow } = await db.query(
     `INSERT INTO ochr_calendar_events
        (organization_id, title, date, start_time, end_time, type, assigned_to)
-     VALUES ($1, '[Sample] Sunday Service', $2, '10:00', '11:00', 'service', $3::jsonb)
+     VALUES ($1, $4, $2, '10:00', '11:00', 'service', $3::jsonb)
      RETURNING id`,
-    [organizationId, sundays[0], seedAssignees]
+    [organizationId, sundays[0], seedAssignees, `[Sample] ${v.service}`]
   )
   const seedId = seedRow[0].id
   await db.query(
@@ -305,15 +370,16 @@ export async function seedSampleData(db, organizationId) {
     await db.query(
       `INSERT INTO ochr_calendar_events
          (organization_id, title, date, start_time, end_time, type, assigned_to, recurrence_parent_id)
-       VALUES ($1, '[Sample] Sunday Service', $2, '10:00', '11:00', 'service', $3::jsonb, $4)`,
-      [organizationId, sundays[i], seedAssignees, seedId]
+       VALUES ($1, $5, $2, '10:00', '11:00', 'service', $3::jsonb, $4)`,
+      [organizationId, sundays[i], seedAssignees, seedId, `[Sample] ${v.service}`]
     )
   }
 
   // Donations spread across the last 40 days. donor_email +
   // donor_address are optional — populated for named-check donors so
   // the year-end statement aggregation has data to group by email.
-  for (const d of buildSampleDonations()) {
+  const sampleDonations = buildSampleDonations(v)
+  for (const d of sampleDonations) {
     await db.query(
       `INSERT INTO ochr_donations (organization_id, donor_name, donor_email, donor_address, amount, category, method, date, notes)
        VALUES ($1, $2, $3, $4, $5, $6, $7, NOW() - ($8 || ' days')::interval, $9)`,
@@ -324,7 +390,8 @@ export async function seedSampleData(db, organizationId) {
 
   // Payroll staff. No shifts seeded — admin can log shifts to demo
   // the flow themselves.
-  for (const s of SAMPLE_STAFF) {
+  const sampleStaff = buildSampleStaff(v)
+  for (const s of sampleStaff) {
     await db.query(
       `INSERT INTO ochr_payroll_staff (organization_id, name, role, pay_rate, status)
        VALUES ($1, $2, $3, $4, $5)`,
@@ -334,7 +401,8 @@ export async function seedSampleData(db, organizationId) {
 
   // Tasks last — the existence check at the top keys off this table,
   // so seeding it concludes the idempotency contract.
-  for (const t of SAMPLE_TASKS) {
+  const sampleTasks = buildSampleTasks(v)
+  for (const t of sampleTasks) {
     const id = `sample-${organizationId}-${t.slug}`
     await db.query(
       `INSERT INTO ochr_tasks (organization_id, id, title, description, category, priority, status, checklist)
@@ -347,8 +415,8 @@ export async function seedSampleData(db, organizationId) {
     members:           memberIds.length,
     events:            events.length,
     schedule_entries:  sundays.length,
-    donations:         buildSampleDonations().length,
-    staff:             SAMPLE_STAFF.length,
-    tasks:             SAMPLE_TASKS.length,
+    donations:         sampleDonations.length,
+    staff:             sampleStaff.length,
+    tasks:             sampleTasks.length,
   }
 }

@@ -1,8 +1,24 @@
-// Distress flags (DIO.4) — simple, explainable rules over approved
-// submissions. No ML, no scores: each flag names its rule and shows the
-// numbers behind it, because a chancery acting on a flag needs to be able
-// to say WHY out loud. Thresholds live here in one place so a later
-// per-diocese settings surface has a single seam to attach to.
+// Financial observations (DIO.4, re-worded for CARE.1) — simple,
+// explainable rules over approved submissions. No ML, no scores: each
+// observation names its rule and shows the numbers behind it, because a
+// chancery acting on one needs to be able to say WHY out loud. Thresholds
+// live here in one place so a later per-diocese settings surface has a
+// single seam to attach to.
+//
+// THIS FILE USED TO BE CALLED distress.js AND SPOKE A DIFFERENT LANGUAGE.
+//
+// The mechanism was always compliant with the Parish Care doctrine —
+// explainable, computed at read time, never stored as a verdict on a
+// parish's record. The words were not: `computeDistress`, `stale_submission`,
+// `deficit_streak`, and a route called /health. Two vocabularies for one
+// product is how a "quiet view of where a parish may need attention"
+// quietly becomes a health score, so there is now one.
+//
+// An observation is a NOTICING, not a conclusion. "Revenue is lower than
+// the previous period" is a fact about two numbers. Whether that means a
+// parish is struggling, or sold a building, or corrected an error, is a
+// question for a person — which is why every observation carries its
+// numbers and none carries a judgement.
 
 import pool from '../db.js'
 
@@ -16,8 +32,8 @@ export const THRESHOLDS = {
 }
 
 // → [{ parish_org_id, parish_name, flags: [{ code, detail }] }]
-// Only parishes with at least one flag are returned.
-export async function computeDistress(dioceseOrgId) {
+// Only parishes with at least one observation are returned.
+export async function financialObservations(dioceseOrgId) {
   const { rows } = await pool.query(
     `SELECT s.organization_id, p.name AS parish_name,
             to_char(s.period_end, 'YYYY-MM-DD') AS period_end,
@@ -50,7 +66,7 @@ export async function computeDistress(dioceseOrgId) {
     // 1 — stale: nothing approved recently.
     const ageDays = Math.floor((now - Date.parse(latest.period_end)) / 86400000)
     if (ageDays > THRESHOLDS.staleDays) {
-      flags.push({ code: 'stale_submission', detail: `Latest approved period ended ${latest.period_end} (${ageDays} days ago)` })
+      flags.push({ code: 'quiet_period', detail: `The most recent approved period ended ${latest.period_end}, about ${ageDays} days ago.` })
     }
 
     // 2 — revenue decline vs the prior period.
@@ -60,7 +76,7 @@ export async function computeDistress(dioceseOrgId) {
       const curRev = Number(latest.revenue) || 0
       if (prevRev > 0 && curRev < prevRev * THRESHOLDS.declineRatio) {
         const pct = Math.round((1 - curRev / prevRev) * 100)
-        flags.push({ code: 'revenue_decline', detail: `Revenue down ${pct}% (${prev.period_end}: ${prevRev.toFixed(2)} → ${latest.period_end}: ${curRev.toFixed(2)})` })
+        flags.push({ code: 'revenue_lower', detail: `Revenue is ${pct}% lower than the previous period (${prev.period_end}: ${prevRev.toFixed(2)} → ${latest.period_end}: ${curRev.toFixed(2)}).` })
       }
     }
 
@@ -68,7 +84,7 @@ export async function computeDistress(dioceseOrgId) {
     if (periods.length >= THRESHOLDS.deficitStreak) {
       const recent = periods.slice(-THRESHOLDS.deficitStreak)
       if (recent.every(p => Number(p.net) < 0)) {
-        flags.push({ code: 'deficit_streak', detail: `${THRESHOLDS.deficitStreak} consecutive periods in deficit (latest net ${Number(latest.net).toFixed(2)})` })
+        flags.push({ code: 'spending_exceeds_income', detail: `Spending has exceeded income for ${THRESHOLDS.deficitStreak} periods running (latest net ${Number(latest.net).toFixed(2)}).` })
       }
     }
 

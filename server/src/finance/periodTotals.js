@@ -5,14 +5,8 @@
 // can never be computed two different ways.
 
 import pool from '../db.js'
+import { EFFECTIVE_COA } from './effectiveCoa.js'
 
-const EFFECTIVE_COA = `
-  SELECT DISTINCT ON (code)
-         code, name, acct_type, rollup_group, assessable, sort_order, active
-    FROM ochr_coa_accounts
-   WHERE organization_id IS NULL OR organization_id = $1
-   ORDER BY code, organization_id NULLS LAST
-`
 
 // → { groups, accounts, totals } — all amounts as fixed-2 strings.
 export async function computePeriodTotals(orgId, start, end) {

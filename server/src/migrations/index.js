@@ -85,6 +85,10 @@ import { up as parishFeeSchedules } from './067-parish-fee-schedules.js'
 import { up as parishInvoices } from './068-parish-invoices.js'
 import { up as invoicePayments } from './069-invoice-payments.js'
 import { up as burialSacrament } from './070-burial-sacrament.js'
+import { up as tenantFkComposites } from './071-tenant-fk-composites.js'
+import { up as orgTradition } from './072-org-tradition.js'
+import { up as registerAmendments } from './073-register-amendments.js'
+import { up as parishCare } from './074-parish-care.js'
 
 // The ordered chain, each with a stable ledger name. baseMigrate runs
 // FIRST because it creates the core tables (organizations, users, and the
@@ -162,6 +166,10 @@ const MIGRATIONS = [
   ['068-parish-invoices',      parishInvoices],
   ['069-invoice-payments',     invoicePayments],
   ['070-burial-sacrament',     burialSacrament],
+  ['071-tenant-fk-composites', tenantFkComposites],
+  ['072-org-tradition',        orgTradition],
+  ['073-register-amendments',  registerAmendments],
+  ['074-parish-care',          parishCare],
 ]
 
 // Fixed key for the session advisory lock. Any constant works as long as
@@ -271,11 +279,14 @@ export async function runAllMigrations() {
     // the header of onboarding/sampleSeed.js.
     try {
       const { rows } = await client.query(
-        'SELECT id FROM ochr_organizations WHERE slug = $1',
+        'SELECT id, tradition FROM ochr_organizations WHERE slug = $1',
         [DEMO_ORG_SLUG],
       )
       if (rows.length > 0) {
-        await seedSampleData(pool, rows[0].id)
+        // TRAD.2 — the demo org is stamped 'episcopal' by migration 072,
+        // so its sample data speaks Episcopal too rather than seeding
+        // Fellowship Hall into a parish whose fixture says Vestry.
+        await seedSampleData(pool, rows[0].id, rows[0].tradition)
       }
     } catch (seedErr) {
       console.error('demo-org sample seed failed (migration continuing):', seedErr)

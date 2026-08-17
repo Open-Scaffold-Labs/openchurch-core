@@ -46,6 +46,23 @@ const RULES = [
     allowed: [
       // Liturgical hues are canonical, not decoration.
       'client/src/utils/liturgicalColors.js',
+      // CARE.1's exception for client-diocese/src/pages/ParishCare.jsx was
+      // REMOVED on 2026-08-17, and the way it was removed is the point.
+      //
+      // The conflict was real: the Pastoral Oversight handoff specifies a
+      // muted green for "Ready", and Parchment & Brass carried no green, so
+      // the tone was raw Tailwind emerald behind this allowlist. The two
+      // obvious resolutions were both bad — keep the exception (a permanent
+      // hole in the palette rule) or desaturate Ready to ink (which makes
+      // "Ready" and "Awaiting update" read as the same weight, the one
+      // distinction a diocesan staff member scans for).
+      //
+      // Resolved instead by making the tone legitimate: `sage` is now a real
+      // scale in both tailwind configs, warm and olive-leaning so it sits
+      // with brass rather than reading as a UI-kit green. The directive is
+      // honoured, the palette holds, and this rule needs no carve-out.
+      // sage-800 on sage-50 measures 9.8:1, and sage-600 stays clearly
+      // distinct from ink-400 by luminance.
     ],
   },
   {

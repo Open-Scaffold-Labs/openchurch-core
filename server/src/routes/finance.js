@@ -8,6 +8,7 @@
 //   POST /api/finance/ledger            → manual entry
 //   POST /api/finance/ledger/import     → trial-balance CSV import
 //   GET  /api/finance/summary?start&end → totals by rollup group + assessable base
+//   GET  /api/finance/diocese           → this parish's view of its diocese
 //
 // The "effective" chart of accounts is the standard template
 // (organization_id NULL) with this org's same-code rows shadowing it —
@@ -25,22 +26,13 @@ import { parsePagination } from '../utils/params.js'
 import { parseCSVToObjects } from '../utils/csv.js'
 import { monitor } from '../monitoring/index.js'
 import { computePeriodTotals } from '../finance/periodTotals.js'
+import { EFFECTIVE_COA } from '../finance/effectiveCoa.js'
 
 const router = Router()
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/
 const CODE_RE  = /^\d{4}$/
 
-// The effective CoA for an org: org shadow rows win over template rows
-// of the same code. DISTINCT ON keeps exactly one row per code.
-const EFFECTIVE_COA = `
-  SELECT DISTINCT ON (code)
-         code, name, acct_type, rollup_group, assessable, sort_order, active,
-         (organization_id IS NOT NULL) AS customized
-    FROM ochr_coa_accounts
-   WHERE organization_id IS NULL OR organization_id = $1
-   ORDER BY code, organization_id NULLS LAST
-`
 
 async function effectiveCodes(orgId) {
   const { rows } = await pool.query(
@@ -352,6 +344,85 @@ router.post('/submissions', async (req, res) => {
   } catch (err) {
     monitor.error('finance.submissions.create', err, { orgId: req.organizationId })
     res.status(500).json({ error: 'Failed to submit the period' })
+  }
+})
+
+// GET /api/finance/diocese — what the parish can see of its own diocese
+// (DIO.5). The return path. Everything above this line flows UP; a parish
+// had no way to see what came back down: not its assessment, not what the
+// chancery was still waiting for, not why a submission was returned.
+//
+// Read-only, and deliberately narrow:
+//   · Only a PUBLISHED (or closed) assessment is visible. A chancery
+//     drafting next year's rate is not making a promise to anyone, and a
+//     parish seeing a draft rate would treat it as one.
+//   · Only this parish's own assessment line. Never another parish's, and
+//     never the diocese-wide totals.
+//   · An unaffiliated parish gets {affiliated: false} and nothing else,
+//     rather than a 404 — the panel should render "no diocese", not break.
+router.get('/diocese', async (req, res) => {
+  const orgId = req.organizationId
+  try {
+    const { rows: aff } = await pool.query(
+      `SELECT a.diocese_org_id, a.status, a.grant_level, a.accepted_at, o.name AS diocese_name
+         FROM ochr_diocese_affiliations a
+         JOIN ochr_organizations o ON o.id = a.diocese_org_id
+        WHERE a.parish_org_id = $1 AND a.status = 'active'
+        LIMIT 1`,
+      [orgId]
+    )
+    if (!aff.length) return res.json({ affiliated: false })
+    const dioceseId = aff[0].diocese_org_id
+
+    const [assessment, submissions, returned] = await Promise.all([
+      pool.query(
+        `SELECT s.fiscal_year, s.basis, s.notes AS diocese_note, s.status AS assessment_status,
+                l.base, l.rate_bps, l.assessed, l.paid, l.status, l.note
+           FROM ochr_assessment_lines l
+           JOIN ochr_assessments s ON s.id = l.assessment_id
+          WHERE l.parish_org_id = $1
+            AND s.diocese_org_id = $2
+            AND s.status IN ('published', 'closed')
+          ORDER BY s.fiscal_year DESC
+          LIMIT 1`,
+        [orgId, dioceseId]
+      ),
+      pool.query(
+        `SELECT status, count(*)::int AS n
+           FROM ochr_report_submissions
+          WHERE organization_id = $1 AND diocese_org_id = $2
+          GROUP BY status`,
+        [orgId, dioceseId]
+      ),
+      pool.query(
+        `SELECT period_start, period_end, review_note, reviewed_at
+           FROM ochr_report_submissions
+          WHERE organization_id = $1 AND diocese_org_id = $2 AND status = 'returned'
+          ORDER BY reviewed_at DESC NULLS LAST
+          LIMIT 1`,
+        [orgId, dioceseId]
+      ),
+    ])
+
+    const counts = { submitted: 0, approved: 0, returned: 0 }
+    for (const r of submissions.rows) counts[r.status] = r.n
+
+    res.json({
+      affiliated: true,
+      diocese: {
+        name: aff[0].diocese_name,
+        grant_level: aff[0].grant_level,
+        since: aff[0].accepted_at,
+      },
+      // What the chancery is still waiting on is the actionable number
+      // here, so it is named rather than left to be derived.
+      submissions: { ...counts, awaiting_review: counts.submitted },
+      assessment: assessment.rows[0] ?? null,
+      last_returned: returned.rows[0] ?? null,
+    })
+  } catch (err) {
+    monitor.error('finance.diocese', err, { orgId })
+    res.status(500).json({ error: 'Failed to load diocese summary' })
   }
 })
 

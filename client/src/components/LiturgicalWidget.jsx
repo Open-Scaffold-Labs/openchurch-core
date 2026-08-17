@@ -30,7 +30,7 @@ function formatDateLong(isoYmd, dateLocale) {
 
 export default function LiturgicalWidget() {
   const { data, today, error } = useLiturgicalToday()
-  const { t, dateLocale } = useLocale()
+  const { t, dateLocale, tradition } = useLocale()
 
   if (error || !data) return null
 
@@ -59,7 +59,7 @@ export default function LiturgicalWidget() {
         />
         <div className="min-w-0">
           <h3 className="font-display text-xl font-semibold text-ink-900 dark:text-parchment-50 leading-tight">
-            {seasonLabel(t, data.season)}
+            {seasonLabel(t, data.season, { tradition, block: data.ordinary_block })}
           </h3>
           {data.feast_name && (
             <p className="text-sm text-church-800 dark:text-brass-200 italic mt-0.5">

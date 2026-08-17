@@ -69,6 +69,34 @@ jobs:
         # via the new migration ledger; the suite then runs against it.
         run: npm test
 
+      # Tenant-FK ratchet (F2). Migration 071 closed the last 44 single-column
+      # cross-tenant references, so this now GATES rather than reports: a new
+      # FK that points at an org-scoped parent without carrying
+      # organization_id fails the build on the commit that introduces it.
+      #
+      # Runs AFTER the smoke tests on purpose — they leave the fully migrated
+      # schema behind in the service container, and this reads only
+      # pg_constraint/pg_class, so the rows the suite deleted are irrelevant.
+      # That makes this free: no second database, no second migration run.
+      #
+      # The script lives at the repo ROOT (it is meant to be pointed at any
+      # environment) and imports `pg`. Node resolves a bare specifier from the
+      # IMPORTING FILE's directory upward — so /scripts/*.mjs looks in
+      # /node_modules, never server/node_modules, which is the only install
+      # this job does. Hence a root install.
+      #
+      # `npm install pg --no-save` was the obvious cheaper move and does NOT
+      # work: npm reifies the whole declared tree regardless of the named
+      # package, so it installs all of root package.json anyway. Since root
+      # deliberately mirrors server's runtime deps (the Vercel lambda needs
+      # them there), this is roughly a second copy of the install above —
+      # ~20s, the price of the gate.
+      - name: Install root dependencies (for the audit script)
+        run: npm install --no-audit --no-fund
+
+      - name: Tenant-FK audit (composite cross-tenant FKs)
+        run: node scripts/tenant-fk-audit.mjs
+
   client-build:
     name: Client build
     runs-on: ubuntu-latest

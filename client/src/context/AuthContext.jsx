@@ -57,6 +57,20 @@ export function AuthProvider({ children }) {
     setUser(nextUser ?? null)
   }, [])
 
+  // Swap the session token without changing who is signed in.
+  //
+  // The server re-issues a token for the SAME user in exactly one case:
+  // changing your own password. That bumps token_version to kill every
+  // session signed in with the old password — including this device's,
+  // which would otherwise sign the user out mid-action for doing the
+  // right thing. Narrower than setSession on purpose: it cannot change
+  // the user, only the credential carrying them.
+  const replaceToken = useCallback((nextToken) => {
+    if (!nextToken) return
+    localStorage.setItem('ochr_token', nextToken)
+    setToken(nextToken)
+  }, [])
+
   // Merge a partial patch into the in-memory user — used when a
   // self-serve edit (e.g. uploading a profile picture) changes the
   // account without re-issuing the session. No-ops if logged out.
@@ -160,6 +174,7 @@ export function AuthProvider({ children }) {
     signup,
     logout,
     updateUser,
+    replaceToken,
   }
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

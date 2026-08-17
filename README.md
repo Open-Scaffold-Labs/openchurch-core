@@ -162,7 +162,7 @@ OpenChurch deploys as a Vercel monorepo:
 - Root `vercel.json` builds the client to `client/dist` and routes `/api/*` into `api/index.js`.
 - Set the env vars listed in [Operational](#operational) below in the Vercel project.
 - Automatic deploys from `main` are disabled in `vercel.json`; production ships from a deploy pipeline configured outside this repository, and only after the smoke suite and both client builds pass.
-- Migrations are **not** run on cold-starts in production. After a deploy that includes schema changes, run `npm run migrate` locally against the prod DB, or trigger the migration step via GitHub Actions.
+- Migrations are **not** run on cold-starts in production. After a deploy that includes schema changes, run `npm run migrate` against the production database.
 
 ## Operational
 

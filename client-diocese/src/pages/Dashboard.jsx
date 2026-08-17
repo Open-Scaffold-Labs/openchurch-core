@@ -23,7 +23,7 @@ export default function Dashboard() {
     fetch(apiUrl('/api/diocese/parishes')).then(r => r.json()).then(d => setParishes(d.parishes ?? [])).catch(() => setParishes([]))
     fetch(apiUrl('/api/diocese/submissions?status=submitted')).then(r => r.json()).then(d => setQueue(d.submissions ?? [])).catch(() => setQueue([]))
     fetch(apiUrl(`/api/diocese/financials?start=${start}&end=${end}`)).then(r => r.json()).then(setRollup).catch(() => setRollup({}))
-    fetch(apiUrl('/api/diocese/health')).then(r => r.json()).then(d => setHealth(d.parishes ?? [])).catch(() => setHealth([]))
+    fetch(apiUrl('/api/diocese/observations')).then(r => r.json()).then(d => setHealth(d.parishes ?? [])).catch(() => setHealth([]))
   }, [])
 
   if (parishes === null || queue === null || rollup === null) {
@@ -56,10 +56,11 @@ export default function Dashboard() {
         ))}
       </div>
 
-      {/* Distress flags (DIO.4) — explainable rules, shown with their numbers. */}
+      {/* Financial observations (DIO.4) — explainable rules, shown with their
+          numbers. A noticing, not a verdict; the working view is Parish Care. */}
       {health && health.length > 0 && (
         <div className="bg-parchment-50 rounded-2xl border border-parchment-300/70 p-5 mb-8">
-          <p className="text-[11px] font-semibold uppercase tracking-widest text-brass-600 mb-3">Parishes needing attention</p>
+          <p className="text-[11px] font-semibold uppercase tracking-widest text-brass-600 mb-3">Worth a look together</p>
           <div className="space-y-3">
             {health.map(p => (
               <div key={p.parish_org_id} className="border-l-4 border-brass-400 pl-3">

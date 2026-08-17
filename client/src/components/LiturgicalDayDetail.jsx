@@ -41,7 +41,7 @@ const SEASON_KEYS = {
 
 export default function LiturgicalDayDetail() {
   const { data, error } = useLiturgicalToday()
-  const { t } = useLocale()
+  const { t, tradition } = useLocale()
 
   if (error || !data) return null
 
@@ -66,7 +66,7 @@ export default function LiturgicalDayDetail() {
 
       {/* Season + feast */}
       <h3 className="font-display text-2xl font-semibold text-ink-900 dark:text-parchment-50 leading-tight">
-        {seasonLabel(t, data.season)}
+        {seasonLabel(t, data.season, { tradition, block: data.ordinary_block })}
       </h3>
       {data.feast_name && (
         <p className="text-sm font-semibold text-church-800 dark:text-brass-200 mt-0.5">

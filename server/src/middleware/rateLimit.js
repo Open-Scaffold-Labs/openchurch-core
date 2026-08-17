@@ -121,3 +121,34 @@ export const forgotPasswordIpLimiter = rateLimit({
     error: 'Too many password-reset requests from this network. Please try again later.',
   },
 })
+
+// ── Change password (signed in) ─────────────────────────────────────
+// Per USER: 10 per 15 min, successful changes not counted.
+//
+// Keyed on the authenticated user id rather than an email or an IP,
+// because neither fits. This route carries no email in the body, so
+// emailKey would silently degrade every caller to the shared-IP bucket —
+// a limiter that looks like protection and is really just the parish
+// office NAT problem again, on a route where one person's typo would
+// throttle a colleague.
+//
+// The threat here is narrow: someone holding a stolen token guessing the
+// current password to take the account over permanently. They already
+// have access, so this does not gate entry — it gates escalation, which
+// is why 10 is generous enough that a real user retyping a forgotten
+// password never notices.
+//
+// MUST be mounted AFTER requireAuth so req.user exists. The IP fallback
+// is belt-and-braces for a mounting mistake, not an expected path.
+export const changePasswordLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: int('CHANGE_PW_MAX_PER_USER', 10),
+  keyGenerator: (req, res) =>
+    req.user?.id ? `user:${req.user.id}` : `ip:${ipKeyGenerator(req, res)}`,
+  skipSuccessfulRequests: true,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    error: 'Too many password-change attempts. Please wait a few minutes and try again.',
+  },
+})

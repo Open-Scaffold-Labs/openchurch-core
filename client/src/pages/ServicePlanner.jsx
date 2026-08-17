@@ -74,7 +74,7 @@ function printOrderOfWorship({ orgName, plan, lit, t, dateLocale }) {
   const w = window.open('', '_blank', 'width=800,height=1000')
   if (!w) return
   const accent = LIT_HEX[lit?.color] ?? '#7B2D26'
-  const litLine = lit?.feast_name || (lit?.season ? seasonLabel(t, lit.season) : '')
+  const litLine = lit?.feast_name || (lit?.season ? seasonLabel(t, lit.season, { tradition, block: lit.ordinary_block }) : '')
   const longDate = (() => {
     const [y, m, d] = plan.date.slice(0, 10).split('-').map(Number)
     return new Date(y, m - 1, d).toLocaleDateString(dateLocale, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })
@@ -126,7 +126,7 @@ function printOrderOfWorship({ orgName, plan, lit, t, dateLocale }) {
 
 // Add / edit element modal.
 function ElementModal({ element, members, onClose, onSave }) {
-  const { t } = useLocale()
+  const { t, tradition } = useLocale()
   const isEdit = !!element?.id
   const [form, setForm] = useState(() => ({
     kind: element?.kind ?? 'hymn',
@@ -203,7 +203,7 @@ export default function ServicePlanner() {
   const toast = useToast()
   const ask = useConfirm()
   const { canWrite } = useAuth()
-  const { t, dateLocale } = useLocale()
+  const { t, dateLocale, tradition } = useLocale()
 
   const [plans, setPlans]     = useState([])
   const [members, setMembers] = useState([])
@@ -342,7 +342,7 @@ export default function ServicePlanner() {
     }
   }
 
-  const litLabel = lit?.feast_name || (lit?.season ? seasonLabel(t, lit.season) : null)
+  const litLabel = lit?.feast_name || (lit?.season ? seasonLabel(t, lit.season, { tradition, block: lit.ordinary_block }) : null)
 
   if (loading) {
     return <PageWrapper><div className="flex items-center justify-center py-24"><Loader2 size={20} className="animate-spin text-church-700 dark:text-brass-300" /></div></PageWrapper>

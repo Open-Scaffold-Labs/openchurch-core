@@ -21,7 +21,8 @@ import { Router } from 'express'
 import pool from '../db.js'
 import { monitor } from '../monitoring/index.js'
 import { resolveLiturgicalContext } from './liturgical.js'
-import { resolveLectionary } from '../services/lectionary.js'
+import { lectionaryFor } from '../traditions/index.js'
+import { traditionFor } from '../traditions/context.js'
 
 const router = Router()
 
@@ -50,8 +51,14 @@ router.get('/', async (req, res) => {
       : await defaultPacketDate(orgId)
     if (!date) return res.status(400).json({ error: 'Could not resolve a packet date' })
 
-    const [org, liturgical, plan, serving, intentions, bulletin] = await Promise.all([
+    const [org, tradition, liturgical, plan, serving, intentions, bulletin] = await Promise.all([
       pool.query('SELECT name FROM ochr_organizations WHERE id = $1', [orgId]),
+
+      // TRAD.1 — which tradition's Sunday designation to print, if any.
+      // A 'general' org gets null and the client renders no lectionary
+      // line at all, which is the honest answer: printing another
+      // tradition's Sunday name is worse than printing none.
+      traditionFor(orgId),
 
       resolveLiturgicalContext(date, orgId),
 
@@ -122,7 +129,8 @@ router.get('/', async (req, res) => {
       date,
       parish: org.rows[0]?.name ?? null,
       liturgical,
-      lectionary: resolveLectionary(date),
+      lectionary: lectionaryFor(tradition, date),
+      tradition,
       plan: plan.rows[0] ?? null,
       serving: serving.rows,
       intentions: intentions.rows,

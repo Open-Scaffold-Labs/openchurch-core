@@ -49,7 +49,7 @@ operations it touches.
   room booking with conflict detection; volunteer assignments with self-serve shift swaps.
 - Check-in: attendance with child-safety security codes for pickup matching.
 - Register: the permanent sacramental register — baptisms through funerals, minister, place,
-  sequential certificate numbers, printable certificates. Paper registers are digitized via
+  certificate numbers, printable certificates. Paper registers are digitized via
   Drafts (/register/drafts): nothing enters the permanent record without explicit confirmation.
 - Intentions (/mass-intentions): the Mass intention book — requester, stipend, the Mass it is
   scheduled at, open → scheduled → fulfilled, and the printable weekly sacristy manifest.

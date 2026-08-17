@@ -24,6 +24,13 @@
 //     Library page depends on it. Forever.
 //   ochr_clients / ochr_events / etc → user data, never auto-pruned.
 //
+//   ochr_sacrament_amendments → NEVER pruned, deliberately. It is register
+//   history, not operational telemetry. The register itself is permanent,
+//   so a change history that expired after 30 days on Free would leave a
+//   corrected entry with no record of what it used to say — which is the
+//   defect migration 073 exists to close. If a retention pass is ever
+//   added for this table, that is a bug.
+//
 // Idempotent: running twice in the same minute is a no-op on the
 // second run. Returns counts so an operator (or cron run log) can
 // see what happened.

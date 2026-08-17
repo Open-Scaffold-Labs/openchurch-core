@@ -70,7 +70,7 @@ export function getLiturgicalInfo(dateStr) {
     return { season: 'Christmas', color: 'White', feast_name: 'Epiphany' }
   // Ordinary Time (post-Epiphany)
   if (d < fmt(ashWed))
-    return { season: 'Ordinary Time', color: 'Green', feast_name: null }
+    return { season: 'Ordinary Time', color: 'Green', feast_name: null, ordinary_block: 'after_epiphany' }
   // Ash Wednesday
   if (d === fmt(ashWed))
     return { season: 'Lent', color: 'Purple', feast_name: 'Ash Wednesday' }
@@ -106,10 +106,11 @@ export function getLiturgicalInfo(dateStr) {
     return { season: 'Pentecost', color: 'Red', feast_name: 'Pentecost' }
   // Ordinary Time (post-Pentecost)
   if (d < fmt(advent)) {
-    if (mm === 7 && dd === 15)  return { season: 'Ordinary Time', color: 'White',  feast_name: 'Assumption' }
-    if (mm === 10 && dd === 1)  return { season: 'Ordinary Time', color: 'White',  feast_name: 'All Saints' }
-    if (mm === 10 && dd === 2)  return { season: 'Ordinary Time', color: 'Purple', feast_name: 'All Souls' }
-    return { season: 'Ordinary Time', color: 'Green', feast_name: null }
+    const ob = 'after_pentecost'
+    if (mm === 7 && dd === 15)  return { season: 'Ordinary Time', color: 'White',  feast_name: 'Assumption', ordinary_block: ob }
+    if (mm === 10 && dd === 1)  return { season: 'Ordinary Time', color: 'White',  feast_name: 'All Saints', ordinary_block: ob }
+    if (mm === 10 && dd === 2)  return { season: 'Ordinary Time', color: 'Purple', feast_name: 'All Souls', ordinary_block: ob }
+    return { season: 'Ordinary Time', color: 'Green', feast_name: null, ordinary_block: ob }
   }
   // Advent
   if (d < fmt(christmas))
@@ -121,6 +122,14 @@ export function getLiturgicalInfo(dateStr) {
   }
 }
 
+// `ordinary_block` (TRAD.1) rides alongside the canonical season token:
+// 'after_epiphany' | 'after_pentecost' | null. Roman and Lutheran practice
+// call both blocks "Ordinary Time"; Episcopal and Anglican practice call
+// them "Season after the Epiphany" and "Season after Pentecost". The token
+// is the season's identity and is stored on calendar rows; the block is
+// what lets a tradition supply the right word for it without a data
+// migration.
+
 // Overlay a parish-specific feast (LIT.5) onto a resolved base context.
 // A parish feast names the day and may recolor it, but keeps the
 // computed/global SEASON — a patronal feast in July is still Ordinary
@@ -130,9 +139,10 @@ export function getLiturgicalInfo(dateStr) {
 function applyParishFeast(base, feast) {
   if (!feast) return base
   return {
-    season:     base.season,
-    color:      feast.liturgical_color || base.color,
-    feast_name: feast.feast_name,
+    season:         base.season,
+    color:          feast.liturgical_color || base.color,
+    feast_name:     feast.feast_name,
+    ordinary_block: base.ordinary_block ?? null,
   }
 }
 
@@ -145,7 +155,7 @@ function applyParishFeast(base, feast) {
 // layer that org's parish feasts; omit it for the universal calendar.
 export async function resolveLiturgicalContext(dateStr, orgId = null) {
   if (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
-    return { season: null, color: null, feast_name: null }
+    return { season: null, color: null, feast_name: null, ordinary_block: null }
   }
   let base = getLiturgicalInfo(dateStr)
   try {
@@ -153,7 +163,10 @@ export async function resolveLiturgicalContext(dateStr, orgId = null) {
       'SELECT season, liturgical_color AS color, feast_name FROM ochr_liturgical_calendar WHERE date = $1',
       [dateStr]
     )
-    if (rows.length) base = rows[0]
+    // A hand-seeded global override row has no ordinary_block; keep the
+    // computed one so an override that renames a day cannot also silently
+    // drop the block an Episcopal parish needs to name its season.
+    if (rows.length) base = { ...rows[0], ordinary_block: base.ordinary_block ?? null }
   } catch (err) {
     monitor.error('liturgical.override', err, { date: dateStr })
   }
@@ -168,7 +181,9 @@ export async function resolveLiturgicalContext(dateStr, orgId = null) {
       monitor.error('liturgical.parishFeast', err, { date: dateStr, orgId })
     }
   }
-  return base
+  // Normalised so a consumer never reads `undefined` off one branch and a
+  // value off another — seasons outside counted time simply have no block.
+  return { ...base, ordinary_block: base.ordinary_block ?? null }
 }
 
 // Batched override-aware lookup. One SELECT for the global overrides and

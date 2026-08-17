@@ -39,7 +39,7 @@ function fmtTime(t) {
 // nothing (a blank eyebrow beats the word "Other" on a formal sheet).
 
 export default function SundayPacket() {
-  const { t, dateLocale } = useLocale()
+  const { t, dateLocale, tradition } = useLocale()
   const [params, setParams] = useSearchParams()
   const dateParam = params.get('date') && /^\d{4}-\d{2}-\d{2}$/.test(params.get('date'))
     ? params.get('date') : null
@@ -77,7 +77,7 @@ export default function SundayPacket() {
 
   const seasonLine = packet && [
     packet.liturgical?.feast_name,
-    packet.liturgical?.season ? seasonLabel(t, packet.liturgical.season) : null,
+    packet.liturgical?.season ? seasonLabel(t, packet.liturgical.season, { tradition, block: packet.liturgical.ordinary_block }) : null,
     packet.liturgical?.color ? colorLabel(t, packet.liturgical.color) : null,
   ].filter(Boolean).join(' · ')
 

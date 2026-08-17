@@ -54,6 +54,28 @@ export default function SacramentCertificate() {
     )
   }
 
+  // REG.1 — a certificate is an extract from the register, so a void entry
+  // must never produce one. Refusing here rather than watermarking: a
+  // watermarked certificate still leaves the building, and the whole point
+  // of voiding is that this entry no longer speaks for the parish.
+  if (record.voided_at) {
+    return (
+      <div className="max-w-xl mx-auto py-16 text-center space-y-3">
+        <p className="font-display text-xl text-church-800 dark:text-brass-200">This entry is void</p>
+        <p className="text-sm text-ink-600 dark:text-parchment-300">
+          No certificate can be issued from a voided register entry. It remains in the
+          record, with the reason it was voided, on the register page.
+        </p>
+        {record.voided_reason && (
+          <p className="text-sm italic text-ink-500 dark:text-parchment-400">“{record.voided_reason}”</p>
+        )}
+        <Link to="/register" className="inline-block text-sm text-church-700 dark:text-brass-300 hover:underline">
+          ← Back to the register
+        </Link>
+      </div>
+    )
+  }
+
   const known  = CERT_TYPES.includes(record.type)
   const title  = known ? t(`cert.title.${record.type}`)  : 'Certificate'
   const phrase = known ? t(`cert.phrase.${record.type}`) : 'received this sacrament'

@@ -16,6 +16,7 @@ import { Router } from 'express'
 import pool from '../db.js'
 import { requireIntParam, parsePagination } from '../utils/params.js'
 import { monitor } from '../monitoring/index.js'
+import { requireRole } from '../middleware/auth.js'
 
 const router = Router()
 
@@ -95,6 +96,10 @@ async function parseMetaAttributes(input, orgId) {
 const REGISTER_COLS = [
   'id', 'client_id', 'type', 'minister', 'place',
   'certificate_no', 'notes', 'meta_attributes', 'created_at', 'updated_at',
+  // REG.1 — a voided entry is still returned wherever it is asked for by
+  // id; callers decide how to render it. Hiding the marks would make a
+  // void look like an ordinary entry.
+  'voided_at', 'voided_reason',
 ]
 const cols = (p = '') =>
   [`to_char(${p}date, 'YYYY-MM-DD') AS date`, ...REGISTER_COLS.map(c => `${p}${c}`)].join(', ')
@@ -130,6 +135,13 @@ router.get('/', async (req, res) => {
       params.push(`%${escaped}%`)
       const p = `$${params.length}`
       where.push(`(c.name ILIKE ${p} OR s.minister ILIKE ${p} OR s.place ILIKE ${p} OR s.certificate_no ILIKE ${p})`)
+    }
+
+    // Voided entries leave the working register but never the record.
+    // ?include_voided=1 shows them — a parish auditing its own book, or a
+    // dean inspecting it, needs to see what was retired and why.
+    if (req.query.include_voided !== '1' && req.query.include_voided !== 'true') {
+      where.push('s.voided_at IS NULL')
     }
     params.push(limit, offset)
     // LEFT JOIN so the parish-register view can show the member's name; the
@@ -468,9 +480,59 @@ router.post('/', async (req, res) => {
   }
 })
 
+
+// ── Register integrity (REG.1) ───────────────────────────────────────────
+//
+// A committed register entry is not a row that can be rewritten or removed.
+// It is corrected by amendment and retired by voiding, and both leave a
+// dated, attributed, reasoned trace. See migration 073 for the why.
+
+const MIN_REASON = 3
+const MAX_REASON = 1000
+
+function readReason(req) {
+  const raw = req.body?.reason
+  if (typeof raw !== 'string') return { error: 'A reason is required to change the register' }
+  const reason = raw.trim()
+  if (reason.length < MIN_REASON) return { error: `Reason must be at least ${MIN_REASON} characters` }
+  if (reason.length > MAX_REASON) return { error: `Reason exceeds ${MAX_REASON} characters` }
+  return { reason }
+}
+
+// The full prior row, snapshotted into the amendment. Selected with the
+// same column list the API returns so an amendment can be replayed and
+// read without knowing the schema of the day it was written.
+async function snapshot(conn, id, orgId) {
+  const { rows } = await conn.query(
+    `SELECT ${cols()}
+       FROM ochr_sacramental_records
+      WHERE id = $1 AND organization_id = $2
+      FOR UPDATE`,
+    [id, orgId]
+  )
+  return rows[0] ?? null
+}
+
+async function writeAmendment(conn, { orgId, sacramentId, kind, reason, before, after, user }) {
+  await conn.query(
+    `INSERT INTO ochr_sacrament_amendments
+       (organization_id, sacrament_id, kind, reason, before_json, after_json,
+        amended_by, amended_by_name, amended_by_email)
+     VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8, $9)`,
+    [orgId, sacramentId, kind, reason,
+     JSON.stringify(before), after ? JSON.stringify(after) : null,
+     user?.id ?? null, user?.name ?? null, user?.email ?? null]
+  )
+}
+
 // PATCH /api/sacraments/:id
 router.patch('/:id', async (req, res) => {
   const id = requireIntParam(req, res); if (id === null) return
+
+  // A correction to the register must say why. This is the whole
+  // difference between an amendment and a silent overwrite.
+  const r = readReason(req)
+  if (r.error) return res.status(400).json({ error: r.error })
 
   const sets = []
   const params = []
@@ -510,34 +572,167 @@ router.patch('/:id', async (req, res) => {
     if (sets.length === 0) return res.status(400).json({ error: 'No editable fields provided' })
     sets.push(`updated_at = NOW()`)
 
-    params.push(id, req.organizationId)
-    const { rows } = await pool.query(
-      `UPDATE ochr_sacramental_records SET ${sets.join(', ')}
-        WHERE id = $${params.length - 1} AND organization_id = $${params.length}
-        RETURNING ${SELECT_COLS}`,
-      params
-    )
-    if (!rows.length) return res.status(404).json({ error: 'Not found' })
-    res.json(rows[0])
+    // The snapshot, the write and the amendment are one transaction. A
+    // correction that landed without its amendment would be exactly the
+    // silent overwrite this replaced.
+    const conn = await pool.connect()
+    try {
+      await conn.query('BEGIN')
+      const before = await snapshot(conn, id, req.organizationId)
+      if (!before) { await conn.query('ROLLBACK'); return res.status(404).json({ error: 'Not found' }) }
+      if (before.voided_at) {
+        await conn.query('ROLLBACK')
+        return res.status(409).json({
+          error: 'This entry is void and cannot be corrected. Restore it first, or add a new entry.',
+        })
+      }
+
+      params.push(id, req.organizationId)
+      const { rows } = await conn.query(
+        `UPDATE ochr_sacramental_records SET ${sets.join(', ')}
+          WHERE id = $${params.length - 1} AND organization_id = $${params.length}
+          RETURNING ${SELECT_COLS}`,
+        params
+      )
+      await writeAmendment(conn, {
+        orgId: req.organizationId, sacramentId: id, kind: 'correction',
+        reason: r.reason, before, after: rows[0], user: req.user,
+      })
+      await conn.query('COMMIT')
+      res.json(rows[0])
+    } catch (err) {
+      await conn.query('ROLLBACK').catch(() => {})
+      throw err
+    } finally {
+      conn.release()
+    }
   } catch (err) {
     monitor.error('sacraments.update', err, { orgId: req.organizationId, id })
     res.status(500).json({ error: 'Failed to update sacramental record' })
   }
 })
 
-// DELETE /api/sacraments/:id
+// DELETE /api/sacraments/:id — refused, on purpose.
+//
+// A register entry cannot be deleted. Every reason someone reaches for
+// delete — wrong member, duplicate from a digitisation pass, a ceremony
+// that did not happen, an entry made at the wrong parish — is a reason to
+// VOID: keep the entry, mark it void, say why. Six months later somebody
+// asks why the register skips a number, and the answer has to be in the
+// book rather than in somebody's memory.
+//
+// 405 rather than 403: this is not a permissions problem that a bigger
+// role would solve. The operation does not exist for anyone.
 router.delete('/:id', async (req, res) => {
   const id = requireIntParam(req, res); if (id === null) return
+  res.set('Allow', 'GET, PATCH')
+  res.status(405).json({
+    error: 'Register entries are never deleted. Void the entry instead — it stays in the record, marked void, with your reason.',
+    void_endpoint: `/api/sacraments/${id}/void`,
+  })
+})
+
+// POST /api/sacraments/:id/void — retire an entry without erasing it.
+//
+// Admin-only. Correcting a typo is ordinary parish work; retiring an entry
+// from the register is the kind of decision a parish should be able to
+// name a person for.
+router.post('/:id/void', requireRole('admin'), async (req, res) => {
+  const id = requireIntParam(req, res); if (id === null) return
+  const r = readReason(req)
+  if (r.error) return res.status(400).json({ error: r.error })
+
+  const conn = await pool.connect()
   try {
-    const { rowCount } = await pool.query(
-      'DELETE FROM ochr_sacramental_records WHERE id = $1 AND organization_id = $2',
+    await conn.query('BEGIN')
+    const before = await snapshot(conn, id, req.organizationId)
+    if (!before) { await conn.query('ROLLBACK'); return res.status(404).json({ error: 'Not found' }) }
+    if (before.voided_at) {
+      await conn.query('ROLLBACK')
+      return res.status(409).json({ error: 'This entry is already void' })
+    }
+
+    const { rows } = await conn.query(
+      `UPDATE ochr_sacramental_records
+          SET voided_at = NOW(), voided_reason = $1, updated_at = NOW()
+        WHERE id = $2 AND organization_id = $3
+        RETURNING ${SELECT_COLS}`,
+      [r.reason, id, req.organizationId]
+    )
+    await writeAmendment(conn, {
+      orgId: req.organizationId, sacramentId: id, kind: 'void',
+      reason: r.reason, before, after: rows[0], user: req.user,
+    })
+    await conn.query('COMMIT')
+    res.json(rows[0])
+  } catch (err) {
+    await conn.query('ROLLBACK').catch(() => {})
+    monitor.error('sacraments.void', err, { orgId: req.organizationId, id })
+    res.status(500).json({ error: 'Failed to void register entry' })
+  } finally {
+    conn.release()
+  }
+})
+
+// POST /api/sacraments/:id/restore — voiding is itself reversible, and the
+// reversal is itself an amendment. A parish that voids the wrong entry
+// must not have to live with it, and must not be able to hide having done
+// it either.
+router.post('/:id/restore', requireRole('admin'), async (req, res) => {
+  const id = requireIntParam(req, res); if (id === null) return
+  const r = readReason(req)
+  if (r.error) return res.status(400).json({ error: r.error })
+
+  const conn = await pool.connect()
+  try {
+    await conn.query('BEGIN')
+    const before = await snapshot(conn, id, req.organizationId)
+    if (!before) { await conn.query('ROLLBACK'); return res.status(404).json({ error: 'Not found' }) }
+    if (!before.voided_at) {
+      await conn.query('ROLLBACK')
+      return res.status(409).json({ error: 'This entry is not void' })
+    }
+
+    const { rows } = await conn.query(
+      `UPDATE ochr_sacramental_records
+          SET voided_at = NULL, voided_reason = NULL, updated_at = NOW()
+        WHERE id = $1 AND organization_id = $2
+        RETURNING ${SELECT_COLS}`,
       [id, req.organizationId]
     )
-    if (!rowCount) return res.status(404).json({ error: 'Not found' })
-    res.status(204).end()
+    await writeAmendment(conn, {
+      orgId: req.organizationId, sacramentId: id, kind: 'restore',
+      reason: r.reason, before, after: rows[0], user: req.user,
+    })
+    await conn.query('COMMIT')
+    res.json(rows[0])
   } catch (err) {
-    monitor.error('sacraments.delete', err, { orgId: req.organizationId, id })
-    res.status(500).json({ error: 'Failed to delete sacramental record' })
+    await conn.query('ROLLBACK').catch(() => {})
+    monitor.error('sacraments.restore', err, { orgId: req.organizationId, id })
+    res.status(500).json({ error: 'Failed to restore register entry' })
+  } finally {
+    conn.release()
+  }
+})
+
+// GET /api/sacraments/:id/amendments — the marginal notations, in order.
+// Readable by any role that can read the register: a history nobody can
+// see is not a history.
+router.get('/:id/amendments', async (req, res) => {
+  const id = requireIntParam(req, res); if (id === null) return
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, kind, reason, before_json, after_json,
+              amended_by, amended_by_name, amended_by_email, created_at
+         FROM ochr_sacrament_amendments
+        WHERE sacrament_id = $1 AND organization_id = $2
+        ORDER BY created_at ASC, id ASC`,
+      [id, req.organizationId]
+    )
+    res.json({ amendments: rows })
+  } catch (err) {
+    monitor.error('sacraments.amendments', err, { orgId: req.organizationId, id })
+    res.status(500).json({ error: 'Failed to load amendments' })
   }
 })
 

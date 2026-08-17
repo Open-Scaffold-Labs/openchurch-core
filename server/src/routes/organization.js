@@ -14,6 +14,7 @@ import { Router } from 'express'
 import pool from '../db.js'
 import { buildOrgExport } from '../services/orgExport.js'
 import { monitor } from '../monitoring/index.js'
+import { invalidateTradition } from '../traditions/context.js'
 
 const router = Router()
 
@@ -22,6 +23,10 @@ const router = Router()
 // notificationPrefs.js.
 const PATCHABLE = new Set([
   'name',
+  // TRAD.1 — which tradition's vocabulary, seasons and lectionary this
+  // org sees. Validated against a closed set, not free text, because a
+  // typo here would silently drop the org back to 'general'.
+  'tradition',
   'address',
   'tax_id',
   'signatory_name',
@@ -56,6 +61,7 @@ function isValidTimeZone(tz) {
 // Keys that are booleans, not strings — handled separately in the
 // PATCH loop (the string trim/length path would reject them).
 const BOOLEAN_FIELDS = new Set(['page_published'])
+const TRADITIONS_ALLOWED = new Set(['catholic', 'episcopal', 'lutheran', 'anglican', 'general'])
 
 // Integer fields, clamped to a sane inclusive range so a typo can't
 // queue reminders a year out (or in the past).
@@ -82,7 +88,7 @@ router.get('/', async (req, res) => {
       `SELECT id, name, slug, address, tax_id,
               signatory_name, signatory_title, statement_letterhead,
               tagline, about, service_times, page_published,
-              reminder_lead_hours, timezone,
+              reminder_lead_hours, timezone, tradition,
               created_at
          FROM ochr_organizations
         WHERE id = $1`,
@@ -139,6 +145,17 @@ router.patch('/', async (req, res) => {
       continue
     }
 
+    // Tradition is a closed set, and it is NOT nullable — clearing it
+    // means 'general', which is a real tier rather than an absence.
+    if (k === 'tradition') {
+      const v = String(req.body[k] ?? '').trim() || 'general'
+      if (!TRADITIONS_ALLOWED.has(v)) {
+        return res.status(400).json({ error: `tradition must be one of: ${[...TRADITIONS_ALLOWED].join(', ')}` })
+      }
+      updates[k] = v
+      continue
+    }
+
     let v = req.body[k]
     if (typeof v === 'string') v = v.trim()
     if (v === '' || v == null) {
@@ -173,10 +190,14 @@ router.patch('/', async (req, res) => {
         RETURNING id, name, slug, address, tax_id,
                   signatory_name, signatory_title, statement_letterhead,
                   tagline, about, service_times, page_published,
-                  reminder_lead_hours, timezone,
+                  reminder_lead_hours, timezone, tradition,
                   created_at`,
       params
     )
+    // The tradition cache is a politeness to the database, not a source
+    // of truth — drop it so an admin who just switched sees the new
+    // vocabulary on the next page load rather than up to a minute later.
+    if ('tradition' in updates) invalidateTradition(req.organizationId)
     if (!rows.length) return res.status(404).json({ error: 'Organization not found' })
     res.json(rows[0])
   } catch (err) {

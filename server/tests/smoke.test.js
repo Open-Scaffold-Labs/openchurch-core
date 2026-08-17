@@ -1782,9 +1782,20 @@ describe('retention prune', () => {
     )
 
     // ── Run the prune ──
+    // Vendor-only since 2026-08-14 (F3). pruneOldRecords() walks every
+    // org, so a parish admin triggering it reached across tenants; the
+    // trigger belongs to the operator. Prove the door is shut before
+    // opening it with the operator identity.
+    const asParishAdmin = await request(server)
+      .post('/api/admin/maintenance/retention-prune')
+      .set('Authorization', `Bearer ${tokenA}`)
+    expect(asParishAdmin.status).toBe(404)
+
+    process.env.SUPER_ADMIN_EMAIL = orgA.email
     const res = await request(server)
       .post('/api/admin/maintenance/retention-prune')
       .set('Authorization', `Bearer ${tokenA}`)
+    delete process.env.SUPER_ADMIN_EMAIL
     expect(res.status).toBe(200)
     expect(res.body.audit_pruned).toBeGreaterThanOrEqual(1)
     expect(res.body.notification_log_pruned).toBeGreaterThanOrEqual(1)
@@ -5045,6 +5056,282 @@ describe('auth hardening — session lifecycle (H5)', () => {
   })
 })
 
+describe('change password while signed in (F1) + vendor-only maintenance (F3)', () => {
+  // Self-contained throwaway org. Its own X-Forwarded-For bucket because
+  // the suite's earlier signups exhaust the 3-per-hour-per-IP limiter
+  // (10.99.0.1 and .2 are already spoken for).
+  const pwOrg = {
+    organizationName: `Pw Org ${RUN_ID}`,
+    name: 'Norma Secretary',
+    email: `pw_${RUN_ID}@example.com`,
+    password: 'smoke-test-pw-9',
+  }
+  const NEXT_PW = 'smoke-test-pw-10-next'
+  let pwToken, pwOrgId
+
+  beforeAll(async () => {
+    const res = await request(server).post('/api/auth/signup')
+      .set('X-Forwarded-For', '10.99.0.3')
+      .send(pwOrg)
+    expect(res.status).toBe(201)
+    pwToken = res.body.token
+    pwOrgId = res.body.user.organization.id
+  })
+
+  afterAll(async () => {
+    await pool.query('DELETE FROM ochr_organizations WHERE id = $1', [pwOrgId]).catch(() => {})
+  })
+
+  it('requires the current password', async () => {
+    const res = await request(server).patch('/api/auth/password')
+      .set('Authorization', `Bearer ${pwToken}`)
+      .send({ password: NEXT_PW })
+    expect(res.status).toBe(400)
+  })
+
+  it('enforces the minimum length on the new password', async () => {
+    const res = await request(server).patch('/api/auth/password')
+      .set('Authorization', `Bearer ${pwToken}`)
+      .send({ currentPassword: pwOrg.password, password: 'short' })
+    expect(res.status).toBe(400)
+  })
+
+  it('refuses a new password identical to the current one', async () => {
+    const res = await request(server).patch('/api/auth/password')
+      .set('Authorization', `Bearer ${pwToken}`)
+      .send({ currentPassword: pwOrg.password, password: pwOrg.password })
+    expect(res.status).toBe(400)
+  })
+
+  it('rejects a wrong current password with 401, and leaves the password alone', async () => {
+    const res = await request(server).patch('/api/auth/password')
+      .set('Authorization', `Bearer ${pwToken}`)
+      .send({ currentPassword: 'not-the-password', password: NEXT_PW })
+    expect(res.status).toBe(401)
+
+    // Still the old password.
+    const login = await request(server).post('/api/auth/login')
+      .send({ email: pwOrg.email, password: pwOrg.password })
+    expect(login.status).toBe(200)
+  })
+
+  it('requires authentication', async () => {
+    const res = await request(server).patch('/api/auth/password')
+      .send({ currentPassword: pwOrg.password, password: NEXT_PW })
+    expect(res.status).toBe(401)
+  })
+
+  it('changes the password, revokes old sessions, and keeps the caller signed in', async () => {
+    const res = await request(server).patch('/api/auth/password')
+      .set('Authorization', `Bearer ${pwToken}`)
+      .send({ currentPassword: pwOrg.password, password: NEXT_PW })
+    expect(res.status).toBe(200)
+    expect(res.body.token).toBeTruthy()
+
+    // The returned token works…
+    const fresh = await request(server).get('/api/auth/me')
+      .set('Authorization', `Bearer ${res.body.token}`)
+    expect(fresh.status).toBe(200)
+
+    // …the token that made the change does not (token_version bumped).
+    const stale = await request(server).get('/api/auth/me')
+      .set('Authorization', `Bearer ${pwToken}`)
+    expect(stale.status).toBe(401)
+
+    // Old password is dead, new one works.
+    const old = await request(server).post('/api/auth/login')
+      .send({ email: pwOrg.email, password: pwOrg.password })
+    expect(old.status).toBe(401)
+
+    const now = await request(server).post('/api/auth/login')
+      .send({ email: pwOrg.email, password: NEXT_PW })
+    expect(now.status).toBe(200)
+
+    pwToken = now.body.token
+  })
+
+  it('F3: a parish admin cannot trigger the global retention prune', async () => {
+    // requireSuperAdmin 404s rather than 403 so the surface is not
+    // advertised to authenticated users probing /api/admin/*.
+    const res = await request(server).post('/api/admin/maintenance/retention-prune')
+      .set('Authorization', `Bearer ${pwToken}`)
+    expect(res.status).toBe(404)
+  })
+
+  it('F3: the maintenance surface still refuses an unauthenticated caller', async () => {
+    const res = await request(server).post('/api/admin/maintenance/retention-prune')
+    expect(res.status).toBe(401)
+  })
+})
+
+describe('change-password rate limit is per user, not per network', () => {
+  // Its own org and its own X-Forwarded-For bucket so the counter starts
+  // clean — the limiter keys on user id, and the sibling describe above
+  // has already spent attempts on ITS user.
+  const rlOrg = {
+    organizationName: `RL Org ${RUN_ID}`,
+    name: 'Norma Secretary',
+    email: `rl_${RUN_ID}@example.com`,
+    password: 'smoke-test-pw-9',
+  }
+  let rlToken, rlOrgId
+
+  beforeAll(async () => {
+    const res = await request(server).post('/api/auth/signup')
+      .set('X-Forwarded-For', '10.99.0.4')
+      .send(rlOrg)
+    expect(res.status).toBe(201)
+    rlToken = res.body.token
+    rlOrgId = res.body.user.organization.id
+  })
+
+  afterAll(async () => {
+    await pool.query('DELETE FROM ochr_organizations WHERE id = $1', [rlOrgId]).catch(() => {})
+  })
+
+  it('locks out after repeated wrong current passwords, and says so', async () => {
+    const MAX = 10
+    let last
+    for (let i = 0; i < MAX + 1; i++) {
+      last = await request(server).patch('/api/auth/password')
+        .set('Authorization', `Bearer ${rlToken}`)
+        .send({ currentPassword: `wrong-${i}`, password: 'a-new-password-entirely' })
+    }
+    // The first MAX are credential failures; the next is the limiter.
+    expect(last.status).toBe(429)
+    expect(last.body.error).toMatch(/too many/i)
+
+    // And the account is untouched — the real password still works.
+    const login = await request(server).post('/api/auth/login')
+      .send({ email: rlOrg.email, password: rlOrg.password })
+    expect(login.status).toBe(200)
+  })
+})
+
+describe('forgot / reset password — the emailed route', () => {
+  // This flow had NO server coverage until 2026-08-17, which is how it
+  // went unnoticed that it is currently the ONLY password route for a
+  // signed-out user and that it cannot deliver without an email provider.
+  // The delivery half is stubbed; everything up to and including token
+  // redemption is real and is what these tests hold.
+  //
+  // The raw token only ever exists inside the email, so these tests mint
+  // their own and insert the hash the same way the route does — that is
+  // exactly what a real reset link carries.
+  const rsOrg = {
+    organizationName: `Reset Org ${RUN_ID}`,
+    name: 'Norma Secretary',
+    email: `reset_${RUN_ID}@example.com`,
+    password: 'smoke-test-pw-9',
+  }
+  const NEW_PW = 'reset-flow-new-password'
+  let rsUserId, rsOrgId, rsToken
+
+  const sha = s => crypto.createHash('sha256').update(s).digest('hex')
+
+  async function mintToken({ minutesValid = 60 } = {}) {
+    const raw = crypto.randomBytes(32).toString('base64url')
+    await pool.query(
+      `INSERT INTO ochr_password_reset_tokens (user_id, token_hash, expires_at)
+       VALUES ($1, $2, $3)`,
+      [rsUserId, sha(raw), new Date(Date.now() + minutesValid * 60 * 1000)]
+    )
+    return raw
+  }
+
+  beforeAll(async () => {
+    const res = await request(server).post('/api/auth/signup')
+      .set('X-Forwarded-For', '10.99.0.5')
+      .send(rsOrg)
+    expect(res.status).toBe(201)
+    rsUserId = res.body.user.id
+    rsOrgId  = res.body.user.organization.id
+    rsToken  = res.body.token
+  })
+
+  afterAll(async () => {
+    await pool.query('DELETE FROM ochr_organizations WHERE id = $1', [rsOrgId]).catch(() => {})
+  })
+
+  it('forgot-password answers 200 for a real address AND an unknown one', async () => {
+    const real = await request(server).post('/api/auth/forgot-password')
+      .set('X-Forwarded-For', '10.99.0.5').send({ email: rsOrg.email })
+    expect(real.status).toBe(200)
+
+    // Identical shape for an address with no account — otherwise the
+    // endpoint is an account-enumeration oracle.
+    const ghost = await request(server).post('/api/auth/forgot-password')
+      .set('X-Forwarded-For', '10.99.0.5').send({ email: `nobody_${RUN_ID}@example.com` })
+    expect(ghost.status).toBe(200)
+    expect(ghost.body).toEqual(real.body)
+  })
+
+  it('issues a token row for the real address', async () => {
+    const { rows } = await pool.query(
+      'SELECT count(*)::int AS n FROM ochr_password_reset_tokens WHERE user_id = $1',
+      [rsUserId]
+    )
+    expect(rows[0].n).toBeGreaterThanOrEqual(1)
+  })
+
+  it('rejects a garbage token', async () => {
+    const res = await request(server).post('/api/auth/reset-password')
+      .send({ token: 'not-a-real-token', password: NEW_PW })
+    expect(res.status).toBe(400)
+  })
+
+  it('rejects an expired token', async () => {
+    const expired = await mintToken({ minutesValid: -5 })
+    const res = await request(server).post('/api/auth/reset-password')
+      .send({ token: expired, password: NEW_PW })
+    expect(res.status).toBe(400)
+
+    // …and the old password still works, i.e. nothing half-applied.
+    const login = await request(server).post('/api/auth/login')
+      .send({ email: rsOrg.email, password: rsOrg.password })
+    expect(login.status).toBe(200)
+  })
+
+  it('enforces the minimum length before spending the token', async () => {
+    const raw = await mintToken()
+    const short = await request(server).post('/api/auth/reset-password')
+      .send({ token: raw, password: 'short' })
+    expect(short.status).toBe(400)
+
+    // The token must survive a rejected attempt — otherwise a typo costs
+    // the user another round-trip through an inbox.
+    const ok = await request(server).post('/api/auth/reset-password')
+      .send({ token: raw, password: NEW_PW })
+    expect(ok.status).toBe(200)
+  })
+
+  it('the reset actually changed the password and revoked old sessions', async () => {
+    const old = await request(server).post('/api/auth/login')
+      .send({ email: rsOrg.email, password: rsOrg.password })
+    expect(old.status).toBe(401)
+
+    const now = await request(server).post('/api/auth/login')
+      .send({ email: rsOrg.email, password: NEW_PW })
+    expect(now.status).toBe(200)
+
+    // The session held since signup was signed in with the OLD password.
+    const stale = await request(server).get('/api/auth/me')
+      .set('Authorization', `Bearer ${rsToken}`)
+    expect(stale.status).toBe(401)
+  })
+
+  it('a spent token cannot be replayed', async () => {
+    const raw = await mintToken()
+    const first = await request(server).post('/api/auth/reset-password')
+      .send({ token: raw, password: 'another-fresh-password-1' })
+    expect(first.status).toBe(200)
+
+    const replay = await request(server).post('/api/auth/reset-password')
+      .send({ token: raw, password: 'another-fresh-password-2' })
+    expect(replay.status).toBe(400)
+  })
+})
+
 describe('immediate notice on auto-fill + following edit (NV.2)', () => {
   // Closes the paths RM.3b deferred. Placed ABOVE 'role enforcement'.
 
@@ -6732,7 +7019,7 @@ describe('diocese reporting + roll-up (DIO.2)', () => {
 // admin. Runs after DIO.2 (which ended org A's affiliation and deleted
 // its chancery, cascading those submissions away), so a fresh chancery
 // re-affiliates org A cleanly. Reuses org A's FIN.1 March-2027 ledger.
-describe('assessments + distress flags (DIO.4)', () => {
+describe('assessments + financial observations (DIO.4)', () => {
   const chancery = {
     organizationName: `Test Chancery D ${RUN_ID}`,
     name: 'Finance Vicar',
@@ -6793,22 +7080,29 @@ describe('assessments + distress flags (DIO.4)', () => {
     }
   })
 
-  it('raises all three distress flags on the troubled parish, with numbers', async () => {
-    const res = await request(server).get('/api/diocese/health')
+  it('makes all three observations about the parish, with the numbers behind them', async () => {
+    const res = await request(server).get('/api/diocese/observations')
       .set('Authorization', `Bearer ${chToken}`)
     expect(res.status).toBe(200)
     const p = res.body.parishes.find(x => x.parish_name === orgA.organizationName)
     expect(p).toBeTruthy()
     const codes = p.flags.map(f => f.code)
-    expect(codes).toContain('stale_submission')   // Feb 2026 is long past
-    expect(codes).toContain('revenue_decline')    // 1000 → 100
-    expect(codes).toContain('deficit_streak')     // two net-negative months
-    expect(p.flags.find(f => f.code === 'revenue_decline').detail).toMatch(/Revenue down \d+%/)
+    expect(codes).toContain('quiet_period')             // Feb 2026 is long past
+    expect(codes).toContain('revenue_lower')            // 1000 → 100
+    expect(codes).toContain('spending_exceeds_income')  // two net-negative months
+    expect(p.flags.find(f => f.code === 'revenue_lower').detail).toMatch(/Revenue is \d+% lower/)
+
+    // One vocabulary across the product (CARE.1). An observation is a
+    // noticing, not a verdict — nothing here may read as a judgement.
+    const words = JSON.stringify(p).toLowerCase()
+    for (const banned of ['distress', 'stale', 'deficit', 'at risk', 'health', 'failing', 'delinquent']) {
+      expect(words, `observation contains "${banned}"`).not.toContain(banned)
+    }
   })
 
-  it('clears the flags once a healthy current period is approved', async () => {
+  it('stops making them once a current, net-positive period is approved', async () => {
     await submitAndApprove('2027-03-01', '2027-03-31')  // net-positive, recent
-    const res = await request(server).get('/api/diocese/health')
+    const res = await request(server).get('/api/diocese/observations')
       .set('Authorization', `Bearer ${chToken}`)
     const p = res.body.parishes.find(x => x.parish_name === orgA.organizationName)
     expect(p).toBeUndefined()
@@ -7088,6 +7382,357 @@ describe('assessments + distress flags (DIO.4)', () => {
   // 2028 (the year period_end falls in) and shows up in the 2028 year.
 })
 
+describe('chart of accounts trickles down + the parish return path (DIO.5)', () => {
+  // Everything before this suite flows UP: a parish submits, the chancery
+  // approves, the roll-up reads. Two things were missing in the other
+  // direction, and they are what this covers.
+  //
+  //   1. The diocese could not say what an account MEANS. The parish-side
+  //      resolver only ever read the template and the parish's own rows,
+  //      so a parish could untick `assessable` and quietly shrink its own
+  //      assessment with the chancery none the wiser.
+  //   2. A parish could not see anything that came back down — not its
+  //      assessment, not what review was outstanding, not why a submission
+  //      was returned.
+  const chancery = {
+    organizationName: `Test Chancery E ${RUN_ID}`,
+    name: 'Chancellor',
+    email: `chancerye_${RUN_ID}@example.com`,
+    password: 'smoke-test-pw-14',
+    organizationType: 'diocese',
+  }
+  const loner = {
+    organizationName: `Unaffiliated Parish ${RUN_ID}`,
+    name: 'Solo Secretary',
+    email: `loner_${RUN_ID}@example.com`,
+    password: 'smoke-test-pw-15',
+  }
+  let chToken, chOrgId, loneToken, loneOrgId, parishAOrgId
+  const cleanupOrgIds = []
+
+  // 4110 is an assessable revenue account in the standard template; the
+  // diocese will turn it OFF, which is the direction a parish cannot fake.
+  const CODE = '4110'
+
+  beforeAll(async () => {
+    const ch = await request(server).post('/api/auth/signup')
+      .set('X-Forwarded-For', '10.99.0.9').send(chancery)
+    expect(ch.status).toBe(201)
+    chToken = ch.body.token; chOrgId = ch.body.user.organization.id
+    cleanupOrgIds.push(chOrgId)
+
+    const lo = await request(server).post('/api/auth/signup')
+      .set('X-Forwarded-For', '10.99.0.9').send(loner)
+    expect(lo.status).toBe(201)
+    loneToken = lo.body.token; loneOrgId = lo.body.user.organization.id
+    cleanupOrgIds.push(loneOrgId)
+
+    const me = await request(server).get('/api/auth/me').set('Authorization', `Bearer ${tokenA}`)
+    expect(me.status).toBe(200)
+    parishAOrgId = me.body.user?.organization?.id ?? me.body.organization?.id ?? me.body.user?.organization_id
+    expect(parishAOrgId).toBeTruthy()
+
+    const invite = await request(server).post('/api/diocese/parishes/invite')
+      .set('Authorization', `Bearer ${chToken}`).send({ email: orgA.email })
+    expect(invite.status).toBe(201)
+    const accept = await request(server).post('/api/affiliation/accept')
+      .set('Authorization', `Bearer ${tokenA}`).send({ grant_level: 'summary' })
+    expect(accept.status).toBe(200)
+  }, 30_000)
+
+  afterAll(async () => {
+    await pool.query('DELETE FROM ochr_coa_accounts WHERE organization_id = $1', [parishAOrgId]).catch(() => {})
+    // The unaffiliated parish owns rows too now (the two structure tests
+    // below), and it is torn down by the same loop.
+    await pool.query('DELETE FROM ochr_coa_accounts WHERE organization_id = $1', [loneOrgId]).catch(() => {})
+    await request(server).post('/api/affiliation/leave')
+      .set('Authorization', `Bearer ${tokenA}`).catch(() => {})
+    for (const id of cleanupOrgIds) {
+      await pool.query('DELETE FROM ochr_organizations WHERE id = $1', [id]).catch(() => {})
+    }
+  })
+
+  const parishCoa = async (token) => {
+    const res = await request(server).get('/api/finance/coa').set('Authorization', `Bearer ${token}`)
+    expect(res.status).toBe(200)
+    return res.body.accounts.find(a => a.code === CODE)
+  }
+
+  it('a parish token cannot reach the diocese chart of accounts at all', async () => {
+    const res = await request(server).get('/api/diocese/coa')
+      .set('Authorization', `Bearer ${tokenA}`)
+    expect(res.status).toBe(403)
+  })
+
+  it('the diocese can read a chart of accounts before customizing anything', async () => {
+    const res = await request(server).get('/api/diocese/coa')
+      .set('Authorization', `Bearer ${chToken}`)
+    expect(res.status).toBe(200)
+    const acct = res.body.accounts.find(a => a.code === CODE)
+    expect(acct).toBeTruthy()
+    expect(acct.customized).toBe(false)     // still the standard template
+  })
+
+  it('rejects a malformed account rather than half-saving the batch', async () => {
+    const before = await request(server).get('/api/diocese/coa')
+      .set('Authorization', `Bearer ${chToken}`)
+    const res = await request(server).put('/api/diocese/coa')
+      .set('Authorization', `Bearer ${chToken}`)
+      .send({ accounts: [{ code: CODE, assessable: false }, { code: 'nope' }] })
+    expect(res.status).toBe(400)
+    const after = await request(server).get('/api/diocese/coa')
+      .set('Authorization', `Bearer ${chToken}`)
+    expect(after.body.accounts).toEqual(before.body.accounts)
+  })
+
+  it('a partial patch keeps the template name instead of nulling it', async () => {
+    const res = await request(server).put('/api/diocese/coa')
+      .set('Authorization', `Bearer ${chToken}`)
+      .send({ accounts: [{ code: CODE, assessable: false, rollup_group: 'Diocesan Offertory' }] })
+    expect(res.status).toBe(200)
+    const acct = res.body.accounts.find(a => a.code === CODE)
+    expect(acct.customized).toBe(true)
+    expect(acct.assessable).toBe(false)
+    expect(acct.rollup_group).toBe('Diocesan Offertory')
+    expect(acct.name).toBeTruthy()          // inherited, not blanked
+    expect(acct.acct_type).toBe('revenue')  // inherited
+  })
+
+  it('the affiliated parish inherits the diocese structure', async () => {
+    const acct = await parishCoa(tokenA)
+    expect(acct.assessable).toBe(false)
+    expect(acct.rollup_group).toBe('Diocesan Offertory')
+    expect(acct.structure_from_diocese).toBe(true)
+  })
+
+  it('an unaffiliated parish is untouched by another diocese customizing', async () => {
+    const acct = await parishCoa(loneToken)
+    expect(acct.assessable).toBe(true)              // still the template
+    expect(acct.rollup_group).not.toBe('Diocesan Offertory')
+    expect(acct.structure_from_diocese).toBe(false)
+  })
+
+  // The two tests above only ever assert the TEMPLATE's values for the
+  // unaffiliated parish, because that parish owns no rows. So neither one
+  // could see the regression these two cover: capping structure at layer 1
+  // meant "the diocese decides" collapsed into "the template decides" the
+  // moment no diocese was attached, and any account a parish owned outright
+  // fell out of the result entirely. Both were money — `assessable` feeds
+  // the assessable base, and a dropped account takes its revenue with it.
+  it('an UNAFFILIATED parish still decides its own structure, not the template', async () => {
+    await pool.query(
+      `INSERT INTO ochr_coa_accounts
+         (organization_id, code, name, acct_type, rollup_group, assessable, sort_order, active)
+       VALUES ($1, $2, 'Loner Wording', 'revenue', 'Loner Bucket', FALSE, 5, FALSE)
+       ON CONFLICT (organization_id, code) WHERE organization_id IS NOT NULL
+       DO UPDATE SET name = EXCLUDED.name, assessable = EXCLUDED.assessable,
+                     active = EXCLUDED.active`,
+      [loneOrgId, CODE]
+    )
+    const acct = await parishCoa(loneToken)
+    expect(acct.name).toBe('Loner Wording')
+    expect(acct.assessable).toBe(false)   // regressed to true (the template)
+    expect(acct.active).toBe(false)       // regressed to true (the template)
+    expect(acct.structure_from_diocese).toBe(false)
+  })
+
+  it('an account only the parish defines is not dropped from its own chart', async () => {
+    // 9997 exists in no template and at no diocese. Nothing above layer 2
+    // describes it, so an inner join against a layer-1-capped structure
+    // silently removed it — from the CoA, from ledger-code validation, and
+    // from the totals.
+    await pool.query(
+      `INSERT INTO ochr_coa_accounts
+         (organization_id, code, name, acct_type, rollup_group, assessable, sort_order, active)
+       VALUES ($1, '9997', 'Parish Only Account', 'revenue', 'Loner Bucket', TRUE, 997, TRUE)
+       ON CONFLICT (organization_id, code) WHERE organization_id IS NOT NULL DO NOTHING`,
+      [loneOrgId]
+    )
+    const res = await request(server).get('/api/finance/coa')
+      .set('Authorization', `Bearer ${loneToken}`)
+    expect(res.status).toBe(200)
+    const own = res.body.accounts.find(a => a.code === '9997')
+    expect(own).toBeTruthy()
+    expect(own.name).toBe('Parish Only Account')
+    expect(own.assessable).toBe(true)
+    // Still exactly one row per code — the fallback must not duplicate.
+    const codes = res.body.accounts.map(a => a.code)
+    expect(codes.length).toBe(new Set(codes).size)
+  })
+
+  it('the parish keeps its own wording but CANNOT overrule the money semantics', async () => {
+    // The parish renames the account and tries to turn assessable back on.
+    await pool.query(
+      `INSERT INTO ochr_coa_accounts
+         (organization_id, code, name, acct_type, rollup_group, assessable, sort_order, active)
+       VALUES ($1, $2, 'Our Own Words', 'revenue', 'Parish Bucket', TRUE, 5, TRUE)
+       ON CONFLICT (organization_id, code) WHERE organization_id IS NOT NULL
+       DO UPDATE SET name = EXCLUDED.name, rollup_group = EXCLUDED.rollup_group,
+                     assessable = EXCLUDED.assessable`,
+      [parishAOrgId, CODE]
+    )
+    const acct = await parishCoa(tokenA)
+    expect(acct.name).toBe('Our Own Words')          // wording: parish wins
+    expect(acct.assessable).toBe(false)              // money: diocese wins
+    expect(acct.rollup_group).toBe('Diocesan Offertory')
+    expect(acct.structure_from_diocese).toBe(true)
+  })
+
+  it('a parish deactivating a diocesan account does not make it disappear', async () => {
+    // Same evasion by a different door: if `active` were the parish's to
+    // set, unticking it would drop the account from the roll-up entirely.
+    await pool.query(
+      `UPDATE ochr_coa_accounts SET active = FALSE WHERE organization_id = $1 AND code = $2`,
+      [parishAOrgId, CODE]
+    )
+    const acct = await parishCoa(tokenA)
+    expect(acct.active).toBe(true)
+    await pool.query(
+      `DELETE FROM ochr_coa_accounts WHERE organization_id = $1 AND code = $2`,
+      [parishAOrgId, CODE]
+    )
+  })
+
+  // ---- the return path ----
+
+  it('an unaffiliated parish gets a renderable answer, not a 404', async () => {
+    const res = await request(server).get('/api/finance/diocese')
+      .set('Authorization', `Bearer ${loneToken}`)
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ affiliated: false })
+  })
+
+  it('an affiliated parish sees its diocese, its grant level and its review queue', async () => {
+    const res = await request(server).get('/api/finance/diocese')
+      .set('Authorization', `Bearer ${tokenA}`)
+    expect(res.status).toBe(200)
+    expect(res.body.affiliated).toBe(true)
+    expect(res.body.diocese.name).toBe(chancery.organizationName)
+    expect(res.body.diocese.grant_level).toBe('summary')
+    expect(res.body.submissions).toHaveProperty('awaiting_review')
+    expect(res.body.assessment).toBeNull()          // nothing published yet
+  })
+
+  it('a DRAFT assessment is invisible to the parish; publishing reveals it', async () => {
+    // An assessment line only exists for a parish with an approved
+    // submission in that fiscal year, so give the chancery something to
+    // assess before assessing it.
+    const sub = await request(server).post('/api/finance/submissions')
+      .set('Authorization', `Bearer ${tokenA}`)
+      .send({ period_start: '2029-01-01', period_end: '2029-01-31' })
+    expect(sub.status).toBe(201)
+    const approved = await request(server).patch(`/api/diocese/submissions/${sub.body.id}`)
+      .set('Authorization', `Bearer ${chToken}`).send({ status: 'approved' })
+    expect(approved.status).toBe(200)
+
+    const created = await request(server).post('/api/diocese/assessments')
+      .set('Authorization', `Bearer ${chToken}`)
+      .send({ fiscal_year: '2029', rate_bps: 900 })
+    expect(created.status).toBe(201)
+    const id = created.body.id ?? created.body.assessment?.id
+    const computed = await request(server).post(`/api/diocese/assessments/${id}/recompute`)
+      .set('Authorization', `Bearer ${chToken}`).send({})
+    expect(computed.status).toBe(200)
+
+    // Still a draft — a chancery working out next year's rate has not
+    // promised a parish anything.
+    const hidden = await request(server).get('/api/finance/diocese')
+      .set('Authorization', `Bearer ${tokenA}`)
+    expect(hidden.body.assessment).toBeNull()
+
+    const pub = await request(server).patch(`/api/diocese/assessments/${id}`)
+      .set('Authorization', `Bearer ${chToken}`).send({ status: 'published' })
+    expect(pub.status).toBe(200)
+
+    const shown = await request(server).get('/api/finance/diocese')
+      .set('Authorization', `Bearer ${tokenA}`)
+    expect(shown.body.assessment).toBeTruthy()
+    expect(shown.body.assessment.fiscal_year).toBe('2029')
+    expect(shown.body.assessment.rate_bps).toBe(900)
+  })
+
+  // ---- the money, not just the flag ----
+  //
+  // These three exist because the first cut of DIO.5 passed twelve tests
+  // and still did not work. routes/finance.js and finance/periodTotals.js
+  // each had their own copy of the CoA resolver; only one was updated. So
+  // /api/finance/coa reported "not assessable" while /api/finance/summary
+  // went on counting the revenue — the display honoured the diocese and
+  // the money did not. Every test asserted on the display.
+  //
+  // The resolver now lives in finance/effectiveCoa.js and is imported by
+  // both. These assert on the number.
+
+  const BASE_PERIOD = ['2028-04-01', '2028-04-30']
+  const assessableBase = async () => {
+    const res = await request(server)
+      .get(`/api/finance/summary?start=${BASE_PERIOD[0]}&end=${BASE_PERIOD[1]}`)
+      .set('Authorization', `Bearer ${tokenA}`)
+    expect(res.status).toBe(200)
+    return Number(res.body.totals.assessable_base)
+  }
+  const setDioceseAssessable = async (assessable) => {
+    const res = await request(server).put('/api/diocese/coa')
+      .set('Authorization', `Bearer ${chToken}`)
+      .send({ accounts: [{ code: '4110', assessable, rollup_group: 'Offertory' }] })
+    expect(res.status).toBe(200)
+  }
+
+  it('the diocese switching `assessable` moves the parish assessable BASE, not just the flag', async () => {
+    const gift = await request(server).post('/api/finance/ledger')
+      .set('Authorization', `Bearer ${tokenA}`)
+      .send({ entry_date: '2028-04-10', account_code: '4110', amount: 1000, memo: `Base ${RUN_ID}` })
+    expect(gift.status).toBe(201)
+
+    await setDioceseAssessable(true)
+    expect(await assessableBase()).toBe(1000)
+
+    await setDioceseAssessable(false)
+    expect(await assessableBase()).toBe(0)      // the bug: this stayed 1000
+
+    await setDioceseAssessable(true)
+    expect(await assessableBase()).toBe(1000)
+  })
+
+  it('the chart of accounts and the assessable base never disagree', async () => {
+    // The single assertion that would have caught the duplicated resolver.
+    for (const assessable of [false, true]) {
+      await setDioceseAssessable(assessable)
+      const coa = await request(server).get('/api/finance/coa')
+        .set('Authorization', `Bearer ${tokenA}`)
+      const acct = coa.body.accounts.find(a => a.code === '4110')
+      expect(acct.assessable).toBe(assessable)
+      expect(await assessableBase() > 0).toBe(assessable)
+    }
+  })
+
+  it('a submission freezes the DIOCESE\'s semantics, not the parish\'s', async () => {
+    await setDioceseAssessable(false)
+    const sub = await request(server).post('/api/finance/submissions')
+      .set('Authorization', `Bearer ${tokenA}`)
+      .send({ period_start: BASE_PERIOD[0], period_end: BASE_PERIOD[1] })
+    expect(sub.status).toBe(201)
+
+    // What the chancery will approve must carry the chancery's rules.
+    const queue = await request(server).get('/api/diocese/submissions')
+      .set('Authorization', `Bearer ${chToken}`)
+    const mine = (queue.body.submissions ?? queue.body).find?.(x => x.id === sub.body.id)
+      ?? queue.body.submissions?.find(x => x.id === sub.body.id)
+    expect(mine).toBeTruthy()
+    const frozen = mine.totals_json ?? mine.totals
+    expect(Number(frozen.totals?.assessable_base ?? frozen.assessable_base)).toBe(0)
+
+    await setDioceseAssessable(true)
+  })
+
+  it('never returns another parish’s assessment line', async () => {
+    const res = await request(server).get('/api/finance/diocese')
+      .set('Authorization', `Bearer ${loneToken}`)
+    expect(res.body.assessment).toBeUndefined()
+    expect(JSON.stringify(res.body)).not.toContain('rate_bps')
+  })
+})
+
 // Placed ABOVE 'role enforcement' (which self-demotes tokenA) — needs admin.
 describe('sacramental register (SAC.1)', () => {
   let memberA, recordId
@@ -7165,9 +7810,10 @@ describe('sacramental register (SAC.1)', () => {
   })
 
   it('edits a record', async () => {
+    // A correction to the register carries a reason as of REG.1.
     const res = await request(server).patch(`/api/sacraments/${recordId}`)
       .set('Authorization', `Bearer ${tokenA}`)
-      .send({ minister: 'Fr. Santos', certificate_no: 'B-1024' })
+      .send({ minister: 'Fr. Santos', certificate_no: 'B-1024', reason: 'Minister misread from the paper register' })
     expect(res.status).toBe(200)
     expect(res.body.minister).toBe('Fr. Santos')
     expect(res.body.certificate_no).toBe('B-1024')
@@ -7185,13 +7831,222 @@ describe('sacramental register (SAC.1)', () => {
     expect(cross.status).toBe(404)
   })
 
-  it('deletes a record and 404s a cross-org delete', async () => {
-    const cross = await request(server).delete(`/api/sacraments/${recordId}`)
-      .set('Authorization', `Bearer ${tokenB}`)
-    expect(cross.status).toBe(404)
+  it('refuses to delete a register entry, and says what to do instead', async () => {
+    // This test used to assert 204. It encoded the defect: the one record
+    // a parish is obliged to keep forever had the same mutability as a
+    // task. Deletion is now refused for everyone — 405, not 403, because
+    // a bigger role would not make it correct either.
     const del = await request(server).delete(`/api/sacraments/${recordId}`)
       .set('Authorization', `Bearer ${tokenA}`)
-    expect(del.status).toBe(204)
+    expect(del.status).toBe(405)
+    expect(del.body.void_endpoint).toBe(`/api/sacraments/${recordId}/void`)
+
+    // …and the entry is still there.
+    const still = await request(server).get(`/api/sacraments/${recordId}`)
+      .set('Authorization', `Bearer ${tokenA}`)
+    expect(still.status).toBe(200)
+  })
+})
+
+describe('register integrity — void by amendment (REG.1)', () => {
+  // The register used to behave like a task list: any staff user could
+  // PATCH a committed entry with no reason and no capture of what it said
+  // before, or hard-DELETE it entirely — leaving an audit row whose
+  // metadata was {} and which was itself pruned after 30 days on Free.
+  //
+  // The model now matches how a paper register is actually corrected: by a
+  // dated, attributed, reasoned marginal notation. Never by erasure.
+  const org = {
+    organizationName: `Register Org ${RUN_ID}`,
+    name: 'Registrar',
+    email: `reg_${RUN_ID}@example.com`,
+    password: 'smoke-test-pw-31',
+  }
+  let token, orgId, memberId, recId, staffToken
+
+  beforeAll(async () => {
+    const res = await request(server).post('/api/auth/signup')
+      .set('X-Forwarded-For', '10.99.0.12').send(org)
+    expect(res.status).toBe(201)
+    token = res.body.token; orgId = res.body.user.organization.id
+
+    const m = await request(server).post('/api/clients')
+      .set('Authorization', `Bearer ${token}`).send({ name: `Ana Reyes ${RUN_ID}` })
+    memberId = m.body.id
+
+    const rec = await request(server).post('/api/sacraments')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ client_id: memberId, type: 'baptism', date: '1998-05-17', minister: 'Fr. Ruiz', place: 'St. Ana' })
+    expect(rec.status).toBe(201)
+    recId = rec.body.id
+
+    // A staff user, to prove voiding is not ordinary parish work.
+    const staff = await request(server).post('/api/users')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ name: 'Volunteer', email: `regstaff_${RUN_ID}@example.com`, password: 'smoke-test-pw-32', role: 'staff' })
+    expect(staff.status).toBe(201)
+    const login = await request(server).post('/api/auth/login')
+      .send({ email: `regstaff_${RUN_ID}@example.com`, password: 'smoke-test-pw-32' })
+    expect(login.status).toBe(200)
+    staffToken = login.body.token
+    expect(staffToken).toBeTruthy()
+  }, 30_000)
+
+  afterAll(async () => {
+    await pool.query('DELETE FROM ochr_organizations WHERE id = $1', [orgId]).catch(() => {})
+  })
+
+  const amendments = async () => {
+    const res = await request(server).get(`/api/sacraments/${recId}/amendments`)
+      .set('Authorization', `Bearer ${token}`)
+    expect(res.status).toBe(200)
+    return res.body.amendments
+  }
+
+  it('refuses a correction with no reason', async () => {
+    const res = await request(server).patch(`/api/sacraments/${recId}`)
+      .set('Authorization', `Bearer ${token}`).send({ minister: 'Fr. Silva' })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toMatch(/reason/i)
+
+    // …and nothing moved.
+    const rec = await request(server).get(`/api/sacraments/${recId}`)
+      .set('Authorization', `Bearer ${token}`)
+    expect(rec.body.minister).toBe('Fr. Ruiz')
+    expect(await amendments()).toEqual([])
+  })
+
+  it('refuses a reason that is not really a reason', async () => {
+    const res = await request(server).patch(`/api/sacraments/${recId}`)
+      .set('Authorization', `Bearer ${token}`).send({ minister: 'Fr. Silva', reason: ' x ' })
+    expect(res.status).toBe(400)
+  })
+
+  it('a correction records what it was, what it became, who and why', async () => {
+    const res = await request(server).patch(`/api/sacraments/${recId}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ minister: 'Fr. Silva', reason: 'Name misread from the 1998 paper register' })
+    expect(res.status).toBe(200)
+    expect(res.body.minister).toBe('Fr. Silva')
+
+    const [a] = await amendments()
+    expect(a.kind).toBe('correction')
+    expect(a.reason).toBe('Name misread from the 1998 paper register')
+    expect(a.before_json.minister).toBe('Fr. Ruiz')   // the prior value survives
+    expect(a.after_json.minister).toBe('Fr. Silva')
+    expect(a.amended_by_email).toBe(org.email)         // actor, snapshotted
+    expect(a.created_at).toBeTruthy()
+  })
+
+  it('never deletes — 405 for an admin, with the endpoint that IS correct', async () => {
+    const del = await request(server).delete(`/api/sacraments/${recId}`)
+      .set('Authorization', `Bearer ${token}`)
+    expect(del.status).toBe(405)
+    expect(del.body.void_endpoint).toBe(`/api/sacraments/${recId}/void`)
+    const still = await request(server).get(`/api/sacraments/${recId}`)
+      .set('Authorization', `Bearer ${token}`)
+    expect(still.status).toBe(200)
+  })
+
+  it('a staff user cannot void — that decision has a name on it', async () => {
+    const res = await request(server).post(`/api/sacraments/${recId}/void`)
+      .set('Authorization', `Bearer ${staffToken}`).send({ reason: 'Duplicate from the digitisation pass' })
+    expect(res.status).toBe(403)
+  })
+
+  it('voiding keeps the entry, marks it, and says why', async () => {
+    // The situation this exists for: a duplicate created when two
+    // volunteers digitised the same page. "Make it go away" is the wrong
+    // answer — six months later somebody asks why the register skips a
+    // number, and the answer has to be in the book.
+    const res = await request(server).post(`/api/sacraments/${recId}/void`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ reason: 'Duplicate of entry #412 — same baptism digitised twice' })
+    expect(res.status).toBe(200)
+    expect(res.body.voided_at).toBeTruthy()
+    expect(res.body.voided_reason).toMatch(/Duplicate of entry/)
+
+    // Still fetchable by id, marks and all.
+    const rec = await request(server).get(`/api/sacraments/${recId}`)
+      .set('Authorization', `Bearer ${token}`)
+    expect(rec.status).toBe(200)
+    expect(rec.body.voided_at).toBeTruthy()
+
+    const kinds = (await amendments()).map(a => a.kind)
+    expect(kinds).toEqual(['correction', 'void'])
+  })
+
+  it('a voided entry leaves the working register but not the record', async () => {
+    const live = await request(server).get('/api/sacraments')
+      .set('Authorization', `Bearer ${token}`)
+    expect(live.body.records.some(r => r.id === recId)).toBe(false)
+
+    const all = await request(server).get('/api/sacraments?include_voided=1')
+      .set('Authorization', `Bearer ${token}`)
+    expect(all.body.records.some(r => r.id === recId)).toBe(true)
+  })
+
+  it('a voided entry cannot be quietly corrected back into life', async () => {
+    const res = await request(server).patch(`/api/sacraments/${recId}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ minister: 'Fr. Nobody', reason: 'trying to edit a void entry' })
+    expect(res.status).toBe(409)
+  })
+
+  it('voiding twice is refused rather than logged twice', async () => {
+    const res = await request(server).post(`/api/sacraments/${recId}/void`)
+      .set('Authorization', `Bearer ${token}`).send({ reason: 'second attempt at voiding' })
+    expect(res.status).toBe(409)
+  })
+
+  it('a void can be undone, and undoing it is itself an amendment', async () => {
+    // A parish that voids the wrong entry must not have to live with it —
+    // and must not be able to hide having done it either.
+    const res = await request(server).post(`/api/sacraments/${recId}/restore`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ reason: 'Voided in error — #412 was the duplicate, not this one' })
+    expect(res.status).toBe(200)
+    expect(res.body.voided_at).toBeNull()
+
+    const kinds = (await amendments()).map(a => a.kind)
+    expect(kinds).toEqual(['correction', 'void', 'restore'])
+
+    const live = await request(server).get('/api/sacraments')
+      .set('Authorization', `Bearer ${token}`)
+    expect(live.body.records.some(r => r.id === recId)).toBe(true)
+  })
+
+  it('the database refuses a reasonless amendment even if a route stops checking', async () => {
+    await expect(
+      pool.query(
+        `INSERT INTO ochr_sacrament_amendments (organization_id, sacrament_id, kind, reason, before_json)
+         VALUES ($1, $2, 'correction', '  ', '{}'::jsonb)`,
+        [orgId, recId]
+      )
+    ).rejects.toThrow()
+  })
+
+  it('amendments are tenant-scoped', async () => {
+    const cross = await request(server).get(`/api/sacraments/${recId}/amendments`)
+      .set('Authorization', `Bearer ${tokenB}`)
+    expect(cross.body.amendments).toEqual([])
+  })
+
+  it('register history is exempt from retention pruning', async () => {
+    // The register is permanent; a change history that expired after 30
+    // days on Free would leave a corrected entry with no record of what it
+    // used to say. Backdate every amendment well past the longest window
+    // and prove the pruner does not touch them.
+    await pool.query(
+      `UPDATE ochr_sacrament_amendments SET created_at = NOW() - INTERVAL '5 years'
+        WHERE organization_id = $1`, [orgId]
+    )
+    const { pruneOldRecords } = await import('../src/services/retention.js')
+    await pruneOldRecords()
+    const { rows } = await pool.query(
+      'SELECT count(*)::int AS n FROM ochr_sacrament_amendments WHERE organization_id = $1', [orgId]
+    )
+    expect(rows[0].n).toBe(3)
   })
 })
 
@@ -7479,7 +8334,7 @@ describe('sacrament meta_attributes (SAC.5)', () => {
   it('PATCH replaces the meta object wholesale', async () => {
     const res = await request(server).patch(`/api/sacraments/${recId}`)
       .set('Authorization', `Bearer ${tokenA}`)
-      .send({ meta_attributes: { sponsors: ['Lucia M.'] } })
+      .send({ meta_attributes: { sponsors: ['Lucia M.'] }, reason: 'Sponsor recorded under the wrong name' })
     expect(res.status).toBe(200)
     expect(res.body.meta_attributes).toEqual({ sponsors: ['Lucia M.'] })
   })
@@ -8314,12 +9169,124 @@ describe('lectionary resolver (LEC.1)', () => {
   })
 })
 
+describe('Roman-rite lectionary designations (ROM.1)', () => {
+  // A Catholic parish says "Twenty-second Sunday in Ordinary Time", not
+  // "Fourteenth Sunday after Pentecost · Proper 17". Same date, same
+  // A/B/C cycle, different vocabulary — and the wrong one printed in
+  // front of a parish secretary is the kind of mistake that ends a
+  // conversation. These tests exist so the two can never drift.
+  let resolveLectionary, resolveRomanLectionary
+  beforeAll(async () => {
+    ({ resolveLectionary, resolveRomanLectionary } = await import('../src/services/lectionary.js'))
+  })
+
+  it('agrees with the USCCB lectionary on a known Sunday', () => {
+    // bible.usccb.org/bible/readings/083026.cfm — "Twenty-second Sunday
+    // in Ordinary Time". This is the anchor; everything else is counted
+    // off the same arithmetic.
+    expect(resolveRomanLectionary('2026-08-30')).toMatchObject({
+      designation: 'Twenty-second Sunday in Ordinary Time',
+      cycle: 'A',
+      proper: null,
+    })
+  })
+
+  it('names the same day differently from the RCL, on purpose', () => {
+    expect(resolveLectionary('2026-08-30').designation).toBe('Fourteenth Sunday after Pentecost')
+    expect(resolveLectionary('2026-08-30').proper).toBe(17)
+    expect(resolveRomanLectionary('2026-08-30').designation).toBe('Twenty-second Sunday in Ordinary Time')
+  })
+
+  it('shares the cycle letter with the RCL — the year is the same year', () => {
+    for (const d of ['2025-11-30', '2026-11-29', '2027-11-28']) {
+      expect(resolveRomanLectionary(d).cycle).toBe(resolveLectionary(d).cycle)
+    }
+  })
+
+  it('never emits a Proper — the Roman Lectionary has none', () => {
+    for (const d of ['2026-08-30', '2026-06-14', '2026-11-15']) {
+      expect(resolveRomanLectionary(d).proper).toBeNull()
+    }
+  })
+
+  it('numbers the first block of Ordinary Time off the Baptism of the Lord', () => {
+    expect(resolveRomanLectionary('2026-01-11').designation).toBe('The Baptism of the Lord')
+    expect(resolveRomanLectionary('2026-01-18').designation).toBe('Second Sunday in Ordinary Time')
+    expect(resolveRomanLectionary('2026-02-15').designation).toBe('Sixth Sunday in Ordinary Time')
+  })
+
+  it('counts the second block backward from Christ the King', () => {
+    // Advent I 2026 is 29 Nov, so 22 Nov is the 34th and last Sunday.
+    expect(resolveRomanLectionary('2026-11-22').designation).toBe('Our Lord Jesus Christ, King of the Universe')
+    expect(resolveRomanLectionary('2026-11-15').designation).toBe('Thirty-third Sunday in Ordinary Time')
+    expect(resolveRomanLectionary('2026-11-29').designation).toBe('First Sunday of Advent')
+  })
+
+  it('names the solemnities that displace an Ordinary Time Sunday', () => {
+    expect(resolveRomanLectionary('2026-05-24').designation).toBe('Pentecost Sunday')
+    expect(resolveRomanLectionary('2026-05-31').designation).toBe('The Most Holy Trinity')
+    expect(resolveRomanLectionary('2026-06-07').designation).toBe('The Most Holy Body and Blood of Christ')
+  })
+
+  it('uses Roman names through Lent and Easter, not RCL ones', () => {
+    expect(resolveRomanLectionary('2026-02-18').designation).toBe('Ash Wednesday')
+    expect(resolveRomanLectionary('2026-03-29').designation).toBe('Palm Sunday of the Passion of the Lord')
+    expect(resolveRomanLectionary('2026-04-05').designation).toBe('Easter Sunday of the Resurrection of the Lord')
+    expect(resolveRomanLectionary('2026-04-12').designation).toBe('Second Sunday of Easter')
+    // The RCL calls the last Sunday before Lent the Transfiguration;
+    // Rome just keeps counting Ordinary Time.
+    expect(resolveLectionary('2026-02-15').designation).toMatch(/Transfiguration/)
+  })
+
+  it('resolves a weekday to its week, the way an Ordo does', () => {
+    expect(resolveRomanLectionary('2026-09-02')).toMatchObject({
+      designation: 'Week of the Twenty-second Sunday in Ordinary Time',
+      is_sunday: false,
+    })
+  })
+
+  it('numbers every Ordinary Time Sunday exactly once, 2024 through 2035', () => {
+    // The backward count from Christ the King is what absorbs a variable
+    // Easter. If it is wrong, some year will duplicate or skip a number.
+    const ORD = ['', 'First', 'Second', 'Third', 'Fourth', 'Fifth', 'Sixth', 'Seventh',
+      'Eighth', 'Ninth', 'Tenth', 'Eleventh', 'Twelfth', 'Thirteenth', 'Fourteenth',
+      'Fifteenth', 'Sixteenth', 'Seventeenth', 'Eighteenth', 'Nineteenth', 'Twentieth',
+      'Twenty-first', 'Twenty-second', 'Twenty-third', 'Twenty-fourth', 'Twenty-fifth',
+      'Twenty-sixth', 'Twenty-seventh', 'Twenty-eighth', 'Twenty-ninth', 'Thirtieth',
+      'Thirty-first', 'Thirty-second', 'Thirty-third', 'Thirty-fourth']
+    for (let y = 2024; y <= 2035; y++) {
+      const nums = []
+      for (let i = 0; i < 366; i++) {
+        const d = new Date(Date.UTC(y, 0, 1 + i))
+        if (d.getUTCFullYear() !== y) break
+        if (d.getUTCDay() !== 0) continue
+        const r = resolveRomanLectionary(d.toISOString().slice(0, 10))
+        expect(r.designation, `${y}: no designation for a Sunday`).toBeTruthy()
+        const m = /^(.+) Sunday in Ordinary Time$/.exec(r.designation)
+        if (m) nums.push(ORD.indexOf(m[1]))
+      }
+      expect(new Set(nums).size, `${y}: duplicate Ordinary Time numbers`).toBe(nums.length)
+      expect(Math.min(...nums), `${y}: numbering starts below 2`).toBeGreaterThanOrEqual(2)
+      expect(Math.max(...nums), `${y}: numbering runs past 33`).toBeLessThanOrEqual(33)
+    }
+  })
+})
+
 // Placed ABOVE 'role enforcement' so tokenA keeps its admin role.
 describe('the Sunday Packet (SPK.1)', () => {
   const PACKET_DATE = '2027-06-06' // a quiet future Sunday no other group touches
   let memberId
 
+  // This suite asserts RCL designations (Propers, "Sunday after
+  // Pentecost"), which before TRAD.1 every org received whether or not it
+  // was Episcopal. It now depends on the org's tradition, so say so out
+  // loud rather than inheriting a default — and restore it afterwards,
+  // because orgA is shared with other suites.
   beforeAll(async () => {
+    const setTrad = await request(server).patch('/api/organization')
+      .set('Authorization', `Bearer ${tokenA}`).send({ tradition: 'episcopal' })
+    expect(setTrad.status).toBe(200)
+
     const m = await request(server).post('/api/clients')
       .set('Authorization', `Bearer ${tokenA}`)
       .send({ name: `Packet Lector ${RUN_ID}` })
@@ -8383,8 +9350,14 @@ describe('the Sunday Packet (SPK.1)', () => {
     expect(res.body.plan).toBeNull()
     expect(res.body.serving).toEqual([])
     expect(res.body.intentions).toEqual([])
-    // The computed parts still answer.
-    expect(res.body.lectionary.designation).toBeTruthy()
+    // The computed parts still answer. orgB has never named a tradition,
+    // so it is 'general' — which means a liturgical season (every Western
+    // tradition shares those) and NO lectionary designation, because we do
+    // not know whose Sunday name to print. Asserting the null is the point:
+    // before TRAD.1 this org silently received Episcopal Propers.
+    expect(res.body.tradition).toBe('general')
+    expect(res.body.liturgical.season).toBeTruthy()
+    expect(res.body.lectionary).toBeNull()
   })
 
   it('defaults to a valid upcoming Sunday when no date is given', async () => {
@@ -8393,6 +9366,452 @@ describe('the Sunday Packet (SPK.1)', () => {
     expect(res.status).toBe(200)
     expect(res.body.date).toMatch(/^\d{4}-\d{2}-\d{2}$/)
     expect(res.body.lectionary.is_sunday).toBe(true)
+  })
+})
+
+describe('tradition foundation (TRAD.1)', () => {
+  // The defect this closes: two liturgical engines, two traditions, both
+  // printed on one sheet. routes/liturgical.js says "Ordinary Time" and
+  // names 1 January "Mary, Mother of God"; services/lectionary.js says
+  // "Nth Sunday after Pentecost · Proper N" and names the same day
+  // "The Holy Name". Every parish got both. These tests assert that a
+  // parish now gets exactly one tradition's vocabulary — and that a parish
+  // which has told us nothing gets NO lectionary rather than a wrong one.
+  const mk = (tradition, n) => ({
+    organizationName: `Trad ${tradition} ${RUN_ID}`,
+    name: 'Secretary',
+    email: `trad_${tradition}_${RUN_ID}@example.com`,
+    password: `smoke-test-pw-2${n}`,
+    tradition,
+  })
+  const tokens = {}
+  const cleanupOrgIds = []
+
+  beforeAll(async () => {
+    let n = 0
+    for (const trad of ['catholic', 'episcopal', 'general']) {
+      const res = await request(server).post('/api/auth/signup')
+        .set('X-Forwarded-For', '10.99.0.11').send(mk(trad, n++))
+      expect(res.status).toBe(201)
+      tokens[trad] = res.body.token
+      cleanupOrgIds.push(res.body.user.organization.id)
+    }
+  }, 30_000)
+
+  afterAll(async () => {
+    for (const id of cleanupOrgIds) {
+      await pool.query('DELETE FROM ochr_organizations WHERE id = $1', [id]).catch(() => {})
+    }
+  })
+
+  const packet = async (trad, date) => {
+    const res = await request(server).get(`/api/packet?date=${date}`)
+      .set('Authorization', `Bearer ${tokens[trad]}`)
+    expect(res.status).toBe(200)
+    return res.body
+  }
+
+  it('signup records the tradition and hands it back on the org', async () => {
+    const me = await request(server).get('/api/auth/me')
+      .set('Authorization', `Bearer ${tokens.catholic}`)
+    expect(me.status).toBe(200)
+    const org = me.body.user?.organization ?? me.body.organization
+    expect(org.tradition).toBe('catholic')
+    // The client's i18n spine has read organization.locale since day one
+    // and never received it. It does now.
+    expect(org).toHaveProperty('locale')
+  })
+
+  it('an unrecognised tradition falls back to general rather than 400ing a signup', async () => {
+    const res = await request(server).post('/api/auth/signup')
+      .set('X-Forwarded-For', '10.99.0.11')
+      .send({ ...mk('nonsense', 9), email: `trad_bogus_${RUN_ID}@example.com` })
+    expect(res.status).toBe(201)
+    cleanupOrgIds.push(res.body.user.organization.id)
+    expect(res.body.user.organization.tradition).toBe('general')
+  })
+
+  it('a Catholic parish gets Roman designations and NO Proper', async () => {
+    const p = await packet('catholic', '2026-08-30')
+    expect(p.tradition).toBe('catholic')
+    expect(p.lectionary.designation).toBe('Twenty-second Sunday in Ordinary Time')
+    expect(p.lectionary.proper).toBeNull()
+  })
+
+  it('an Episcopal parish gets RCL designations WITH a Proper', async () => {
+    const p = await packet('episcopal', '2026-08-30')
+    expect(p.tradition).toBe('episcopal')
+    expect(p.lectionary.designation).toBe('Fourteenth Sunday after Pentecost')
+    expect(p.lectionary.proper).toBe(17)
+  })
+
+  it('the two vocabularies can never appear on the same packet again', async () => {
+    // The actual defect, asserted directly: one date, two parishes, and
+    // neither may carry the other's words.
+    const [cat, epi] = await Promise.all([packet('catholic', '2026-08-30'), packet('episcopal', '2026-08-30')])
+    expect(cat.lectionary.designation).not.toMatch(/after Pentecost/)
+    expect(epi.lectionary.designation).not.toMatch(/Ordinary Time/)
+    expect(cat.lectionary.designation).not.toBe(epi.lectionary.designation)
+  })
+
+  it('a general org gets NO lectionary line at all', async () => {
+    // Printing nothing is honest. Printing another tradition's Sunday
+    // name is not, and that is what shipped before this.
+    const p = await packet('general', '2026-08-30')
+    expect(p.tradition).toBe('general')
+    expect(p.lectionary).toBeNull()
+    // …but everything else on the sheet still works.
+    expect(p.liturgical.season).toBe('Ordinary Time')
+    expect(p.date).toBe('2026-08-30')
+  })
+
+  it('reports which block of counted time a date falls in', async () => {
+    // The canonical season token stays 'Ordinary Time' — calendar rows are
+    // already stamped with it — while the block is what lets an Episcopal
+    // parish render "Season after Pentecost" without a data migration.
+    const after = await request(server).get('/api/liturgical?date=2026-08-30')
+      .set('Authorization', `Bearer ${tokens.episcopal}`)
+    expect(after.body.season).toBe('Ordinary Time')
+    expect(after.body.ordinary_block).toBe('after_pentecost')
+
+    const before = await request(server).get('/api/liturgical?date=2026-01-20')
+      .set('Authorization', `Bearer ${tokens.episcopal}`)
+    expect(before.body.season).toBe('Ordinary Time')
+    expect(before.body.ordinary_block).toBe('after_epiphany')
+
+    // Seasons outside counted time report null, never undefined.
+    const lent = await request(server).get('/api/liturgical?date=2026-03-01')
+      .set('Authorization', `Bearer ${tokens.episcopal}`)
+    expect(lent.body.season).toBe('Lent')
+    expect(lent.body.ordinary_block).toBeNull()
+  })
+
+  it('an admin can change tradition, and the packet follows immediately', async () => {
+    const before = await packet('general', '2026-08-30')
+    expect(before.lectionary).toBeNull()
+
+    const patch = await request(server).patch('/api/organization')
+      .set('Authorization', `Bearer ${tokens.general}`).send({ tradition: 'catholic' })
+    expect(patch.status).toBe(200)
+    expect(patch.body.tradition ?? patch.body.organization?.tradition).toBe('catholic')
+
+    // The 60s cache must not outlive the admin's own page load.
+    const after = await packet('general', '2026-08-30')
+    expect(after.tradition).toBe('catholic')
+    expect(after.lectionary.designation).toBe('Twenty-second Sunday in Ordinary Time')
+
+    await request(server).patch('/api/organization')
+      .set('Authorization', `Bearer ${tokens.general}`).send({ tradition: 'general' })
+  })
+
+  it('refuses an unknown tradition on PATCH rather than silently generalising', async () => {
+    const res = await request(server).patch('/api/organization')
+      .set('Authorization', `Bearer ${tokens.catholic}`).send({ tradition: 'zoroastrian' })
+    expect(res.status).toBe(400)
+    const me = await request(server).get('/api/organization')
+      .set('Authorization', `Bearer ${tokens.catholic}`)
+    expect(me.body.tradition ?? me.body.organization?.tradition).toBe('catholic')
+  })
+
+  it('the database refuses a bad tradition even if a route ever stops checking', async () => {
+    await expect(
+      pool.query('UPDATE ochr_organizations SET tradition = $1 WHERE id = $2', ['nonsense', cleanupOrgIds[0]])
+    ).rejects.toThrow()
+  })
+})
+
+describe('tradition-aware sample data (TRAD.2)', () => {
+  // sampleSeed.js used to declare itself "intentionally
+  // denomination-neutral" and then seed tithe, Sunday School Teacher,
+  // Worship Leader, Prayer Team, Fellowship Hall and Bible Study — which
+  // is not neutral, it is low-church Protestant. A brand-new Catholic
+  // parish met that inside a Catholic shell: the nav said Intentions and
+  // Register while the sample data said Fellowship Hall.
+  //
+  // The seed now follows the tradition chosen AT SIGNUP, because the seed
+  // runs the moment signup commits — asking afterwards is too late.
+  const cleanupOrgIds = []
+  const tokens = {}
+
+  const signup = async (tradition, n) => {
+    const res = await request(server).post('/api/auth/signup')
+      .set('X-Forwarded-For', '10.99.0.13')
+      .send({
+        organizationName: `Seed ${tradition} ${RUN_ID}`,
+        name: 'Secretary',
+        email: `seed_${tradition}_${RUN_ID}@example.com`,
+        password: `smoke-test-pw-4${n}`,
+        ...(tradition === 'unset' ? {} : { tradition }),
+      })
+    expect(res.status).toBe(201)
+    cleanupOrgIds.push(res.body.user.organization.id)
+    return res.body.token
+  }
+
+  beforeAll(async () => {
+    let n = 0
+    for (const t of ['catholic', 'episcopal', 'lutheran', 'unset']) {
+      tokens[t] = await signup(t, n++)
+    }
+    // The seed is fired after the signup transaction commits, on purpose —
+    // a seed failure must never block account creation. Give it a moment.
+    await new Promise(r => setTimeout(r, 1500))
+  }, 45_000)
+
+  afterAll(async () => {
+    for (const id of cleanupOrgIds) {
+      await pool.query('DELETE FROM ochr_organizations WHERE id = $1', [id]).catch(() => {})
+    }
+  })
+
+  // These endpoints return a bare array, not a wrapper. Asserting the
+  // shape rather than defaulting to [] — a helper that silently yields an
+  // empty list turns every assertion below into a test of nothing.
+  const listOf = async (path, trad) => {
+    const res = await request(server).get(path)
+      .set('Authorization', `Bearer ${tokens[trad]}`)
+    expect(res.status).toBe(200)
+    expect(Array.isArray(res.body)).toBe(true)
+    expect(res.body.length).toBeGreaterThan(0)
+    return res.body
+  }
+  const rolesFor    = async (trad) => (await listOf('/api/clients?limit=50', trad)).map(c => c.role).filter(Boolean)
+  const eventTitles = async (trad) => (await listOf('/api/events', trad)).map(e => e.title).filter(Boolean)
+
+  it('a Catholic parish is seeded with Catholic words', async () => {
+    const roles = await rolesFor('catholic')
+    expect(roles).toContain('Catechist')
+    expect(roles).toContain('Finance Council')
+    expect(roles).not.toContain('Sunday School Teacher')
+    expect(roles).not.toContain('Worship Leader')
+
+    const titles = await eventTitles('catholic')
+    expect(titles.some(t => /Sunday Mass/.test(t))).toBe(true)
+    expect(titles.some(t => /Fellowship Hall/.test(t))).toBe(false)
+  })
+
+  it('an Episcopal parish is seeded with Episcopal words', async () => {
+    const roles = await rolesFor('episcopal')
+    expect(roles).toContain('Vestry')
+    expect(roles).toContain('Altar Guild')
+    expect(roles).not.toContain('Finance Committee')
+
+    const titles = await eventTitles('episcopal')
+    expect(titles.some(t => /Holy Eucharist/.test(t))).toBe(true)
+    expect(titles.some(t => /Sunday Mass/.test(t))).toBe(false)
+  })
+
+  it('a Lutheran congregation is seeded with Lutheran words', async () => {
+    const roles = await rolesFor('lutheran')
+    expect(roles).toContain('Congregation Council')
+    expect(roles).not.toContain('Vestry')
+
+    const titles = await eventTitles('lutheran')
+    expect(titles.some(t => /Sunday Worship/.test(t))).toBe(true)
+  })
+
+  it('a parish that names no tradition gets the neutral seed, not a Catholic one', async () => {
+    // 'general' is a real tier. It must not quietly inherit whichever
+    // tradition happens to be the default in the shared string table.
+    const roles = await rolesFor('unset')
+    expect(roles).toContain('Finance Committee')
+    expect(roles).not.toContain('Catechist')
+    expect(roles).not.toContain('Vestry')
+
+    const titles = await eventTitles('unset')
+    expect(titles.some(t => /Sunday Service/.test(t))).toBe(true)
+    expect(titles.some(t => /Mass|Eucharist/.test(t))).toBe(false)
+  })
+
+  it('the giving categories follow the tradition too', async () => {
+    const cats = async (trad) => (await listOf('/api/donations?limit=50', trad)).map(d => d.category).filter(Boolean)
+    expect(await cats('catholic')).toContain('offertory')
+    expect(await cats('episcopal')).toContain('pledge')
+    expect((await cats('catholic'))).not.toContain('tithe')
+  })
+
+  it('every seeded row is still wipeable — the [Sample] marker survives', async () => {
+    // clear-samples matches on '[Sample]%'. If a tradition ever moved the
+    // marker inside the interpolation, a parish could not clear its demo
+    // data, which is worse than the vocabulary problem this fixes.
+    for (const trad of ['catholic', 'episcopal', 'lutheran', 'unset']) {
+      const titles = await eventTitles(trad)
+      expect(titles.length).toBeGreaterThan(0)
+      expect(titles.every(t => t.startsWith('[Sample]'))).toBe(true)
+    }
+  })
+
+  it('the seed vocabulary falls back rather than throwing on an unknown tradition', async () => {
+    const { seedVocab } = await import('../src/onboarding/sampleSeed.js')
+    expect(seedVocab('zoroastrian').service).toBe(seedVocab('general').service)
+    expect(seedVocab(undefined).roles.length).toBe(12)
+  })
+})
+
+describe('tradition-specific reporting (RPT.1)', () => {
+  // The thesis: parish work → OpenChurch record → trusted source data →
+  // tradition-specific report → review → submit. Not "do the work, enter
+  // it, re-enter it for the report, reconcile a spreadsheet".
+  //
+  // The load-bearing property is not the arithmetic. It is that every
+  // figure arrives with its source AND with whether we have verified the
+  // report actually asks for it. Nobody here has read the Parochial Report
+  // form; pretending otherwise on a sheet a rector signs is the failure
+  // mode this whole layer is shaped to avoid.
+  const cleanupOrgIds = []
+  let epi, cat, memberId
+
+  const mk = async (tradition, n) => {
+    const res = await request(server).post('/api/auth/signup')
+      .set('X-Forwarded-For', '10.99.0.14')
+      .send({
+        organizationName: `Report ${tradition} ${RUN_ID}`, name: 'Registrar',
+        email: `rpt_${tradition}_${RUN_ID}@example.com`,
+        password: `smoke-test-pw-5${n}`, tradition,
+      })
+    expect(res.status).toBe(201)
+    cleanupOrgIds.push(res.body.user.organization.id)
+    return res.body.token
+  }
+
+  beforeAll(async () => {
+    epi = await mk('episcopal', 0)
+    cat = await mk('catholic', 1)
+
+    const m = await request(server).post('/api/clients')
+      .set('Authorization', `Bearer ${epi}`).send({ name: `Report Member ${RUN_ID}` })
+    memberId = m.body.id
+
+    // Two baptisms and a burial in 2029; one baptism voided, so the count
+    // must be 2 and not 3.
+    for (const d of ['2029-03-04', '2029-06-10']) {
+      const r = await request(server).post('/api/sacraments')
+        .set('Authorization', `Bearer ${epi}`)
+        .send({ client_id: memberId, type: 'baptism', date: d })
+      expect(r.status).toBe(201)
+    }
+    const doomed = await request(server).post('/api/sacraments')
+      .set('Authorization', `Bearer ${epi}`)
+      .send({ client_id: memberId, type: 'baptism', date: '2029-07-01' })
+    await request(server).post(`/api/sacraments/${doomed.body.id}/void`)
+      .set('Authorization', `Bearer ${epi}`).send({ reason: 'Duplicate of the June entry' })
+
+    await request(server).post('/api/sacraments')
+      .set('Authorization', `Bearer ${epi}`)
+      .send({ client_id: memberId, type: 'burial', date: '2029-09-02' })
+
+    // A baptism outside the period, to prove the window is real.
+    await request(server).post('/api/sacraments')
+      .set('Authorization', `Bearer ${epi}`)
+      .send({ client_id: memberId, type: 'baptism', date: '2030-01-05' })
+  }, 45_000)
+
+  afterAll(async () => {
+    for (const id of cleanupOrgIds) {
+      await pool.query('DELETE FROM ochr_organizations WHERE id = $1', [id]).catch(() => {})
+    }
+  })
+
+  const run = async (token, qs = 'start=2029-01-01&end=2029-12-31') => {
+    const res = await request(server).get(`/api/reports/parochial-report?${qs}`)
+      .set('Authorization', `Bearer ${token}`)
+    return res
+  }
+  const field = (body, key) => body.fields.find(f => f.key === key)
+
+  it('offers the Parochial Report to an Episcopal parish', async () => {
+    const res = await request(server).get('/api/reports')
+      .set('Authorization', `Bearer ${epi}`)
+    expect(res.status).toBe(200)
+    expect(res.body.tradition).toBe('episcopal')
+    expect(res.body.reports.map(r => r.key)).toContain('parochial-report')
+    // The count of unconfirmed lines is surfaced up front, not buried.
+    expect(res.body.reports[0].unverified_count).toBeGreaterThan(0)
+  })
+
+  it('offers a Catholic parish nothing, and says why rather than looking broken', async () => {
+    // A Catholic parish files the Status Animarum, to its own chancery, on
+    // a diocesan deadline. Nobody has seen one. An empty list plus an
+    // explanation beats inventing a definition.
+    const res = await request(server).get('/api/reports')
+      .set('Authorization', `Bearer ${cat}`)
+    expect(res.status).toBe(200)
+    expect(res.body.reports).toEqual([])
+    expect(res.body.note).toMatch(/catholic/i)
+
+    const denied = await run(cat)
+    expect(denied.status).toBe(404)
+  })
+
+  it('counts register entries in the period, excluding voided ones', async () => {
+    const res = await run(epi)
+    expect(res.status).toBe(200)
+    // Three baptisms entered for 2029; one voided. The void has to bite
+    // here or it means nothing.
+    expect(field(res.body, 'baptisms').value).toBe(2)
+    expect(field(res.body, 'burials').value).toBe(1)
+  })
+
+  it('respects the period window', async () => {
+    const res = await run(epi, 'start=2030-01-01&end=2030-12-31')
+    expect(field(res.body, 'baptisms').value).toBe(1)
+  })
+
+  it('every field carries its source', async () => {
+    const res = await run(epi)
+    for (const f of res.body.fields) {
+      expect(f.source, `${f.key} has no source`).toBeTruthy()
+      expect(['verified', 'unverified', 'unsupported']).toContain(f.requirement)
+    }
+  })
+
+  it('marks what we have NOT confirmed the form asks for', async () => {
+    const res = await run(epi)
+    // Baptism counts and ASA are verified against published sources.
+    expect(field(res.body, 'baptisms').requirement).toBe('verified')
+    expect(field(res.body, 'asa').requirement).toBe('verified')
+    // Marriages and burials are not. Nobody has read the form.
+    expect(field(res.body, 'marriages').requirement).toBe('unverified')
+    expect(field(res.body, 'burials').requirement).toBe('unverified')
+  })
+
+  it('emits NO number for something we cannot produce', async () => {
+    // A zero and a blank are different claims. "We received nobody" and
+    // "we cannot tell you" must never render the same way.
+    const res = await run(epi)
+    const r = field(res.body, 'receptions')
+    expect(r.requirement).toBe('unsupported')
+    expect(r.value).toBeNull()
+    expect(r.source).toMatch(/[Nn]ot recorded/)
+  })
+
+  it('says on every response that it is not a filing', async () => {
+    const res = await run(epi)
+    expect(res.body.disclaimer).toMatch(/[Nn]othing here is filed/)
+  })
+
+  it('rejects a period that runs backwards', async () => {
+    const res = await run(epi, 'start=2029-12-31&end=2029-01-01')
+    expect(res.status).toBe(400)
+  })
+
+  it('exports a CSV that carries the provenance with it', async () => {
+    const res = await request(server).get('/api/reports/parochial-report.csv?start=2029-01-01&end=2029-12-31')
+      .set('Authorization', `Bearer ${epi}`)
+    expect(res.status).toBe(200)
+    expect(res.headers['content-type']).toMatch(/text\/csv/)
+    expect(res.headers['content-disposition']).toMatch(/parochial-report-2029-01-01-to-2029-12-31\.csv/)
+    expect(res.text).toMatch(/^field,value,requirement,source,note/)
+    expect(res.text).toMatch(/Baptisms,2,verified/)
+    // The disclaimer outlives the screen — a CSV gets emailed onward.
+    expect(res.text).toMatch(/[Nn]othing here is filed/)
+  })
+
+  it('is tenant-scoped — another parish sees its own zeroes', async () => {
+    const other = await mk('anglican', 2)
+    const res = await run(other)
+    expect(res.status).toBe(200)
+    expect(field(res.body, 'baptisms').value).toBe(0)
   })
 })
 
@@ -8999,6 +10418,396 @@ describe('offerings & fees — catalog + invoices (BILL.0/BILL.1)', () => {
   })
 })
 
+
+describe('Parish Care (CARE.1) — status without verdicts', () => {
+  // The governing question is "what parish needs care, what is the context,
+  // and what is the next faithful action" — not "which parish is failing".
+  // These tests hold the line that separates those: status is derived from
+  // things a human did, arrives with the sentence that produced it, and is
+  // never written to a parish's record as a conclusion about them.
+  const chancery = {
+    organizationName: `Care Chancery ${RUN_ID}`, name: 'Canon',
+    email: `care_${RUN_ID}@example.com`, password: 'smoke-test-pw-61',
+    organizationType: 'diocese',
+  }
+  // A DEDICATED parish, not orgA. orgA is shared with the support-console
+  // suite, which opens tickets on it — a care test that assumes a clean
+  // slate it does not control is a test of whichever suite ran first.
+  const parish = {
+    organizationName: `Care Parish ${RUN_ID}`, name: 'Parish Admin',
+    email: `careparish_${RUN_ID}@example.com`, password: 'smoke-test-pw-66',
+  }
+  let dio, dioOrg, staffTok, parishId, parishTok
+  const cleanupOrgIds = []
+
+  beforeAll(async () => {
+    const res = await request(server).post('/api/auth/signup')
+      .set('X-Forwarded-For', '10.99.0.15').send(chancery)
+    expect(res.status).toBe(201)
+    dio = res.body.token; dioOrg = res.body.user.organization.id
+    cleanupOrgIds.push(dioOrg)
+
+    // Diocesan SUPPORT STAFF, distinct from leadership — the brief asks
+    // for that distinction and the brief's contact rules depend on it.
+    const st = await request(server).post('/api/users')
+      .set('Authorization', `Bearer ${dio}`)
+      .send({ name: 'Support Staff', email: `carestaff_${RUN_ID}@example.com`,
+              password: 'smoke-test-pw-62', role: 'staff' })
+    expect(st.status).toBe(201)
+    const li = await request(server).post('/api/auth/login')
+      .send({ email: `carestaff_${RUN_ID}@example.com`, password: 'smoke-test-pw-62' })
+    staffTok = li.body.token
+
+    const pr = await request(server).post('/api/auth/signup')
+      .set('X-Forwarded-For', '10.99.0.15').send(parish)
+    expect(pr.status).toBe(201)
+    parishTok = pr.body.token
+    parishId = pr.body.user.organization.id
+    cleanupOrgIds.push(parishId)
+
+    const invite = await request(server).post('/api/diocese/parishes/invite')
+      .set('Authorization', `Bearer ${dio}`).send({ email: parish.email })
+    expect(invite.status).toBe(201)
+    const accept = await request(server).post('/api/affiliation/accept')
+      .set('Authorization', `Bearer ${parishTok}`).send({ grant_level: 'summary' })
+    expect(accept.status).toBe(200)
+  }, 45_000)
+
+  afterAll(async () => {
+    for (const id of cleanupOrgIds) {
+      await pool.query('DELETE FROM ochr_organizations WHERE id = $1', [id]).catch(() => {})
+    }
+  })
+
+  const care = async (tok = dio) => {
+    const res = await request(server).get('/api/diocese/care').set('Authorization', `Bearer ${tok}`)
+    expect(res.status).toBe(200)
+    return res.body
+  }
+  const row = (body) => body.parishes.find(p => p.parish_org_id === parishId)
+
+  it('a parish token cannot reach Parish Care at all', async () => {
+    for (const path of ['/api/diocese/care', `/api/diocese/care/${parishId}`, `/api/diocese/care/${parishId}/brief`]) {
+      const res = await request(server).get(path).set('Authorization', `Bearer ${parishTok}`)
+      expect(res.status).toBe(403)
+    }
+  })
+
+  it('every status arrives with the sentence that produced it', async () => {
+    const body = await care()
+    for (const p of body.parishes) {
+      expect(p.status.because, `${p.parish_name} has a status with no reason`).toBeTruthy()
+      expect(['ready', 'review_together', 'offer_support', 'awaiting_update']).toContain(p.status.key)
+      expect(p.status.meaning).toBeTruthy()
+    }
+  })
+
+  it('uses none of the forbidden vocabulary anywhere in the payload', async () => {
+    // The words the brief rules out, checked against the whole response
+    // rather than against a list of fields somebody has to remember.
+    const body = JSON.stringify(await care()).toLowerCase()
+    for (const banned of ['at risk', 'delinquent', 'non-compliant', 'noncompliant',
+                          'overdue', 'failing', 'health score', 'risk score',
+                          'compliance', 'engagement', 'leaderboard', 'rank']) {
+      expect(body, `payload contains "${banned}"`).not.toContain(banned)
+    }
+  })
+
+  it('a new parish reads as awaiting update, not as a problem', async () => {
+    const p = row(await care())
+    expect(p.status.key).toBe('awaiting_update')
+    expect(p.status.because).toMatch(/first conversation|check in/i)
+  })
+
+  it('an open support request moves the parish to Offer support, without telling the diocese what it said', async () => {
+    const secret = `Payroll crashes on Fr X stipend ${RUN_ID}`
+    const t = await request(server).post('/api/support-tickets')
+      .set('Authorization', `Bearer ${parishTok}`)
+      .send({ description: secret })
+    expect(t.status).toBe(201)
+    const p = row(await care())
+    expect(p.status.key).toBe('offer_support')
+    // It must NOT claim the parish asked the diocese for anything — the ticket
+    // was opened with OpenChurch, and the old wording ("asked for help")
+    // reported a conversation that never happened.
+    expect(p.status.because).not.toMatch(/asked for help/i)
+    expect(p.status.because).toMatch(/with OpenChurch/i)
+
+    // And the ticket TEXT must not reach the diocese anywhere: not the parish
+    // record, and above all not the printed brief.
+    const detail = await request(server).get(`/api/diocese/care/${parishId}`)
+      .set('Authorization', `Bearer ${dio}`)
+    expect(detail.status).toBe(200)
+    expect(JSON.stringify(detail.body)).not.toContain(secret)
+    expect(detail.body.current_work.open_support_requests).toBe(1)
+
+    const brief = await request(server).get(`/api/diocese/care/${parishId}/brief`)
+      .set('Authorization', `Bearer ${dio}`)
+    expect(brief.status).toBe(200)
+    expect(JSON.stringify(brief.body)).not.toContain(secret)
+    expect(brief.body.current_work.open_support_requests).toBe(1)
+  })
+
+  it('the brief prints leadership only, never the parish roster', async () => {
+    // role defaults to 'Member', which is why "has a role" was the wrong test:
+    // it matched every parishioner and printed the first eight with contacts.
+    const mk = async (name, role) => {
+      const r = await request(server).post('/api/clients')
+        .set('Authorization', `Bearer ${parishTok}`)
+        .send({ name, role, email: `${name.replace(/\W/g, '')}@example.com`, phone: '555-0100' })
+      expect(r.status).toBe(201)
+    }
+    await mk(`Aaron Member ${RUN_ID}`, 'Member')     // alphabetically first on purpose
+    await mk(`Zeb Deacon ${RUN_ID}`, 'Deacon')
+
+    const brief = await request(server).get(`/api/diocese/care/${parishId}/brief`)
+      .set('Authorization', `Bearer ${dio}`)
+    expect(brief.status).toBe(200)
+    const roles = brief.body.people.map(p => String(p.role).toLowerCase())
+    expect(roles.length).toBeGreaterThan(0)
+    expect(roles).toContain('deacon')
+    expect(roles).not.toContain('member')
+    expect(JSON.stringify(brief.body.people)).not.toContain('Aaron Member')
+  })
+
+  it('leadership is read in the parish\'s OWN tradition, not one hard-coded set', async () => {
+    // A Rector is leadership in an Episcopal parish and not a role a Catholic
+    // parish uses at all. A single list printed nobody for four of five
+    // traditions, which is the bug this pins.
+    const r = await request(server).post('/api/clients')
+      .set('Authorization', `Bearer ${parishTok}`)
+      .send({ name: `Wilma Rector ${RUN_ID}`, role: 'Rector', email: `wr${RUN_ID}@example.com` })
+    expect(r.status).toBe(201)
+
+    const rolesFor = async () => {
+      const b = await request(server).get(`/api/diocese/care/${parishId}/brief`)
+        .set('Authorization', `Bearer ${dio}`)
+      expect(b.status).toBe(200)
+      return b.body.people.map(p => String(p.role).toLowerCase())
+    }
+
+    const setTradition = async (tradition) => {
+      const res = await request(server).patch('/api/organization')
+        .set('Authorization', `Bearer ${parishTok}`).send({ tradition })
+      expect(res.status).toBe(200)
+    }
+
+    // Capture whatever this parish already was, so this test restores it
+    // rather than deciding for whatever runs next.
+    const before = await request(server).get('/api/organization')
+      .set('Authorization', `Bearer ${parishTok}`)
+    expect(before.status).toBe(200)
+    const original = before.body.organization?.tradition ?? before.body.tradition ?? 'general'
+
+    try {
+      await setTradition('episcopal')
+      expect(await rolesFor()).toContain('rector')
+
+      // Same parish, same rows, Catholic vocabulary: Rector is not one of its
+      // offices, so the Rector drops off and the Deacon (shared by both) stays.
+      await setTradition('catholic')
+      const catholicRoles = await rolesFor()
+      expect(catholicRoles).not.toContain('rector')
+      expect(catholicRoles).toContain('deacon')
+    } finally {
+      await setTradition(original)
+    }
+  })
+
+  it('writing to the record is what makes a parish "seen"', async () => {
+    const w = await request(server).post(`/api/diocese/care/${parishId}/timeline`)
+      .set('Authorization', `Bearer ${dio}`)
+      .send({ kind: 'visit', summary: 'Visited the parish office; met the administrator.' })
+    expect(w.status).toBe(201)
+
+    const detail = await request(server).get(`/api/diocese/care/${parishId}`)
+      .set('Authorization', `Bearer ${dio}`)
+    expect(detail.status).toBe(200)
+    expect(detail.body.timeline[0].summary).toMatch(/Visited the parish office/)
+    expect(detail.body.timeline[0].actor_name).toBe(chancery.name)
+  })
+
+  it('a follow-up is the office\'s own memory, and can be let go rather than failed', async () => {
+    const f = await request(server).post(`/api/diocese/care/${parishId}/followups`)
+      .set('Authorization', `Bearer ${dio}`)
+      .send({ context: 'Rector transition last spring',
+              next_action: 'Ask whether register continuity support would help' })
+    expect(f.status).toBe(201)
+    expect(f.body.state).toBe('open')
+
+    const list = await request(server).get('/api/diocese/care/followups')
+      .set('Authorization', `Bearer ${dio}`)
+    expect(list.body.followups.some(x => x.id === f.body.id)).toBe(true)
+
+    // 'let_go' exists so a pastoral judgement does not have to be recorded
+    // as an unfinished task.
+    const done = await request(server).patch(`/api/diocese/care/followups/${f.body.id}`)
+      .set('Authorization', `Bearer ${dio}`)
+      .send({ state: 'let_go', completion_note: 'Spoke informally at the deanery meeting; no longer needed.' })
+    expect(done.status).toBe(200)
+    expect(done.body.state).toBe('let_go')
+  })
+
+  it('a transition is recorded as a moment to accompany, not a flag', async () => {
+    const tr = await request(server).post(`/api/diocese/care/${parishId}/transitions`)
+      .set('Authorization', `Bearer ${dio}`)
+      .send({ kind: 'administrator_departure', began_on: '2026-07-01',
+              continuity_needs: 'Register handoff; nobody else has used the drafts sandbox.' })
+    expect(tr.status).toBe(201)
+
+    const detail = await request(server).get(`/api/diocese/care/${parishId}`)
+      .set('Authorization', `Bearer ${dio}`)
+    const entry = detail.body.timeline.find(t => t.kind === 'transition')
+    expect(entry.summary).toMatch(/accompany/i)
+    expect(entry.summary).not.toMatch(/risk|alert|escalat/i)
+  })
+
+  it('report review is a conversation with an agreed next step', async () => {
+    const sub = await request(server).post('/api/finance/submissions')
+      .set('Authorization', `Bearer ${parishTok}`)
+      .send({ period_start: '2031-01-01', period_end: '2031-01-31' })
+    expect(sub.status).toBe(201)
+
+    const awaiting = row(await care())
+    expect(['offer_support', 'review_together']).toContain(awaiting.status.key)
+
+    const note = await request(server).post(`/api/diocese/care/submissions/${sub.body.id}/notes`)
+      .set('Authorization', `Bearer ${dio}`)
+      .send({ body: 'Offertory line looks lower than last year — worth a word.',
+              visibility: 'shared', agreed_next_step: 'Bring it to the pastoral visit in October' })
+    expect(note.status).toBe(201)
+    expect(note.body.agreed_next_step).toMatch(/pastoral visit/)
+
+    const detail = await request(server).get(`/api/diocese/care/${parishId}`)
+      .set('Authorization', `Bearer ${dio}`)
+    expect(detail.body.timeline.some(t => t.kind === 'report' && /next step was agreed/i.test(t.summary))).toBe(true)
+  })
+
+  it('is scoped to this diocese — another chancery sees nothing of this parish', async () => {
+    const other = await request(server).post('/api/auth/signup')
+      .set('X-Forwarded-For', '10.99.0.15')
+      .send({ organizationName: `Other Chancery ${RUN_ID}`, name: 'Canon',
+              email: `care2_${RUN_ID}@example.com`, password: 'smoke-test-pw-63',
+              organizationType: 'diocese' })
+    cleanupOrgIds.push(other.body.user.organization.id)
+    const body = await care(other.body.token)
+    expect(body.parishes).toEqual([])
+    const denied = await request(server).get(`/api/diocese/care/${parishId}`)
+      .set('Authorization', `Bearer ${other.body.token}`)
+    expect(denied.status).toBe(404)
+  })
+})
+
+describe('the Parish Care Brief (CARE.2)', () => {
+  // "Artifacts outlive dashboards." This is the page that leaves the
+  // building, so its rules are stricter than the dashboard's.
+  let dio, staffTok, parishId, dioOrg
+  const cleanupOrgIds = []
+
+  beforeAll(async () => {
+    const res = await request(server).post('/api/auth/signup')
+      .set('X-Forwarded-For', '10.99.0.16')
+      .send({ organizationName: `Brief Chancery ${RUN_ID}`, name: 'Bishop',
+              email: `brief_${RUN_ID}@example.com`, password: 'smoke-test-pw-64',
+              organizationType: 'diocese' })
+    dio = res.body.token; dioOrg = res.body.user.organization.id
+    cleanupOrgIds.push(dioOrg)
+
+    const st = await request(server).post('/api/users')
+      .set('Authorization', `Bearer ${dio}`)
+      .send({ name: 'Canon Staff', email: `briefstaff_${RUN_ID}@example.com`,
+              password: 'smoke-test-pw-65', role: 'staff' })
+    expect(st.status).toBe(201)
+    staffTok = (await request(server).post('/api/auth/login')
+      .send({ email: `briefstaff_${RUN_ID}@example.com`, password: 'smoke-test-pw-65' })).body.token
+
+    await request(server).post('/api/diocese/parishes/invite')
+      .set('Authorization', `Bearer ${dio}`).send({ email: orgB.email })
+    await request(server).post('/api/affiliation/accept')
+      .set('Authorization', `Bearer ${tokenB}`).send({ grant_level: 'detail' })
+    parishId = (await request(server).get('/api/auth/me')
+      .set('Authorization', `Bearer ${tokenB}`)).body.user.organization.id
+
+    await request(server).post(`/api/diocese/care/${parishId}/timeline`)
+      .set('Authorization', `Bearer ${dio}`)
+      .send({ kind: 'note', summary: 'Shared: agreed to revisit the register backlog in the autumn.', visibility: 'shared' })
+    await request(server).post(`/api/diocese/care/${parishId}/timeline`)
+      .set('Authorization', `Bearer ${dio}`)
+      .send({ kind: 'note', summary: 'Internal: the treasurer is unwell; be gentle about the deadline.', visibility: 'diocese' })
+  }, 45_000)
+
+  afterAll(async () => {
+    await request(server).post('/api/affiliation/leave')
+      .set('Authorization', `Bearer ${tokenB}`).catch(() => {})
+    for (const id of cleanupOrgIds) {
+      await pool.query('DELETE FROM ochr_organizations WHERE id = $1', [id]).catch(() => {})
+    }
+  })
+
+  const brief = async (tok, qs = '') => {
+    const res = await request(server).get(`/api/diocese/care/${parishId}/brief${qs}`)
+      .set('Authorization', `Bearer ${tok}`)
+    expect(res.status).toBe(200)
+    return res.body
+  }
+
+  it('leads with context and carries the Church Year', async () => {
+    const b = await brief(dio)
+    expect(b.parish.name).toBeTruthy()
+    expect(b.situation.because).toBeTruthy()
+    expect(b.church_year).toHaveProperty('season')
+    expect(b.recent_history).toBeInstanceOf(Array)
+  })
+
+  it('does NOT print internal notes by default', async () => {
+    // A brief may be left on a sacristy table. Diocese-only notes are
+    // opt-in, and "the treasurer is unwell" is exactly the sentence that
+    // must not be on a page somebody else can pick up.
+    const b = await brief(dio)
+    const text = JSON.stringify(b.recent_history)
+    expect(text).toMatch(/register backlog/)
+    expect(text).not.toMatch(/treasurer is unwell/)
+    expect(b.internal_included).toBe(false)
+  })
+
+  it('includes them only when deliberately asked for', async () => {
+    const b = await brief(dio, '?internal=1')
+    expect(JSON.stringify(b.recent_history)).toMatch(/treasurer is unwell/)
+    expect(b.internal_included).toBe(true)
+  })
+
+  it('withholds contact details from support staff, and SAYS it withheld them', async () => {
+    const asStaff = await brief(staffTok)
+    expect(asStaff.withheld).toBeTruthy()
+    expect(asStaff.parish.address).toBeNull()
+    for (const p of asStaff.people) {
+      expect(p).not.toHaveProperty('email')
+      expect(p).not.toHaveProperty('phone')
+      expect(p.name).toBeTruthy()   // who they are is still context
+    }
+
+    const asLeadership = await brief(dio)
+    expect(asLeadership.withheld).toBeNull()
+  })
+
+  it('carries no score, ranking or comparison', async () => {
+    const b = JSON.stringify(await brief(dio)).toLowerCase()
+    for (const banned of ['score', 'rank', 'percentile', 'compared', 'at risk', 'grade']) {
+      expect(b, `brief contains "${banned}"`).not.toContain(banned)
+    }
+  })
+
+  it('records that a brief was prepared, without freezing its content', async () => {
+    const rec = await request(server).post(`/api/diocese/care/${parishId}/brief`)
+      .set('Authorization', `Bearer ${dio}`).send({ purpose: 'the bishop\'s visit in October' })
+    expect(rec.status).toBe(201)
+    expect(rec.body.prepared_by_name).toBe('Bishop')
+
+    const detail = await request(server).get(`/api/diocese/care/${parishId}`)
+      .set('Authorization', `Bearer ${dio}`)
+    expect(detail.body.timeline.some(t => t.kind === 'brief' && /bishop/i.test(t.summary))).toBe(true)
+  })
+})
 describe('role enforcement', () => {
   it('admin can list users in their org', async () => {
     const res = await request(server)

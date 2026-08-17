@@ -1,11 +1,12 @@
 import { useState } from 'react'
 import { motion } from 'framer-motion'
-import { UserCircle, Languages } from 'lucide-react'
+import { UserCircle, Languages, KeyRound, Eye, EyeOff } from 'lucide-react'
 import { useLocale } from '../i18n'
 import PageWrapper from '../components/PageWrapper'
 import NotificationPrefs from '../components/NotificationPrefs'
 import PushSubscriptionToggle from '../components/PushSubscriptionToggle'
 import AvatarUploader from '../components/AvatarUploader'
+import TextField from '../components/TextField'
 import { useAuth } from '../context/AuthContext'
 import { useToast } from '../components/ToastProvider'
 import { apiUrl } from '../api'
@@ -20,6 +21,10 @@ import { apiUrl } from '../api'
 //   3. PushSubscriptionToggle   — whether THIS device receives push at
 //                                 all (PWA.4b). Different axis from
 //                                 the prefs above; user has both.
+//   4. PasswordCard             — change your own password (F1). Lives
+//                                 here rather than /team because every
+//                                 signed-in user owns their credential,
+//                                 including viewers.
 //
 // Future: move CalendarSync selfServe here from /team so staff/viewers
 // (currently locked out of /team) can grab their own calendar feed too.
@@ -111,6 +116,128 @@ function LanguageCard() {
   )
 }
 
+
+// Password card (F1) — change your own password while signed in.
+//
+// Until the endpoint behind this existed, the only route to a new
+// password was the emailed reset link, which does not send without an
+// email provider configured. So this is the ONLY working path today.
+//
+// The server bumps token_version on success, which kills every session
+// signed in with the old password — including this one. It hands back a
+// fresh token so this device survives; replaceToken swaps it in without
+// disturbing the signed-in user. That is why a successful change says
+// "other devices signed out" rather than bouncing the user to /login.
+function PasswordCard() {
+  const { t } = useLocale()
+  const { replaceToken } = useAuth()
+  const toast = useToast()
+
+  const [current, setCurrent] = useState('')
+  const [next, setNext]       = useState('')
+  const [confirm, setConfirm] = useState('')
+  const [show, setShow]       = useState(false)
+  const [busy, setBusy]       = useState(false)
+  const [error, setError]     = useState('')
+
+  const MIN = 8
+  const mismatch = confirm.length > 0 && next !== confirm
+  const canSubmit = current.length > 0 && next.length >= MIN && next === confirm && !busy
+
+  async function handleSubmit(e) {
+    e.preventDefault()
+    setError('')
+    if (!canSubmit) return
+    setBusy(true)
+    try {
+      const res = await fetch(apiUrl('/api/auth/password'), {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ currentPassword: current, password: next }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data.error || `Could not change password (${res.status})`)
+      // Swap in the re-issued token BEFORE clearing the form, so no
+      // request can go out on the token the server just invalidated.
+      replaceToken(data.token)
+      setCurrent(''); setNext(''); setConfirm(''); setShow(false)
+      toast.success(t('prefs.pw.done'))
+    } catch (err) {
+      setError(err.message || t('prefs.pw.failed'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const eye = (
+    <button
+      type="button"
+      onClick={() => setShow(s => !s)}
+      className="text-ink-500 dark:text-parchment-300/70 hover:text-ink-700 dark:hover:text-parchment-50 transition-colors"
+      aria-label={show ? t('prefs.pw.hide') : t('prefs.pw.show')}
+    >
+      {show ? <EyeOff size={16} aria-hidden="true" /> : <Eye size={16} aria-hidden="true" />}
+    </button>
+  )
+
+  return (
+    <div className="bg-parchment-50 dark:bg-ink-900/90 rounded-2xl border border-parchment-300/50 dark:border-brass-900/30 shadow-warm overflow-hidden">
+      <div className="px-5 py-4 border-b border-parchment-300/50 dark:border-brass-900/25 flex items-center gap-2">
+        <KeyRound size={15} className="text-brass-600 dark:text-brass-300" aria-hidden="true" />
+        <h2 className="font-semibold text-ink-900 dark:text-parchment-50">{t('prefs.pw.title')}</h2>
+      </div>
+      <form onSubmit={handleSubmit} className="px-5 py-5 space-y-4">
+        <TextField
+          label={t('prefs.pw.current')}
+          type="password"
+          autoComplete="current-password"
+          value={current}
+          onChange={e => setCurrent(e.target.value)}
+          required
+        />
+        <TextField
+          label={t('prefs.pw.new')}
+          type={show ? 'text' : 'password'}
+          autoComplete="new-password"
+          trailing={eye}
+          hint={t('prefs.pw.hint', { min: MIN })}
+          value={next}
+          onChange={e => setNext(e.target.value)}
+          required
+        />
+        <TextField
+          label={t('prefs.pw.confirm')}
+          type={show ? 'text' : 'password'}
+          autoComplete="new-password"
+          error={mismatch ? t('prefs.pw.mismatch') : undefined}
+          value={confirm}
+          onChange={e => setConfirm(e.target.value)}
+          required
+        />
+
+        {error && (
+          <p role="alert" className="text-sm text-rose-700 dark:text-rose-300">
+            {error}
+          </p>
+        )}
+
+        <div className="flex items-center gap-3 pt-1">
+          <button
+            type="submit"
+            disabled={!canSubmit}
+            className="px-4 py-2 rounded-lg text-sm font-semibold bg-church-700 text-parchment-50 border border-church-700 transition-colors hover:bg-church-800 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {busy ? t('prefs.pw.saving') : t('prefs.pw.submit')}
+          </button>
+          <p className="text-xs text-ink-500 dark:text-parchment-300/70 leading-relaxed">
+            {t('prefs.pw.note')}
+          </p>
+        </div>
+      </form>
+    </div>
+  )
+}
+
 export default function Preferences() {
   const { t } = useLocale()
   return (
@@ -129,6 +256,10 @@ export default function Preferences() {
 
         <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}>
           <ProfileCard />
+        </motion.div>
+
+        <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}>
+          <PasswordCard />
         </motion.div>
 
         <motion.div

@@ -59,6 +59,8 @@ import sacramentsRouter from './routes/sacraments.js'
 import massIntentionsRouter from './routes/massIntentions.js'
 import financeRouter from './routes/finance.js'
 import dioceseRouter from './routes/diocese.js'
+import reportsRouter from './routes/reports.js'
+import dioceseCareRouter from './routes/dioceseCare.js'
 import affiliationRouter from './routes/affiliation.js'
 import assessmentsRouter from './routes/assessments.js'
 import checklistsRouter from './routes/checklists.js'
@@ -229,6 +231,16 @@ app.use('/api/checklists',    requireAuth, writeGate, auditLog('checklist'), che
 // DIO.1 — the diocese umbrella. requireOrgType hard-gates the diocese
 // surface (reads included); the parish-side affiliation panel is
 // admin-write because affiliation is an org-level covenant.
+// RPT.1 — tradition-specific reporting. Read-only, so no writeGate; any
+// signed-in role may run it, because the person who reconciles the numbers
+// is often not the person who can edit them.
+app.use('/api/reports',       requireAuth, reportsRouter)
+
+// CARE.1 — Parish Care. Mounted ABOVE the general diocese router so
+// /api/diocese/care/* resolves here, and behind the same requireOrgType
+// gate: a parish token gets 403 on every path, reads included.
+app.use('/api/diocese/care', requireAuth, requireOrgType('diocese'), writeGate, auditLog('parish_care'), dioceseCareRouter)
+
 app.use('/api/diocese/assessments', requireAuth, requireOrgType('diocese'), writeGate, auditLog('assessment'), assessmentsRouter)
 app.use('/api/diocese',       requireAuth, requireOrgType('diocese'), writeGate, auditLog('diocese'), dioceseRouter)
 app.use('/api/affiliation',   requireAuth, adminGate, auditLog('affiliation'), affiliationRouter)
@@ -314,9 +326,18 @@ app.use('/api/admin/notifications', requireAuth, requireRole('admin'), notificat
 // gate behind requireAuth so unauthenticated traffic can't burn
 // bible-api.com quota for free.
 app.use('/api/daily-verse',   requireAuth, dailyVerseRouter)
-// Operational maintenance (retention prune, etc.). Admin-only.
-// Vercel cron will hit this once a day when wired.
-app.use('/api/admin/maintenance', requireAuth, requireRole('admin'), maintenanceRouter)
+// Operational maintenance (retention prune, etc.). VENDOR-ONLY.
+//
+// This was requireRole('admin') — a *parish* admin — until 2026-08-14.
+// pruneOldRecords() takes no org argument: it walks every row of
+// ochr_organizations and deletes audit logs, notification logs, AI usage
+// and scheduled rows, and anonymises check-in PII, for all of them. So
+// any admin at any tenant could force a destructive maintenance pass
+// across every other tenant's data. Nothing was readable cross-org and
+// only already-expired rows are removed, but the trigger belongs to the
+// operator, not the customer. Same env-identified, fail-closed identity
+// as /api/admin/feedback.
+app.use('/api/admin/maintenance', requireAuth, requireSuperAdmin, maintenanceRouter)
 // Forms (Sprint Forms / F.1). Admin-only across the board — every
 // caller must be an admin (not just authenticated), so a staff
 // account can't build a form, list responses, or delete one.

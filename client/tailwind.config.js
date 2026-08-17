@@ -76,6 +76,29 @@ export default {
           900: '#1C1916',
           950: '#0E0C0A',  // dark-mode background
         },
+        // Muted sage — the one green in Parchment & Brass, added 2026-08-17 so
+        // the Parish Care "Ready" state has an on-palette tone instead of raw
+        // Tailwind emerald behind an OPERATOR lint exception.
+        //
+        // Warm and olive-leaning on purpose, so it sits with brass and
+        // parchment rather than reading as a UI-kit green. It exists because
+        // "Ready" must not read as the same weight as "Awaiting update"
+        // (ink-400): sage-600 luminance 0.133 vs ink-400 0.223 keeps them
+        // distinct, which desaturating Ready to ink would have collapsed.
+        // sage-800 on sage-50 is 9.8:1 — AAA, not merely AA.
+        sage: {
+          50:  '#F2F4EE',
+          100: '#E3E8DA',
+          200: '#C8D2B9',
+          300: '#A9B795',
+          400: '#8B9B75',
+          500: '#72825D',
+          600: '#5C6B49',
+          700: '#48543A',
+          800: '#36402C',
+          900: '#252C1E',
+          950: '#141810',
+        },
       },
       boxShadow: {
         card:         '0 1px 4px 0 rgb(0 0 0 / 0.07), 0 1px 2px -1px rgb(0 0 0 / 0.06)',

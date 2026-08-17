@@ -18,6 +18,10 @@ export default function Signup() {
   const [showPw,   setShowPw]   = useState(false)
   const [loading,  setLoading]  = useState(false)
   const [error,    setError]    = useState('')
+  // TRAD.1/TRAD.2 — asked BEFORE the account exists, because the sample
+  // data is seeded the moment signup commits. Getting this after the fact
+  // means a Catholic parish's first screen says "Fellowship Hall".
+  const [tradition, setTradition] = useState('')
 
   async function onSubmit(e) {
     e.preventDefault()
@@ -32,6 +36,10 @@ export default function Signup() {
         name: name.trim(),
         email: email.trim(),
         password,
+        // Unset means 'general' server-side — a real tier with neutral
+        // vocabulary and no lectionary, not a hole. Nobody is forced to
+        // classify their congregation to create an account.
+        tradition: tradition || undefined,
       })
       // Land on the welcome screen first — the dashboard is one click away
       // but the first impression should be focused, not noisy.
@@ -81,6 +89,30 @@ export default function Signup() {
               placeholder="First Baptist of Austin"
               leadingIcon={Church}
             />
+
+            <div>
+              <label htmlFor="signup-tradition" className="block text-sm font-medium text-ink-700 dark:text-parchment-200 mb-1.5">
+                Tradition <span className="font-normal text-ink-400 dark:text-parchment-400">— optional</span>
+              </label>
+              <select
+                id="signup-tradition"
+                value={tradition}
+                onChange={e => setTradition(e.target.value)}
+                className="w-full rounded-lg border border-parchment-300 dark:border-ink-600 bg-parchment-50 dark:bg-ink-800 px-3 py-2.5 text-sm text-ink-900 dark:text-parchment-100 focus:outline-none focus:ring-2 focus:ring-brass-400"
+              >
+                <option value="">I’ll decide later</option>
+                <option value="catholic">Catholic</option>
+                <option value="episcopal">Episcopal</option>
+                <option value="lutheran">Lutheran</option>
+                <option value="anglican">Anglican</option>
+                <option value="general">Something else</option>
+              </select>
+              <p className="mt-1 text-xs text-ink-500 dark:text-parchment-300/70">
+                Sets the words OpenChurch uses — Mass or service, register or
+                parish register — and which liturgical calendar it follows.
+                You can change it any time in Settings.
+              </p>
+            </div>
 
             <TextField
               label="Your name"

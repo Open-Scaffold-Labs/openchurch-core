@@ -50,7 +50,7 @@ function displayIntention(t) {
 
 export default function SacristySheet() {
   const { user } = useAuth()
-  const { t, dateLocale } = useLocale()
+  const { t, dateLocale, tradition } = useLocale()
   const churchName = user?.organization?.name || 'Our Parish'
   const [params, setParams] = useSearchParams()
 
@@ -142,7 +142,7 @@ export default function SacristySheet() {
               have to check the ordo against its own manifest. */}
           {liturgical?.season && (
             <p className="mt-1 font-display text-base text-ink-700">
-              {seasonLabel(t, liturgical.season)}
+              {seasonLabel(t, liturgical.season, { tradition, block: liturgical.ordinary_block })}
               {liturgical.feast_name ? ` · ${liturgical.feast_name}` : ''}
               {liturgical.color ? ` · ${colorLabel(t, liturgical.color)}` : ''}
             </p>

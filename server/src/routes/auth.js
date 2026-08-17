@@ -7,6 +7,7 @@ import {
   loginAccountLimiter, loginIpLimiter,
   signupLimiter,
   forgotPasswordAccountLimiter, forgotPasswordIpLimiter,
+  changePasswordLimiter,
 } from '../middleware/rateLimit.js'
 import { seedSampleData } from '../onboarding/sampleSeed.js'
 import { sendEmail } from '../email/send.js'
@@ -54,7 +55,14 @@ function publicUser(user, org) {
     name:   user.name,
     role:   user.role,
     avatar: user.avatar ?? null,
-    organization: { id: org.id, name: org.name, slug: org.slug },
+    // tradition drives the client's vocabulary overlay and season names
+    // (TRAD.1); locale is the parish default the i18n spine has always read
+    // for and never received.
+    organization: {
+      id: org.id, name: org.name, slug: org.slug,
+      tradition: org.tradition ?? 'general',
+      locale: org.locale ?? null,
+    },
   }
 }
 
@@ -66,6 +74,12 @@ router.post('/signup', signupLimiter, async (req, res) => {
   // DIO.1 — a diocese signs up through the same door as a parish; the
   // only difference is the org_type stamp (and no parish sample seed).
   const orgType = req.body?.organizationType === 'diocese' ? 'diocese' : 'parish'
+  // TRAD.1 — a congregation may name its tradition at signup. Anything
+  // unrecognised becomes 'general' rather than an error: a bad value here
+  // must not block someone creating an account, and 'general' is the one
+  // tier that cannot be wrong in another tradition's vocabulary.
+  const TRADITIONS_ALLOWED = new Set(['catholic', 'episcopal', 'lutheran', 'anglican', 'general'])
+  const tradition = TRADITIONS_ALLOWED.has(req.body?.tradition) ? req.body.tradition : 'general'
   if (!organizationName?.trim()) return res.status(400).json({ error: 'Church name is required' })
   if (!name?.trim())             return res.status(400).json({ error: 'Your name is required' })
   if (!isEmail(email))           return res.status(400).json({ error: 'Valid email is required' })
@@ -90,8 +104,8 @@ router.post('/signup', signupLimiter, async (req, res) => {
     if (slugDupe.length) slug = `${slug}-${Date.now().toString(36).slice(-4)}`
 
     const { rows: orgRows } = await client.query(
-      'INSERT INTO ochr_organizations (name, slug, org_type) VALUES ($1, $2, $3) RETURNING *',
-      [organizationName.trim(), slug, orgType]
+      'INSERT INTO ochr_organizations (name, slug, org_type, tradition) VALUES ($1, $2, $3, $4) RETURNING *',
+      [organizationName.trim(), slug, orgType, tradition]
     )
     const org = orgRows[0]
 
@@ -121,7 +135,7 @@ router.post('/signup', signupLimiter, async (req, res) => {
     // screen is the affiliation roster, which starts honestly empty.
     if (orgType !== 'diocese') {
       try {
-        await seedSampleData(pool, org.id)
+        await seedSampleData(pool, org.id, tradition)
       } catch (seedErr) {
         console.error('sample seed failed (signup succeeded):', seedErr)
       }
@@ -163,7 +177,8 @@ router.post('/login', loginAccountLimiter, loginIpLimiter, async (req, res) => {
 
   try {
     const { rows } = await pool.query(
-      `SELECT u.*, o.name AS organization_name, o.slug AS organization_slug
+      `SELECT u.*, o.name AS organization_name, o.slug AS organization_slug,
+              o.tradition AS organization_tradition
          FROM ochr_users u
          JOIN ochr_organizations o ON o.id = u.organization_id
         WHERE u.email = $1`,
@@ -175,7 +190,10 @@ router.post('/login', loginAccountLimiter, loginIpLimiter, async (req, res) => {
     const ok = await bcrypt.compare(password, user.password_hash)
     if (!ok) return res.status(401).json({ error: 'Invalid email or password' })
 
-    const org = { id: user.organization_id, name: user.organization_name, slug: user.organization_slug }
+    const org = {
+      id: user.organization_id, name: user.organization_name, slug: user.organization_slug,
+      tradition: user.organization_tradition,
+    }
     const token = signToken({
       userId: user.id,
       organizationId: org.id,
@@ -210,6 +228,75 @@ router.post('/logout-all', requireAuth, async (req, res) => {
   } catch (err) {
     console.error('logout-all failed:', err)
     res.status(500).json({ error: 'Could not sign out everywhere. Please try again.' })
+  }
+})
+
+// PATCH /api/auth/password
+// Change your own password while signed in.
+//
+// Until this existed the only route to a new password was the emailed
+// reset link — and sendEmail() falls through to a console stub whenever
+// RESEND_API_KEY is unset, which it is. So a signed-in user could not
+// change their password by ANY route. That is a bad sentence to say to a
+// parish, hence this endpoint (F1, 2026-08-14).
+//
+// Bumps token_version exactly like reset-password does (audit H5):
+// changing a password must kill every session that was signed in with
+// the old one. The caller gets a freshly signed token back so the device
+// doing the changing stays in — signing yourself out everywhere is
+// /logout-all's job, deliberately separate.
+//
+// 401 on a wrong current password rather than 403: this is a credential
+// check, not an authorisation one.
+router.patch('/password', requireAuth, changePasswordLimiter, async (req, res) => {
+  const { currentPassword, password } = req.body ?? {}
+
+  if (typeof currentPassword !== 'string' || !currentPassword) {
+    return res.status(400).json({ error: 'Your current password is required' })
+  }
+  if (!password || password.length < MIN_PASSWORD) {
+    return res.status(400).json({ error: `Password must be at least ${MIN_PASSWORD} characters` })
+  }
+  if (password === currentPassword) {
+    return res.status(400).json({ error: 'The new password must be different from your current one' })
+  }
+
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, email, name, role, password_hash, organization_id
+         FROM ochr_users
+        WHERE id = $1 AND organization_id = $2`,
+      [req.user.id, req.organizationId]
+    )
+    const user = rows[0]
+    // Row gone mid-session (deleted by an admin) — same shape as /me.
+    if (!user) return res.status(401).json({ error: 'Your account is no longer active' })
+
+    const ok = await bcrypt.compare(currentPassword, user.password_hash)
+    if (!ok) return res.status(401).json({ error: 'Current password is incorrect' })
+
+    const hash = await bcrypt.hash(password, 10)
+    const { rows: bumped } = await pool.query(
+      `UPDATE ochr_users
+          SET password_hash = $1, token_version = token_version + 1
+        WHERE id = $2 AND organization_id = $3
+        RETURNING token_version`,
+      [hash, user.id, req.organizationId]
+    )
+
+    const token = signToken({
+      userId: user.id,
+      organizationId: user.organization_id,
+      email: user.email,
+      name: user.name,
+      role: user.role,
+      tv: bumped[0].token_version,
+    })
+
+    res.json({ token, message: 'Password updated. Any other signed-in devices have been signed out.' })
+  } catch (err) {
+    console.error('change-password failed:', err)
+    res.status(500).json({ error: 'Could not change your password. Please try again.' })
   }
 })
 
@@ -342,7 +429,8 @@ router.post('/reset-password', async (req, res) => {
 router.get('/me', requireAuth, async (req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT u.*, o.name AS organization_name, o.slug AS organization_slug
+      `SELECT u.*, o.name AS organization_name, o.slug AS organization_slug,
+              o.tradition AS organization_tradition
          FROM ochr_users u
          JOIN ochr_organizations o ON o.id = u.organization_id
         WHERE u.id = $1 AND u.organization_id = $2`,
@@ -350,7 +438,10 @@ router.get('/me', requireAuth, async (req, res) => {
     )
     if (!rows.length) return res.status(401).json({ error: 'User no longer exists' })
     const u = rows[0]
-    const org = { id: u.organization_id, name: u.organization_name, slug: u.organization_slug }
+    const org = {
+      id: u.organization_id, name: u.organization_name, slug: u.organization_slug,
+      tradition: u.organization_tradition,
+    }
     res.json({ user: publicUser(u, org) })
   } catch (err) {
     console.error('me failed:', err)

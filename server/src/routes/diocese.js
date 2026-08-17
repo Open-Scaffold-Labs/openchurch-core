@@ -5,6 +5,8 @@
 //   GET   /api/diocese/parishes        → affiliation roster
 //   POST  /api/diocese/parishes/invite → invite a parish by its admin's email
 //   PATCH /api/diocese/parishes/:id    → suspend / reactivate / end
+//   GET   /api/diocese/coa             → the diocese's chart of accounts
+//   PUT   /api/diocese/coa             → customize it; affiliated parishes inherit
 //
 // Invariants:
 //   • Every query joins through the caller's diocese_org_id — a diocese
@@ -18,7 +20,7 @@ import { Router } from 'express'
 import pool from '../db.js'
 import { requireIntParam } from '../utils/params.js'
 import { monitor } from '../monitoring/index.js'
-import { computeDistress } from '../finance/distress.js'
+import { financialObservations } from '../finance/observations.js'
 
 const router = Router()
 
@@ -349,14 +351,138 @@ router.get('/parishes/:id/financials', async (req, res) => {
   }
 })
 
-// GET /api/diocese/health — distress flags (DIO.4). Simple, explainable
+// GET /api/diocese/observations — financial observations (DIO.4). Simple, explainable
 // rules over approved submissions; each flag names its rule and numbers.
-router.get('/health', async (req, res) => {
+router.get('/observations', async (req, res) => {
   try {
-    res.json({ parishes: await computeDistress(req.organizationId) })
+    res.json({ parishes: await financialObservations(req.organizationId) })
   } catch (err) {
-    monitor.error('diocese.health', err, { orgId: req.organizationId })
-    res.status(500).json({ error: 'Failed to compute parish health' })
+    monitor.error('diocese.observations', err, { orgId: req.organizationId })
+    res.status(500).json({ error: 'Failed to load financial observations' })
+  }
+})
+
+// ---------------------------------------------------------------------
+// Chart of accounts (DIO.5) — the thing that trickles DOWN.
+//
+// Until now the diocese could only read what parishes sent up. It could
+// not say what the accounts MEAN. That made the assessment only as
+// trustworthy as each parish's own setup: untick `assessable` locally and
+// the chancery never sees it.
+//
+// A diocese is an organization, and CoA rows are already keyed on
+// organization_id, so the diocese's rows live in the same table with no
+// migration. The parish-side resolver (finance.js EFFECTIVE_COA) reads
+// them as layer 1: structure from the diocese, wording from the parish.
+
+const COA_COLS = ['name', 'acct_type', 'rollup_group', 'assessable', 'sort_order', 'active']
+const ACCT_TYPES = new Set(['asset', 'liability', 'net_asset', 'revenue', 'expense'])
+
+// The diocese's own effective CoA: the standard template with the
+// diocese's same-code rows shadowing it. Two layers here, not three —
+// a diocese has no diocese.
+const DIOCESE_COA = `
+  SELECT DISTINCT ON (code)
+         code, name, acct_type, rollup_group, assessable, sort_order, active,
+         (organization_id IS NOT NULL) AS customized
+    FROM ochr_coa_accounts
+   WHERE organization_id IS NULL OR organization_id = $1
+   ORDER BY code, organization_id NULLS LAST
+`
+
+// GET /api/diocese/coa
+router.get('/coa', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT * FROM (${DIOCESE_COA}) c ORDER BY c.sort_order, c.code`,
+      [req.organizationId]
+    )
+    res.json({ accounts: rows })
+  } catch (err) {
+    monitor.error('diocese.coa.list', err, { orgId: req.organizationId })
+    res.status(500).json({ error: 'Failed to load chart of accounts' })
+  }
+})
+
+// PUT /api/diocese/coa  { accounts: [{ code, name?, acct_type?, ... }] }
+//
+// Upsert, not replace. A diocese customizing three accounts should not
+// have to resend the other ninety, and a truncating PUT would make an
+// interrupted save catastrophic rather than annoying.
+router.put('/coa', async (req, res) => {
+  const list = req.body?.accounts
+  if (!Array.isArray(list) || list.length === 0) {
+    return res.status(400).json({ error: 'accounts must be a non-empty array' })
+  }
+  if (list.length > 500) {
+    return res.status(400).json({ error: 'Too many accounts in one request (max 500)' })
+  }
+
+  const orgId = req.organizationId
+  const client = await pool.connect()
+  try {
+    // Resolve each row against what the diocese effectively has today, so
+    // a partial patch ({code, assessable}) keeps the template's name and
+    // type instead of nulling them.
+    const { rows: current } = await client.query(
+      `SELECT * FROM (${DIOCESE_COA}) c`, [orgId]
+    )
+    const byCode = new Map(current.map(r => [r.code, r]))
+
+    const resolved = []
+    for (const raw of list) {
+      const code = String(raw?.code ?? '').trim()
+      if (!/^\d{4}$/.test(code)) {
+        return res.status(400).json({ error: `Invalid account code: ${JSON.stringify(raw?.code)}` })
+      }
+      const base = byCode.get(code)
+      const merged = {}
+      for (const col of COA_COLS) {
+        merged[col] = raw[col] !== undefined ? raw[col] : base?.[col]
+      }
+      // A brand-new code the template does not carry needs the full shape.
+      if (merged.name == null || merged.acct_type == null || merged.rollup_group == null) {
+        return res.status(400).json({ error: `New account ${code} needs name, acct_type and rollup_group` })
+      }
+      if (!ACCT_TYPES.has(merged.acct_type)) {
+        return res.status(400).json({ error: `Invalid acct_type for ${code}: ${merged.acct_type}` })
+      }
+      resolved.push({
+        code,
+        name: String(merged.name).trim().slice(0, 200),
+        acct_type: merged.acct_type,
+        rollup_group: String(merged.rollup_group).trim().slice(0, 100),
+        assessable: Boolean(merged.assessable),
+        sort_order: Number.isInteger(merged.sort_order) ? merged.sort_order : 0,
+        active: merged.active === undefined ? true : Boolean(merged.active),
+      })
+    }
+
+    await client.query('BEGIN')
+    for (const a of resolved) {
+      await client.query(
+        `INSERT INTO ochr_coa_accounts
+           (organization_id, code, name, acct_type, rollup_group, assessable, sort_order, active)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         ON CONFLICT (organization_id, code) WHERE organization_id IS NOT NULL
+         DO UPDATE SET name = EXCLUDED.name, acct_type = EXCLUDED.acct_type,
+                       rollup_group = EXCLUDED.rollup_group, assessable = EXCLUDED.assessable,
+                       sort_order = EXCLUDED.sort_order, active = EXCLUDED.active`,
+        [orgId, a.code, a.name, a.acct_type, a.rollup_group, a.assessable, a.sort_order, a.active]
+      )
+    }
+    await client.query('COMMIT')
+
+    const { rows } = await client.query(
+      `SELECT * FROM (${DIOCESE_COA}) c ORDER BY c.sort_order, c.code`, [orgId]
+    )
+    res.json({ accounts: rows, updated: resolved.length })
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
+    monitor.error('diocese.coa.put', err, { orgId })
+    res.status(500).json({ error: 'Failed to save chart of accounts' })
+  } finally {
+    client.release()
   }
 })
 

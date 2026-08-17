@@ -151,3 +151,125 @@ export function resolveLectionary(dateStr) {
     is_sunday: false,
   }
 }
+
+// ---------------------------------------------------------------------
+// Roman-rite designations (ROM.1)
+//
+// A Catholic parish does not say "Proper 13 · Tenth Sunday after
+// Pentecost". It says "Twenty-Second Sunday in Ordinary Time". Same
+// A/B/C cycle — the Roman Lectionary and the RCL share the year letter,
+// which is why cycleFor() is reused unchanged — but a different naming
+// scheme, and no Propers at all.
+//
+// Ordinary Time is numbered 1-34 across two blocks:
+//   · First block  — Baptism of the Lord (Sunday after Epiphany) is
+//     week 1; the Sundays after it count 2, 3, ... up to Ash Wednesday.
+//   · Second block — counted BACKWARD from the Sunday before Advent I,
+//     which is always the 34th (Christ the King). This is what absorbs
+//     the variable length of Lent and Easter.
+//
+// Solemnities that displace an Ordinary Time Sunday (Trinity, Corpus
+// Christi) are named as themselves; the numbering underneath continues
+// regardless, which is why they are checked before the count is used.
+//
+// Verified against the USCCB lectionary: 2026-08-30 is the Twenty-second
+// Sunday in Ordinary Time, and this resolver agrees.
+
+const ROMAN_ORDINALS = [
+  '', 'First', 'Second', 'Third', 'Fourth', 'Fifth', 'Sixth', 'Seventh',
+  'Eighth', 'Ninth', 'Tenth', 'Eleventh', 'Twelfth', 'Thirteenth',
+  'Fourteenth', 'Fifteenth', 'Sixteenth', 'Seventeenth', 'Eighteenth',
+  'Nineteenth', 'Twentieth', 'Twenty-first', 'Twenty-second',
+  'Twenty-third', 'Twenty-fourth', 'Twenty-fifth', 'Twenty-sixth',
+  'Twenty-seventh', 'Twenty-eighth', 'Twenty-ninth', 'Thirtieth',
+  'Thirty-first', 'Thirty-second', 'Thirty-third', 'Thirty-fourth',
+]
+
+function romanSundayDesignation(d) {
+  const y = d.getUTCFullYear()
+  const easter = computeEaster(y)
+  const pentecost = addDays(easter, 49)
+  const advent = adventStart(y)
+  const ashWed = addDays(easter, -46)
+  const isSunday = d.getUTCDay() === 0
+
+  // Fixed days, any weekday.
+  if (d.getUTCMonth() === 11 && d.getUTCDate() === 25) return 'The Nativity of the Lord (Christmas)'
+  if (d.getUTCMonth() === 0 && d.getUTCDate() === 1) return 'Mary, the Holy Mother of God'
+  if (d.getUTCMonth() === 0 && d.getUTCDate() === 6) return 'The Epiphany of the Lord'
+  if (sameDay(d, ashWed)) return 'Ash Wednesday'
+  if (sameDay(d, addDays(easter, -3))) return 'Holy Thursday'
+  if (sameDay(d, addDays(easter, -2))) return 'Good Friday'
+  if (sameDay(d, addDays(easter, -1))) return 'Holy Saturday'
+  if (sameDay(d, addDays(easter, 39))) return 'The Ascension of the Lord'
+
+  if (!isSunday) return null
+
+  // Advent
+  if (d.getTime() >= advent.getTime() && (d.getUTCMonth() === 10 || (d.getUTCMonth() === 11 && d.getUTCDate() <= 24))) {
+    const week = Math.floor((d.getTime() - advent.getTime()) / (7 * DAY)) + 1
+    if (week >= 1 && week <= 4) return `${ROMAN_ORDINALS[week]} Sunday of Advent`
+  }
+  // Christmastide
+  if (d.getUTCMonth() === 11 && d.getUTCDate() >= 26) return 'The Holy Family of Jesus, Mary and Joseph'
+  if (d.getUTCMonth() === 0 && d.getUTCDate() <= 5) return 'The Second Sunday after the Nativity'
+
+  // Lent / Triduum / Easter
+  for (let n = 1; n <= 5; n++) {
+    if (sameDay(d, addDays(easter, -49 + 7 * n))) return `${ROMAN_ORDINALS[n]} Sunday of Lent`
+  }
+  if (sameDay(d, addDays(easter, -7))) return 'Palm Sunday of the Passion of the Lord'
+  if (sameDay(d, easter)) return 'Easter Sunday of the Resurrection of the Lord'
+  for (let n = 2; n <= 7; n++) {
+    if (sameDay(d, addDays(easter, 7 * (n - 1)))) return `${ROMAN_ORDINALS[n]} Sunday of Easter`
+  }
+  if (sameDay(d, pentecost)) return 'Pentecost Sunday'
+
+  // Solemnities that displace an Ordinary Time Sunday. Corpus Christi is
+  // the Sunday after Trinity in the United States (elsewhere Thursday);
+  // this resolver serves US parishes.
+  if (sameDay(d, addDays(pentecost, 7)))  return 'The Most Holy Trinity'
+  if (sameDay(d, addDays(pentecost, 14))) return 'The Most Holy Body and Blood of Christ'
+
+  // Ordinary Time, second block — count backward from Christ the King.
+  if (d.getTime() > pentecost.getTime() && d.getTime() < advent.getTime()) {
+    const christTheKing = addDays(advent, -7)
+    const back = Math.round((christTheKing.getTime() - d.getTime()) / (7 * DAY))
+    const n = 34 - back
+    if (n === 34) return 'Our Lord Jesus Christ, King of the Universe'
+    if (n >= 1 && n <= 33) return `${ROMAN_ORDINALS[n]} Sunday in Ordinary Time`
+  }
+
+  // Ordinary Time, first block — Baptism of the Lord, then 2, 3, ...
+  const jan6 = new Date(Date.UTC(y, 0, 6))
+  if (d.getTime() > jan6.getTime() && d.getTime() < ashWed.getTime()) {
+    const baptism = addDays(jan6, 7 - (jan6.getUTCDay() || 7))
+    if (sameDay(d, baptism)) return 'The Baptism of the Lord'
+    const n = Math.round((d.getTime() - baptism.getTime()) / (7 * DAY)) + 1
+    if (n >= 2 && n <= 9) return `${ROMAN_ORDINALS[n]} Sunday in Ordinary Time`
+  }
+
+  return null
+}
+
+// Same shape as resolveLectionary(), minus `proper` — the Roman
+// Lectionary has no Propers. Weekdays resolve to the preceding Sunday's
+// week, matching the Ordo convention already used above.
+export function resolveRomanLectionary(dateStr) {
+  const d = utc(dateStr)
+  if (Number.isNaN(d.getTime())) return null
+  const cycle = cycleFor(d)
+  const own = romanSundayDesignation(d)
+  if (own) {
+    return { cycle, year_label: `Year ${cycle}`, designation: own, proper: null, is_sunday: d.getUTCDay() === 0 }
+  }
+  const prevSunday = addDays(d, -d.getUTCDay())
+  const wk = romanSundayDesignation(prevSunday)
+  return {
+    cycle,
+    year_label: `Year ${cycle}`,
+    designation: wk ? `Week of the ${wk}` : null,
+    proper: null,
+    is_sunday: false,
+  }
+}
