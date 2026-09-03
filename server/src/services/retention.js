@@ -14,6 +14,12 @@
 //     whose status is sent/failed/cancelled. Pending rows are
 //     never pruned regardless of age — that would be losing work.
 //
+//   ochr_import_rows → Migration Studio staging, 30 days after the
+//     import finished or closed (MIG.1.1). The rows are the parish's
+//     roster or giving history in a second place; the receipt, counts,
+//     reasons and audit history are kept permanently. See
+//     services/importRetention.js.
+//
 //   ochr_checkins → child-data safety (CHK.3). Spent/abandoned
 //     pickup-code hashes are cleared after 2 days; check-in PII
 //     (minors'/guests' names, guardian names) is anonymized after
@@ -37,6 +43,8 @@
 
 import pool from '../db.js'
 import { getPlan } from '../billing/plans.js'
+import { pruneExpired as pruneVault } from '../vault/index.js'
+import { pruneImportRows } from './importRetention.js'
 import { monitor } from '../monitoring/index.js'
 
 const AI_USAGE_RETENTION_DAYS         = 90
@@ -156,6 +164,28 @@ export async function pruneOldRecords({ now = new Date() } = {}) {
     throw err
   }
 
+  // The vault's own retention window. An entry kept past the date it
+  // promised is not generosity — a parish that asked for a deletion is
+  // entitled to it eventually, and a window nobody honours is not a
+  // policy.
+  let vaultPruned = 0
+  try {
+    ;({ vaultEntriesPruned: vaultPruned } = await pruneVault({ now }))
+  } catch (err) {
+    monitor.error('retention.vault', err)
+  }
+
+  // Migration Studio staging. The receipt, counts and audit history are
+  // untouched — only the raw parsed rows go. See importRetention.js.
+  let importBatches = 0, importRows = 0
+  try {
+    const r = await pruneImportRows({ now })
+    importBatches = r.importBatchesPurged
+    importRows = r.importRowsPurged
+  } catch (err) {
+    monitor.error('retention.imports', err)
+  }
+
   return {
     orgs_scanned:             orgsScanned,
     audit_pruned:             auditPruned,
@@ -164,5 +194,8 @@ export async function pruneOldRecords({ now = new Date() } = {}) {
     scheduled_pruned:         scheduledPruned,
     checkin_codes_cleared:    checkinCodesCleared,
     checkin_pii_anonymized:   checkinPiiAnonymized,
+    vault_entries_pruned:     vaultPruned,
+    import_batches_purged:    importBatches,
+    import_rows_purged:       importRows,
   }
 }

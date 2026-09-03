@@ -1,6 +1,6 @@
 import { useEffect, useState, createContext, useContext, useCallback } from 'react'
 import { BrowserRouter, Routes, Route, NavLink, Navigate } from 'react-router-dom'
-import { Landmark, LayoutDashboard, Church, Inbox, Scale, LogOut, Loader2, AlertTriangle, HeartHandshake, ListChecks } from 'lucide-react'
+import { Landmark, LayoutDashboard, Church, Inbox, Scale, LogOut, Loader2, AlertTriangle, HeartHandshake, ListChecks, Users } from 'lucide-react'
 import { apiUrl } from './api'
 import Dashboard from './pages/Dashboard'
 import Parishes from './pages/Parishes'
@@ -11,6 +11,10 @@ import ParishCare from './pages/ParishCare'
 import ParishDetail from './pages/ParishDetail'
 import CareBrief from './pages/CareBrief'
 import FollowUps from './pages/FollowUps'
+import ReportReview from './pages/ReportReview'
+import Team from './pages/Team'
+import AcceptInvite from './pages/AcceptInvite'
+import FirstUse from './pages/FirstUse'
 
 // OpenDiocese chancery app (DIO.2). Same backend, same JWT, same
 // Parchment & Brass — tuned for a finance back office: denser tables,
@@ -201,7 +205,29 @@ const NAV = [
   { to: '/submissions', icon: Inbox,           label: 'Submissions' },
   { to: '/financials',  icon: Landmark,        label: 'Financials' },
   { to: '/assessments', icon: Scale,           label: 'Assessments' },
+  { to: '/team',        icon: Users,           label: 'The chancery' },
 ]
+
+// A demo workspace says so, on every screen (PILOT.4).
+//
+// The old marker was "(Demo)" in the org's name — invisible in a cropped
+// screenshot, and gone the moment somebody renames the org to a real parish
+// for a demonstration, which the run-sheet explicitly tells them to do. The
+// risk is not embarrassment: it is fictional pastoral notes about fictional
+// parishes being taken for real ones.
+//
+// Deliberately a plain band, not an alarm. It states a fact; it is not a
+// warning about anything.
+function DemoBand() {
+  return (
+    <div className="print:hidden bg-brass-100 border-b border-brass-300/60 px-4 py-1.5 text-center">
+      <p className="text-[12px] text-ink-700">
+        <span className="font-semibold">Demonstration workspace.</span>{' '}
+        Every parish, person, note and figure here is fictional.
+      </p>
+    </div>
+  )
+}
 
 function Shell({ children }) {
   const { user, logout } = useAuth()
@@ -235,7 +261,13 @@ function Shell({ children }) {
       </aside>
       {/* overflow-y-auto must not survive printing: a scroll container clips
           at the viewport and silently drops the tail of a long brief. */}
-      <main className="flex-1 min-w-0 p-8 overflow-y-auto print:p-0 print:overflow-visible print:block">{children}</main>
+      <main className="flex-1 min-w-0 overflow-y-auto print:p-0 print:overflow-visible print:block">
+        {user?.organization?.is_demo && <DemoBand />}
+        <div className="p-8">
+          <FirstUse />
+          {children}
+        </div>
+      </main>
     </div>
   )
 }
@@ -283,6 +315,24 @@ export default function App() {
   if (booting) {
     return <div className="min-h-screen bg-parchment-100 flex items-center justify-center"><Loader2 size={24} className="animate-spin text-brass-500" /></div>
   }
+  // Accepting an invitation wins over any existing session.
+  //
+  // The first cut gated this on `!user`, so anyone who already had a token
+  // in this browser — a chancery admin testing the link, or an invitee with
+  // a stale session from another account — landed in the authenticated
+  // shell and the invitation silently did nothing. The link would simply
+  // appear broken.
+  //
+  // Accepting is a different identity arriving, so the old session is
+  // cleared rather than competed with.
+  if (window.location.pathname === '/accept-invite') {
+    return (
+      <AcceptInvite
+        onAccepted={(u) => { window.history.replaceState({}, '', '/'); boot(u) }}
+        onArrive={() => { if (user) { localStorage.removeItem('ochr_token'); setUser(null) } }}
+      />
+    )
+  }
   if (!user) {
     return mode === 'signup'
       ? <Signup onLogin={(u) => boot(u)} onCancel={() => setMode('login')} />
@@ -304,6 +354,9 @@ export default function App() {
             <Route path="/care/:parishId" element={<ParishDetail />} />
             <Route path="/care/:parishId/brief" element={<CareBrief />} />
             <Route path="/follow-ups" element={<FollowUps />} />
+            <Route path="/team" element={<Team />} />
+            {/* CARE.3 — reached from a parish's page or the submissions queue. */}
+            <Route path="/review/:submissionId" element={<ReportReview />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </Shell>

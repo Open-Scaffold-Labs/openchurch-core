@@ -21,7 +21,7 @@ import { useAuth } from '../context/AuthContext'
 import { useLocale } from '../i18n'
 import { useToast } from '../components/ToastProvider'
 import { apiUrl } from '../api'
-import { initials } from '../utils/format'
+import { initials, loadOne, loadList } from '../utils/format'
 import { celebrateFirstAction } from '../utils/firstActionToast'
 import { LIT_COLOR_DOT, LIT_COLOR_TEXT } from '../utils/liturgicalColors'
 import { useConfirm } from '../components/ConfirmProvider'
@@ -158,7 +158,7 @@ function ActionsMenu({ member, onEdit, onDelete, onView }) {
             {[
               { icon: Eye,    label: t('mem.viewProfile'), action: () => { onView(member); setOpen(false) }, cls: '' },
               { icon: Pencil, label: t('mem.edit'),          action: () => { onEdit(member); setOpen(false) }, cls: '' },
-              { icon: Trash2, label: t('mem.delete'),        action: () => { onDelete(member.id); setOpen(false) }, cls: 'text-rose-500 dark:text-rose-300' },
+              { icon: Trash2, label: t('mem.delete'),        action: () => { onDelete(member.id, member.name); setOpen(false) }, cls: 'text-rose-500 dark:text-rose-300' },
             ].map(({ icon: Icon, label, action, cls }) => (
               <button key={label} onClick={action} className={`flex items-center gap-2.5 w-full px-3.5 py-2.5 text-sm hover:bg-parchment-100 dark:hover:bg-ink-800 transition-colors ${cls || 'text-ink-700 dark:text-parchment-100'}`}>
                 <Icon size={13} /> {label}
@@ -332,6 +332,8 @@ function SlideOver({ member, onClose, onEdit }) {
 export default function Clients() {
   const [clients, setClients]       = useState([])
   const [stats, setStats]           = useState(null)
+  const [statsFailed, setStatsFailed] = useState(false)
+  const [listFailed, setListFailed]   = useState(false)
   const [search, setSearch]         = useState('')
   const [filterStatus, setFilterStatus] = useState('')
   const [filterRole, setFilterRole] = useState('')
@@ -364,31 +366,38 @@ export default function Clients() {
   // a different result set.
   useEffect(() => { fetchClients() }, [search, filterStatus, filterRole])
 
+  // Observed 27 Aug: a 500 here assigned the ERROR BODY to `stats`, which is
+  // truthy, so the growth tile rendered the literal string "undefined%" and
+  // the three count tiles went blank — a measurement that failed presented as
+  // a measurement that came back empty. loadOne keeps `stats` null on
+  // failure, which the tiles already render as "—", and the flag says why.
   async function fetchStats() {
-    try {
-      const r = await fetch(apiUrl('/api/clients/stats'))
-      setStats(await r.json())
-    } catch { toast.error(t('err.load')) }
+    const { ok, data } = await loadOne(apiUrl('/api/clients/stats'))
+    setStats(ok ? data : null)
+    setStatsFailed(!ok)
   }
 
   // Fetch the first page. Replaces the list and recomputes hasMore.
+  // `if (!res.ok) return` left `clients` at [] with no failure flag, so a
+  // 500 rendered the full first-run card — "No members yet / Add your first
+  // member" — underneath stat tiles reading the real total. Found by an
+  // auditor 27 Aug, after the same cycle "fixed" fetchStats in this file and
+  // left this one alone. Fixing the surface you were looking at is not the
+  // same as fixing the page.
   async function fetchClients() {
     setListLoading(true)
-    try {
-      const params = new URLSearchParams()
-      if (search)       params.set('search', search)
-      if (filterStatus) params.set('status', filterStatus)
-      if (filterRole)   params.set('role', filterRole)
-      params.set('limit',  String(PAGE_SIZE))
-      params.set('offset', '0')
-      const res = await fetch(apiUrl(`/api/clients?${params}`))
-      if (!res.ok) return
-      const rows = await res.json()
-      setClients(rows)
-      // A full page implies there may be more; a short page is the end.
-      setHasMore(rows.length === PAGE_SIZE)
-    } catch { toast.error(t('err.load')) }
-    finally { setListLoading(false) }
+    const params = new URLSearchParams()
+    if (search)       params.set('search', search)
+    if (filterStatus) params.set('status', filterStatus)
+    if (filterRole)   params.set('role', filterRole)
+    params.set('limit',  String(PAGE_SIZE))
+    params.set('offset', '0')
+    const { ok, data } = await loadList(apiUrl(`/api/clients?${params}`))
+    setClients(data)
+    setListFailed(!ok)
+    // A full page implies there may be more; a short page is the end.
+    setHasMore(ok && data.length === PAGE_SIZE)
+    setListLoading(false)
   }
 
   // Fetch the next page and APPEND. Offset is the current row count so
@@ -396,20 +405,20 @@ export default function Clients() {
   async function loadMoreClients() {
     if (loadingMore) return
     setLoadingMore(true)
-    try {
-      const params = new URLSearchParams()
-      if (search)       params.set('search', search)
-      if (filterStatus) params.set('status', filterStatus)
-      if (filterRole)   params.set('role', filterRole)
-      params.set('limit',  String(PAGE_SIZE))
-      params.set('offset', String(clients.length))
-      const res = await fetch(apiUrl(`/api/clients?${params}`))
-      if (!res.ok) return
-      const rows = await res.json()
-      setClients(prev => [...prev, ...rows])
-      setHasMore(rows.length === PAGE_SIZE)
-    } catch { toast.error(t('err.load')) }
-    finally { setLoadingMore(false) }
+    const params = new URLSearchParams()
+    if (search)       params.set('search', search)
+    if (filterStatus) params.set('status', filterStatus)
+    if (filterRole)   params.set('role', filterRole)
+    params.set('limit',  String(PAGE_SIZE))
+    params.set('offset', String(clients.length))
+    const { ok, data } = await loadList(apiUrl(`/api/clients?${params}`))
+    // A silent return here is FAILED presented as NONE: the spinner
+    // stops, no rows appear, and the person concludes they have reached
+    // the end of their own records. Say it instead.
+    if (!ok) { toast.error(t('mem.loadMoreFailed')); setLoadingMore(false); return }
+    setClients(prev => [...prev, ...data])
+    setHasMore(data.length === PAGE_SIZE)
+    setLoadingMore(false)
   }
 
   function openAdd() { setEditing(null); setForm(empty); setShowForm(true) }
@@ -466,9 +475,20 @@ export default function Clients() {
     }
   }
 
-  async function remove(id) {
-    if (!(await ask({ title: t('mem.removeConfirm'), confirmLabel: 'Remove member' }))) return
-    await fetch(apiUrl(`/api/clients/${id}`), { method: 'DELETE' })
+  async function remove(id, name) {
+    // Say what actually happens before it happens. Removing a member also
+    // takes her attendance, her place on every group roster and her
+    // availability — and leaves her baptism in the register without a
+    // name to point at. All of it is captured and comes back together.
+    if (!(await ask({
+      title: t('mem.removeConfirm'),
+      body: t('mem.removeBody'),
+      confirmLabel: 'Remove member',
+      recoverable: true,
+    }))) return
+    const res = await fetch(apiUrl(`/api/clients/${id}`), { method: 'DELETE' })
+    if (!res.ok && res.status !== 204) { toast.error(t('err.save')); return }
+    toast.success(t('vault.removedToast', { label: name || t('nav.Members') }))
     fetchClients(); fetchStats()
   }
 
@@ -476,9 +496,9 @@ export default function Clients() {
   const selectCls = inputCls + ' cursor-pointer'
 
   const statPills = [
-    { icon: Users,     label: t('mem.total'),    value: stats?.total,   accent: 'bg-church-900 dark:bg-church-700', index: 0 },
-    { icon: TrendingUp,label: t('mem.newWeek'),    value: stats?.newWeek, accent: 'bg-brass-700',                   index: 1 },
-    { icon: UserCheck, label: t('mem.active'),   value: stats?.active,  accent: 'bg-brass-700',                  index: 2 },
+    { icon: Users,     label: t('mem.total'),    value: stats?.total   ?? '—', accent: 'bg-church-900 dark:bg-church-700', index: 0 },
+    { icon: TrendingUp,label: t('mem.newWeek'),    value: stats?.newWeek ?? '—', accent: 'bg-brass-700',                   index: 1 },
+    { icon: UserCheck, label: t('mem.active'),   value: stats?.active  ?? '—', accent: 'bg-brass-700',                  index: 2 },
     { icon: Activity,  label: t('mem.growth'),           value: stats ? `${stats.growth > 0 ? '+' : ''}${stats.growth}%` : '—', accent: 'bg-ink-700', index: 3 },
   ]
 
@@ -513,6 +533,11 @@ export default function Clients() {
       <div className="flex gap-4">
         {statPills.map(s => <StatPill key={s.label} {...s} />)}
       </div>
+      {statsFailed && (
+        <p role="status" className="-mt-1 text-xs text-amber-700 dark:text-amber-400">
+          {t('mem.statsFailed')}
+        </p>
+      )}
 
       {/* Search + filters */}
       <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.15 }} className="flex gap-3 flex-wrap">
@@ -547,7 +572,7 @@ export default function Clients() {
         <div className="bg-parchment-50 dark:bg-ink-900/90 rounded-2xl border border-parchment-300/50 dark:border-brass-900/30 shadow-warm-md overflow-hidden">
           <SkeletonRowList count={6} />
         </div>
-      ) : !search && !filterStatus && !filterRole && clients.length === 0 ? (
+      ) : !listFailed && !search && !filterStatus && !filterRole && clients.length === 0 ? (
         <EmptyState
           illustration={MembersIllustration}
           title={t('mem.emptyTitle')}
@@ -567,7 +592,9 @@ export default function Clients() {
           </thead>
           <tbody className="divide-y divide-parchment-200/50 dark:divide-brass-900/20">
             {clients.length === 0 && (
-              <tr><td colSpan={6} className="px-4 py-16 text-center text-ink-500 dark:text-parchment-300/70">{t('mem.noneFound')}</td></tr>
+              <tr><td colSpan={6} className="px-4 py-16 text-center text-ink-500 dark:text-parchment-300/70">
+                {listFailed ? t('mem.listFailed') : t('mem.noneFound')}
+              </td></tr>
             )}
             <AnimatePresence>
               {clients.map((c, i) => {

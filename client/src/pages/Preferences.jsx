@@ -80,11 +80,21 @@ function ProfileCard() {
 // Language card — the user's own choice for this device. The parish
 // default applies wherever no choice has been made.
 function LanguageCard() {
-  const { t, locale, setLocale } = useLocale()
+  const { t, locale, setLocale, orgLocale, usingOverride } = useLocale()
+  // '' is the parish default — setLocale('') clears the stored override, so
+  // this device follows the organization again. It is a real option rather
+  // than a reset link because "follow my parish" is a choice somebody makes,
+  // and before migration 093 it was not available at all: the parish had no
+  // language to follow.
   const OPTIONS = [
+    { value: '',   label: t('prefs.parishDefault') },
     { value: 'en', label: t('prefs.english') },
     { value: 'es', label: t('prefs.spanish') },
   ]
+  const stored = (() => {
+    try { return localStorage.getItem('ochr_locale') || '' } catch { return '' }
+  })()
+  const langName = t(orgLocale === 'es' ? 'prefs.spanish' : 'prefs.english')
   return (
     <div className="bg-parchment-50 dark:bg-ink-900/90 rounded-2xl border border-parchment-300/50 dark:border-brass-900/30 shadow-warm overflow-hidden">
       <div className="px-5 py-4 border-b border-parchment-300/50 dark:border-brass-900/25 flex items-center gap-2">
@@ -92,14 +102,18 @@ function LanguageCard() {
         <h2 className="font-semibold text-ink-900 dark:text-parchment-50">{t('prefs.language')}</h2>
       </div>
       <div className="px-5 py-5">
-        <div className="flex gap-2">
+        {/* flex-wrap, not a fixed row. This became three options when the
+            parish default arrived, and the Spanish label for it is
+            "Predeterminado de la parroquia" — at 320pt a rigid row either
+            overflows or crushes the targets below thumb size. */}
+        <div className="flex flex-wrap gap-2">
           {OPTIONS.map(o => (
             <button
               key={o.value}
               type="button"
               onClick={() => setLocale(o.value)}
-              className={`px-4 py-2 rounded-lg text-sm font-semibold border transition-colors ${
-                locale === o.value
+              className={`px-4 py-2 min-h-[44px] rounded-lg text-sm font-semibold border transition-colors ${
+                stored === o.value
                   ? 'bg-parchment-200 dark:bg-ink-700 border-brass-400 dark:border-brass-500/60 text-ink-900 dark:text-parchment-50'
                   : 'border-parchment-300/70 dark:border-brass-900/40 text-ink-500 dark:text-parchment-300/70 hover:border-brass-300 dark:hover:border-brass-900/60'
               }`}
@@ -108,6 +122,18 @@ function LanguageCard() {
             </button>
           ))}
         </div>
+        <p className="mt-3 text-xs text-ink-500 dark:text-parchment-300/70 leading-relaxed">
+          {t('prefs.parishDefaultIs', { lang: langName })}
+        </p>
+        {/* Said out loud. A device choice that quietly outranks a parish
+            language the administrator just set is the same class of thing as
+            a screen rendering a failure as a fact: true internally, and
+            unexplainable to the person looking at it. */}
+        {usingOverride && (
+          <p className="mt-1.5 text-xs text-amber-700 dark:text-amber-400 leading-relaxed">
+            {t('prefs.usingOverride')}
+          </p>
+        )}
         <p className="mt-3 text-xs text-ink-500 dark:text-parchment-300/70 leading-relaxed">
           {t('prefs.languageHelp')}
         </p>

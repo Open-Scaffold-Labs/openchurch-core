@@ -42,6 +42,31 @@ const submitLimiter = rateLimit({
 
 // Mirrors validateFieldSchema in routes/forms.js. Returns null on
 // success or the first human-readable error message found.
+// The answers that survive to storage: declared fields only, each bounded.
+// Long-text fields get the room a paragraph needs; everything else gets a
+// line. Arrays (multiselect) keep their shape but not unbounded length.
+const ANSWER_MAX  = 2000
+const LONG_MAX    = 10000
+const ARRAY_MAX   = 50
+
+function pickDeclaredAnswers(fields, answers) {
+  const out = {}
+  for (const f of fields) {
+    if (!Object.prototype.hasOwnProperty.call(answers, f.id)) continue
+    const v = answers[f.id]
+    const cap = f.type === 'long_text' ? LONG_MAX : ANSWER_MAX
+    if (Array.isArray(v)) {
+      out[f.id] = v.slice(0, ARRAY_MAX)
+        .map(x => (typeof x === 'string' ? x.slice(0, cap) : x))
+    } else if (typeof v === 'string') {
+      out[f.id] = v.slice(0, cap)
+    } else {
+      out[f.id] = v
+    }
+  }
+  return out
+}
+
 function validateAnswers(fields, answers) {
   if (!answers || typeof answers !== 'object' || Array.isArray(answers)) {
     return 'answers must be an object'
@@ -127,7 +152,7 @@ function validateAnswers(fields, answers) {
 async function findPublishedForm(orgSlug, formSlug) {
   const { rows } = await pool.query(
     `SELECT f.id, f.organization_id, f.slug, f.title, f.description,
-            f.fields, f.is_public, f.status
+            f.fields, f.is_public, f.status, o.locale AS organization_locale
        FROM ochr_forms f
        JOIN ochr_organizations o ON o.id = f.organization_id
       WHERE o.slug = $1 AND f.slug = $2
@@ -151,6 +176,7 @@ router.get('/:orgSlug/:formSlug', async (req, res) => {
       title: form.title,
       description: form.description,
       fields: form.fields,
+      org: { locale: form.organization_locale ?? 'en' },
     })
   } catch (err) {
     monitor.error('publicForms.get', err, { orgSlug: req.params.orgSlug, formSlug: req.params.formSlug })
@@ -168,6 +194,17 @@ router.post('/:orgSlug/:formSlug/submit', submitLimiter, async (req, res) => {
     const validationError = validateAnswers(form.fields, answers)
     if (validationError) return res.status(400).json({ error: validationError })
 
+    // Store only the keys this form actually declares. validateAnswers walks
+    // form.fields and therefore never looks at keys the schema does not
+    // mention — so anything extra in the request body rode straight into the
+    // jsonb column. Verified 23 Aug: an unauthenticated submit stored
+    // {huge, name, INJECTED_KEY} at 50,065 bytes against a one-field form.
+    //
+    // An allowlist rather than a size check, for the same reason the member
+    // roster got one: a cap keeps the row small but still lets a stranger
+    // choose what a parish's response inbox contains.
+    const stored = pickDeclaredAnswers(form.fields, answers)
+
     const { rows } = await pool.query(
       `INSERT INTO ochr_form_responses
          (form_id, organization_id, answers, respondent_name, respondent_email,
@@ -177,7 +214,7 @@ router.post('/:orgSlug/:formSlug/submit', submitLimiter, async (req, res) => {
       [
         form.id,
         form.organization_id,
-        JSON.stringify(answers),
+        JSON.stringify(stored),
         respondent_name ? String(respondent_name).slice(0, 200) : null,
         respondent_email ? String(respondent_email).slice(0, 200) : null,
         req.ip ?? null,

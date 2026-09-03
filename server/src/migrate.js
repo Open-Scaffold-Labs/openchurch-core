@@ -21,17 +21,74 @@ const TENANT_TABLES = [
 // (ochr_event_members → ochr_events, ochr_payroll_shifts → ochr_payroll_staff) or live at the
 // global/app level (ochr_liturgical_calendar).
 
-// Seed demo creds. Change DEMO_PASSWORD via env if you want to rotate it.
+// Seed demo creds. DEMO_PASSWORD is read ONLY when SEED_DEMO is true —
+// that is, on a local target, or with an explicit SEED_DEMO=true. Setting
+// it against a deployed environment does nothing, because seeding does not
+// run there. Rotating the credential on a live database is a write to that
+// database, not an env change.
 const DEMO_EMAIL    = process.env.DEMO_EMAIL    || 'demo@openchurch.app'
 const DEMO_PASSWORD = process.env.DEMO_PASSWORD || 'demo1234'
 const DEMO_ORG_SLUG = 'demo-church'
 
-// Whether to seed (and force-restore) the demo org/user. In dev and test
-// (NODE_ENV unset or 'test') we always seed — the smoke suite and local
-// demos rely on it. In production we SKIP it unless an operator explicitly
-// opts in with SEED_DEMO=true, so a live deployment never re-creates or
-// re-promotes demo@openchurch.app on every boot.
-const SEED_DEMO = process.env.NODE_ENV !== 'production' || process.env.SEED_DEMO === 'true'
+// Whether to seed (and force-restore) the demo org/user.
+//
+// Seeding creates demo@openchurch.app with a DEFAULT password and
+// force-promotes it to admin. On a local database that is a convenience
+// the smoke suite and every demo depend on. Anywhere else it is a standing
+// admin credential with a publicly known password.
+//
+// This used to read:
+//   NODE_ENV !== 'production' || SEED_DEMO === 'true'
+// which made the dangerous direction the DEFAULT. NODE_ENV is unset in a
+// laptop shell and unset on a GitHub Actions runner, and both of those
+// routinely hold a production DATABASE_URL — `npm run migrate` sets no
+// NODE_ENV, and neither did the deploy workflow's migration step. The
+// comment above that line correctly stated the intent ("a live deployment
+// never re-creates or re-promotes demo@openchurch.app"); the condition did
+// not implement it.
+//
+// CORRECTION (2026-08-26). An earlier version of this comment claimed the
+// old guard "had never fired, because the token deploy path had never
+// successfully run." That was wrong, and wrong in the direction that
+// matters. demo@openchurch.app EXISTS in production — id 1, role admin,
+// created 2026-05-13 — so it fired long before any deploy path was
+// involved. The deploy job was never the only way to reach a production
+// DATABASE_URL: `npm run migrate` from a laptop reaches it, and so does
+// the dev server, which runs the migration set on boot against whatever
+// server/.env points at.
+//
+// The lesson is not about this guard. It is that "the mechanism I was
+// looking at never ran" is not the same claim as "this never happened",
+// and only the second one was worth asserting. Check the database.
+//
+// This fix stops the account being RE-CREATED or re-promoted. It does
+// not remove the one that is already there. That is a separate action
+// against production and it is not something a migration should do.
+//
+// So key the decision on the TARGET rather than on a label. What makes a
+// standing admin credential dangerous is WHERE it is being written, and
+// that is knowable from the connection string rather than from something
+// an operator has to remember to export. Explicit SEED_DEMO=true still
+// overrides, because seeding a remote demo environment on purpose is a
+// legitimate thing to want.
+function targetIsLocal() {
+  const raw = process.env.DATABASE_URL || ''
+  if (!raw) return true // no target at all; migrations will fail on their own
+  try {
+    const host = new URL(raw).hostname
+    return ['localhost', '127.0.0.1', '::1', '[::1]'].includes(host)
+  } catch {
+    return false // unparseable: assume remote and fail closed
+  }
+}
+
+const SEED_DEMO =
+  process.env.SEED_DEMO === 'true' ||
+  (process.env.NODE_ENV !== 'production' && targetIsLocal())
+
+if (!SEED_DEMO && process.env.NODE_ENV !== 'production') {
+  console.log('[migrate] remote database detected — skipping demo seed. Set SEED_DEMO=true to override.')
+}
 
 export async function migrate() {
   // ── Core auth tables ────────────────────────────────────────
@@ -81,8 +138,9 @@ export async function migrate() {
 
   // Ensure demo user exists. We hash the password here rather than baking a
   // fixed hash into the migration so bcrypt's cost factor stays consistent
-  // with the rest of the app and you can rotate DEMO_PASSWORD without
-  // touching migration code. Guarded by SEED_DEMO so production never
+  // with the rest of the app. Note this runs only when SEED_DEMO is true,
+  // so changing DEMO_PASSWORD cannot rotate an account that is already
+  // seeded on a remote database. Guarded by SEED_DEMO so production never
   // (re)creates or force-promotes demo@openchurch.app on every boot — a
   // standing admin credential we don't want silently resurrected in prod.
   if (SEED_DEMO) {

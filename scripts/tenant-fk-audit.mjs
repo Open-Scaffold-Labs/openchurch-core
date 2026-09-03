@@ -121,7 +121,19 @@ const byDesign = relevant.filter(f => !scopedSet.has(f.child_table))
 // ochr_diocese_affiliations.accepted_by is a PARISH user on a
 // diocese-keyed row, so it is composite with parish_org_id — correct, and
 // invisible to a rule that only knows about tenant columns.
-const ALT_PAIRS = new Set(['ochr_diocese_affiliations.accepted_by'])
+// Columns whose correct tenant partner is NOT the row's own tenant key.
+//
+//   ochr_diocese_affiliations.accepted_by — the accepting user belongs to
+//     the PARISH, so it pairs with parish_org_id.
+//   ochr_report_submissions.reviewed_together_by — the submission row is
+//     owned by the parish (organization_id), but the canon who sat down and
+//     read it is a DIOCESE user, so it pairs with diocese_org_id. Pairing
+//     it with organization_id would be wrong in the other direction: it
+//     would demand that the reviewer belong to the parish being reviewed.
+const ALT_PAIRS = new Set([
+  'ochr_diocese_affiliations.accepted_by',
+  'ochr_report_submissions.reviewed_together_by',
+])
 
 const safe = relevant.filter(f =>
   f.child_cols.includes(tenantCol(f.child_table)) ||

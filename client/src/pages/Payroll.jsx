@@ -8,6 +8,9 @@ import {
 import PageWrapper from '../components/PageWrapper'
 import { sheetOverlayCls, sheetPanelCls, MobileSheetGrip, scrimCls } from '../components/MobileSheet'
 import { apiUrl } from '../api'
+import LoadFailure from '../components/LoadFailure'
+import { useLoad } from '../hooks/useLoad'
+import { useLocale } from '../i18n'
 import { initials } from '../utils/format'
 import { toLocalISO } from '../utils/dates'
 import { useAuth } from '../context/AuthContext'
@@ -53,11 +56,20 @@ function addDays(date, n) {
 // into the wrong week near midnight. Use the local-date helper (1.1).
 function toDateStr(d) { return toLocalISO(d) }
 
+// A week with no shifts is a real answer and prints $0.00. A week we could
+// not read is not, and used to print $0.00 as well — `Number(n ?? 0)` turned
+// every unread total into a confident zero, on the page that tells a parish
+// what it owes people.
 function fmtCurrency(n) {
-  return Number(n ?? 0).toLocaleString('en-US', { style: 'currency', currency: 'USD' })
+  if (n == null) return '—'
+  const v = Number(n)
+  if (!Number.isFinite(v)) return '—'
+  return v.toLocaleString('en-US', { style: 'currency', currency: 'USD' })
 }
 function fmtHours(n) {
-  const h = Number(n ?? 0)
+  if (n == null) return '—'
+  const h = Number(n)
+  if (!Number.isFinite(h)) return '—'
   return h === 1 ? '1 hr' : `${h % 1 === 0 ? h : h.toFixed(1)} hrs`
 }
 
@@ -261,7 +273,10 @@ function ShiftModal({ staffList, prefillStaff, weekStart, onClose, onSave }) {
 }
 
 // ── Shifts drawer ─────────────────────────────────────────────
-function ShiftsDrawer({ staff, shifts, onClose, onDelete }) {
+// `shiftsUnread` rather than the load object: a drawer does not need to know
+// how its data was fetched, only whether the emptiness in front of it is a
+// fact or an unanswered question.
+function ShiftsDrawer({ staff, shifts, onClose, onDelete, shiftsUnread, emptyText, unreadText }) {
   const staffShifts = shifts.filter(s => s.staff_id === staff.id)
   return (
     <AnimatePresence>
@@ -287,7 +302,9 @@ function ShiftsDrawer({ staff, shifts, onClose, onDelete }) {
         </div>
         <div className="flex-1 overflow-y-auto px-6 py-4">
           {staffShifts.length === 0 ? (
-            <div className="text-center py-16 text-ink-500 dark:text-parchment-300/70 text-sm">No shifts logged this period.</div>
+            <div className="text-center py-16 text-ink-500 dark:text-parchment-300/70 text-sm">
+              {shiftsUnread ? unreadText : emptyText}
+            </div>
           ) : (
             <div className="space-y-2">
               {staffShifts.map(sh => (
@@ -339,10 +356,8 @@ function ShiftsDrawer({ staff, shifts, onClose, onDelete }) {
 
 // ── Main page ─────────────────────────────────────────────────
 export default function Payroll() {
+  const { t } = useLocale()
   const [weekStart, setWeekStart] = useState(() => getMondayOf(new Date()))
-  const [staff, setStaff]         = useState([])
-  const [shifts, setShifts]       = useState([])
-  const [summary, setSummary]     = useState(null)
   const [staffModal, setStaffModal]   = useState(null)   // null | 'new' | staff obj
   const [shiftModal, setShiftModal]   = useState(null)   // null | { prefillStaff? }
   const [drawer, setDrawer]           = useState(null)   // staff obj
@@ -354,25 +369,33 @@ export default function Payroll() {
   const start   = toDateStr(weekStart)
   const end     = toDateStr(weekEnd)
 
-  // Loading guard for the very first fetch only — week-nav reloads
-  // keep existing data visible to avoid flicker between week clicks.
-  const [initialLoading, setInitialLoading] = useState(true)
 
-  const load = async () => {
-    try {
-      const [staffData, shiftsData, summaryData] = await Promise.all([
-        fetch(apiUrl(`/api/payroll/staff?start=${start}&end=${end}`)).then(r => r.ok ? r.json() : []),
-        fetch(apiUrl(`/api/payroll/shifts?start=${start}&end=${end}`)).then(r => r.ok ? r.json() : []),
-        fetch(apiUrl(`/api/payroll/summary?start=${start}&end=${end}`)).then(r => r.ok ? r.json() : null),
-      ])
-      setStaff(staffData)
-      setShifts(shiftsData)
-      setSummary(summaryData)
-    } catch {}
-    setInitialLoading(false)
+  // Three reads, three answers. They rode one Promise.all with
+  // `r.ok ? r.json() : []` on each and a bare `catch {}` around the lot, so
+  // any failure produced an empty roster, an empty week and a null summary
+  // — rendered as "$0.00" and "0 shifts logged", in silence.
+  //
+  // The week-nav behaviour the old code wanted (keep what is on screen while
+  // the next week loads) is what the primitive calls stale, so it comes for
+  // free instead of costing a flag.
+  const readJson = (path) => async () => {
+    const res = await fetch(apiUrl(path))
+    if (!res.ok) throw new Error(`Failed (${res.status})`)
+    return res.json()
   }
+  const staffLoad   = useLoad(readJson(`/api/payroll/staff?start=${start}&end=${end}`),   [start, end])
+  const shiftsLoad  = useLoad(readJson(`/api/payroll/shifts?start=${start}&end=${end}`),  [start, end], { initial: [] })
+  // A summary of a week with nothing in it is still a summary, so this load
+  // is never "empty" — emptiness belongs to the shift list.
+  const summaryLoad = useLoad(readJson(`/api/payroll/summary?start=${start}&end=${end}`), [start, end], { isEmpty: () => false })
 
-  useEffect(() => { load() }, [start, end])
+  const staff   = staffLoad.data ?? []
+  const shifts  = shiftsLoad.data ?? []
+  const summary = summaryLoad.state === 'failed' ? null : summaryLoad.data
+  const initialLoading = staffLoad.state === 'loading' && shiftsLoad.state === 'loading'
+  const load = async () => {
+    await Promise.all([staffLoad.reload(), shiftsLoad.reload(), summaryLoad.reload()])
+  }
 
   // Helper — handles fetch + non-OK response + network error in one
   // place so each callsite only worries about success-path effects.
@@ -490,11 +513,25 @@ export default function Payroll() {
             <Loader2 size={20} className="animate-spin text-church-700 dark:text-brass-300" />
           </div>
         ) : (<>
+        {/* What could not be read, said where the money is — not swallowed by
+            a bare catch {} as it was. */}
+        {summaryLoad.state === 'failed' && (
+          <LoadFailure variant="strip" body={t('pay.summaryFailedBody')} cause={summaryLoad.error}
+            onRetry={summaryLoad.reload} retrying={summaryLoad.retrying} className="mb-4" />
+        )}
+        {shiftsLoad.state === 'failed' && (
+          <LoadFailure variant="strip" body={t('pay.shiftsFailedBody')} cause={shiftsLoad.error}
+            onRetry={shiftsLoad.reload} retrying={shiftsLoad.retrying} className="mb-4" />
+        )}
+        {(summaryLoad.isStale || shiftsLoad.isStale || staffLoad.isStale) && (
+          <LoadFailure variant="strip" body={t('load.staleBody')} onRetry={load} className="mb-4" />
+        )}
+
         {/* Summary cards */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <SummaryCard index={0} icon={DollarSign} label="Total Payroll"   accent="bg-brass-700"
             value={fmtCurrency(summary?.total_payroll)}
-            sub={`${summary?.shift_count ?? 0} shifts logged`}
+            sub={summary?.shift_count == null ? t('pay.shiftsUnknown') : `${summary.shift_count} shifts logged`}
           />
           <SummaryCard index={1} icon={Clock}      label="Hours Worked"    accent="bg-brass-700"
             value={fmtHours(summary?.total_hours)}
@@ -515,7 +552,20 @@ export default function Payroll() {
             <span className="text-xs text-ink-500 dark:text-parchment-300/70">{weekLabel}</span>
           </div>
 
-          {staff.length === 0 ? (
+          {/* The roster is the third read, and was the one still saying
+              "No staff yet" on a 500 while the tiles above showed real
+              money. FAILED is its own branch; EMPTY is reachable only from
+              a successful read. */}
+          {staffLoad.state === 'failed' ? (
+            <div className="px-5 py-5">
+              <LoadFailure variant="strip" body={t('pay.staffFailedBody')} cause={staffLoad.error}
+                onRetry={staffLoad.reload} retrying={staffLoad.retrying} />
+            </div>
+          ) : staffLoad.state === 'loading' ? (
+            <div className="flex justify-center py-12">
+              <Loader2 size={18} className="animate-spin text-church-700 dark:text-brass-300" aria-hidden="true" />
+            </div>
+          ) : staff.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-16 text-center px-6">
               <div className="w-14 h-14 rounded-2xl bg-church-50 dark:bg-church-900/40 flex items-center justify-center mb-4 text-church-800 dark:text-brass-300">
                 <Briefcase size={22} />
@@ -695,6 +745,9 @@ export default function Payroll() {
           shifts={shifts}
           onClose={() => setDrawer(null)}
           onDelete={id => { handleDeleteShift(id); setDrawer(null) }}
+          shiftsUnread={shiftsLoad.state === 'failed'}
+          emptyText="No shifts logged this period."
+          unreadText={t('pay.shiftsFailedBody')}
         />
       )}
     </PageWrapper>

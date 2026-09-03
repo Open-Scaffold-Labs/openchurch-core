@@ -73,7 +73,7 @@ export default function ForgotPassword() {
               </p>
               <Link
                 to="/login"
-                className="mt-6 inline-flex items-center justify-center px-5 py-2.5 rounded-lg bg-church-900 dark:bg-church-700 text-parchment-50 text-sm font-semibold shadow-warm hover:bg-church-800 dark:hover:bg-church-600 transition-colors"
+                className="tap mt-6 inline-flex items-center justify-center px-5 py-2.5 rounded-lg bg-church-900 dark:bg-church-700 text-parchment-50 text-sm font-semibold shadow-warm hover:bg-church-800 dark:hover:bg-church-600 transition-colors"
               >
                 Back to sign in
               </Link>
@@ -123,7 +123,7 @@ export default function ForgotPassword() {
             Remembered it?{' '}
             <Link
               to="/login"
-              className="font-semibold text-church-700 hover:text-church-900 dark:text-brass-300 dark:hover:text-brass-200 transition-colors"
+              className="tap-reach inline-block font-semibold text-church-700 hover:text-church-900 dark:text-brass-300 dark:hover:text-brass-200 transition-colors"
             >
               Back to sign in
             </Link>

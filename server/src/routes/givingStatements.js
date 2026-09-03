@@ -22,6 +22,7 @@
 
 import { Router } from 'express'
 import pool from '../db.js'
+import { normalizeDonorEmail } from '../finance/donorIdentity.js'
 
 const router = Router()
 
@@ -61,16 +62,29 @@ router.get('/preview', async (req, res) => {
       WITH email_grouped AS (
         SELECT
           'email' AS by,
-          donor_email AS donor_key,
+          -- Donor identity is the email, CASE-INSENSITIVELY — the same
+          -- rule ochr_clients already uses for members (see migration 095's
+          -- lower(email) index and directory/memberIdentity.js). Grouping on
+          -- the raw column made "Juan@Example.org" and "juan@example.org" two
+          -- donors, so one person received two year-end tax statements, each
+          -- understating their giving (F5). lower() collapses them into one.
+          lower(donor_email) AS donor_key,
           MIN(donor_name) AS donor_name,
-          donor_email,
+          lower(donor_email) AS donor_email,
           SUM(amount)::numeric(12,2) AS total,
           COUNT(*)::int AS gift_count
         FROM ochr_donations
         WHERE organization_id = $1
           AND EXTRACT(YEAR FROM date)::int = $2
           AND donor_email IS NOT NULL
-        GROUP BY donor_email
+        -- A refunded gift is not a gift. This predicate is applied by nine other
+        -- donation aggregates in this codebase and was missing from the three
+        -- that produce the year-end statement — the only document here that a
+        -- donor files with a tax return. Verified 23 Aug: a $5,000 refunded
+        -- gift was correctly dropped from the dashboard and still printed on
+        -- the statement at full value.
+        AND payment_status IS DISTINCT FROM 'refunded'
+        GROUP BY lower(donor_email)
       ),
       name_grouped AS (
         SELECT
@@ -84,6 +98,7 @@ router.get('/preview', async (req, res) => {
         WHERE organization_id = $1
           AND EXTRACT(YEAR FROM date)::int = $2
           AND donor_email IS NULL
+        AND payment_status IS DISTINCT FROM 'refunded'
         GROUP BY donor_name
       )
       SELECT * FROM email_grouped
@@ -128,7 +143,7 @@ router.get('/donor', async (req, res) => {
 
   try {
     const filter = by === 'email'
-      ? 'donor_email = $3'
+      ? 'lower(donor_email) = lower($3)'
       : 'donor_name  = $3 AND donor_email IS NULL'
 
     const { rows } = await pool.query(
@@ -138,8 +153,12 @@ router.get('/donor', async (req, res) => {
         WHERE organization_id = $1
           AND EXTRACT(YEAR FROM date)::int = $2
           AND ${filter}
+          AND payment_status IS DISTINCT FROM 'refunded'
         ORDER BY date ASC, id ASC`,
-      [req.organizationId, year, key]
+      // The key arrives from the grouping above, which now emits the
+      // normalised form — but a caller can hand us anything, so it is
+      // normalised again here rather than trusted.
+      [req.organizationId, year, by === 'email' ? normalizeDonorEmail(key) : key]
     )
 
     if (rows.length === 0) {

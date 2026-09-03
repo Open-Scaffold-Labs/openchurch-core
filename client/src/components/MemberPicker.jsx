@@ -10,7 +10,12 @@ import { initials } from '../utils/format'
 //   value    — array of selected member ids
 //   onChange — (ids: number[]) => void
 //   placeholder — optional search input placeholder
-export default function MemberPicker({ members, value, onChange, placeholder = 'Search members to assign…' }) {
+//   failed   — the roster call did not come back. Without this the picker
+//              said "No matching members" directly beneath a banner saying
+//              the member list had failed to load — the component
+//              contradicting the page. An empty roster and an unread roster
+//              are different sentences.
+export default function MemberPicker({ members, value, onChange, failed = false, placeholder = 'Search members to assign…' }) {
   const [q, setQ] = useState('')
   const selected = members.filter(m => value.some(id => String(id) === String(m.id)))
   const filtered = members.filter(m =>
@@ -50,7 +55,9 @@ export default function MemberPicker({ members, value, onChange, placeholder = '
       {q && (
         <ul className="max-h-40 overflow-y-auto rounded-lg border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-50 dark:bg-ink-900 divide-y divide-parchment-200/60 dark:divide-brass-900/25">
           {filtered.length === 0 && (
-            <li className="px-3 py-2 text-xs text-ink-500 dark:text-parchment-300/70">No matching members</li>
+            <li className={`px-3 py-2 text-xs ${failed ? 'text-amber-700 dark:text-amber-400' : 'text-ink-500 dark:text-parchment-300/70'}`}>
+              {failed ? "The member list didn't load, so there is nothing to search yet." : 'No matching members'}
+            </li>
           )}
           {filtered.map(m => (
             <li key={m.id}>

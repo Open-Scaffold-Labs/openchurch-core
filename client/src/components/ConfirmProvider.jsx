@@ -1,7 +1,8 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
-import { AlertTriangle } from 'lucide-react'
+import { AlertTriangle, LifeBuoy } from 'lucide-react'
 import { sheetOverlayCls, sheetPanelCls } from './MobileSheet'
+import { useLocale } from '../i18n'
 
 // App-wide confirmation dialog. Replaces native confirm() everywhere.
 //
@@ -35,6 +36,19 @@ import { sheetOverlayCls, sheetPanelCls } from './MobileSheet'
 // happened. This is a question, and questions must be answered before the
 // thing happens.
 //
+// `recoverable: true` adds the one sentence that changes how a delete
+// feels — that a copy stays where somebody can get it back:
+//
+//   await ask({ title: 'Remove this member?', recoverable: true, … })
+//
+// Pass it ONLY for the deletes the Continuity Vault actually protects
+// (server/src/vault/registry.js). Reassurance on an action that is in
+// fact permanent is worse than no reassurance at all, because the next
+// time the sentence appears nobody believes it. The sentence deliberately
+// names no retention window: the window is policy, it lives on the
+// Archive & Recovery page, and a number duplicated into thirty dialogs is
+// a number that will one day be wrong in twenty-nine of them.
+//
 // The same dialog also answers questions that need a typed reply, which is
 // what retired the last native prompt() calls — see usePrompt() below:
 //
@@ -66,6 +80,7 @@ const FOCUSABLE =
   'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
 
 export function ConfirmProvider({ children }) {
+  const { t } = useLocale()
   const [request, setRequest] = useState(null)
   const [value, setValue] = useState('')
   const pendingRef = useRef(null)
@@ -110,6 +125,8 @@ export function ConfirmProvider({ children }) {
         // sites all bailed on an empty string, so make that a disabled
         // button rather than a silent no-op.
         required: options.required === true,
+        // Only true where a capture really happens. See the note above.
+        recoverable: options.recoverable === true,
       })
     })
   }, [])
@@ -231,6 +248,13 @@ export function ConfirmProvider({ children }) {
                     )}
                   </div>
                 </div>
+
+                {request.recoverable && (
+                  <p className="mt-4 flex items-start gap-2.5 rounded-lg border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-200/50 dark:bg-ink-800/60 px-3 py-2.5 text-[13px] leading-relaxed text-ink-600 dark:text-parchment-300/80">
+                    <LifeBuoy size={15} className="shrink-0 mt-0.5 text-brass-600 dark:text-brass-300" aria-hidden="true" />
+                    <span>{t('vault.confirmNote')}</span>
+                  </p>
+                )}
 
                 {request.isPrompt && (
                   <div className="mt-4">

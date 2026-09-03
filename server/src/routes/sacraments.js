@@ -31,15 +31,58 @@ export const SACRAMENT_TYPES = new Set([
   'burial',   // a rite, not a sacrament — but the register records it (070)
 ])
 
+// The subject name a caller supplied, normalised. Separate from the member
+// link on purpose: an unlinked historic entry names someone who may have
+// died in 1953, and requiring a member row for them would put the dead on
+// the parish roster to make a certificate print.
+function readSubjectName(raw) {
+  if (raw == null) return null
+  const name = String(raw).trim()
+  return name === '' ? null : name
+}
+
+// Register dates are strict YYYY-MM-DD, and a real calendar day at that.
+//
+// They used to be handed to Postgres as whatever string arrived, and the
+// pooler's DateStyle is MDY. So a DD/MM paper register digitised as
+// "10/05/1953" stored 5 October for a 10 May baptism — every entry moved to
+// the wrong month with no error anywhere — and "1953" on its own was a 500.
+// A date the parser has to guess at is refused; the message says what is
+// accepted. Whether a year-only date should ever be storable is a register
+// policy question, not something a parser should decide by rounding.
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/
+const DATE_FORMAT_ERROR = 'date must be YYYY-MM-DD (for example 1953-05-10). "10/05/1953" is ambiguous and a bare year is not a date.'
+function readRegisterDate(raw) {
+  if (raw == null || raw === '') return { value: null }
+  const s = String(raw).trim()
+  if (!ISO_DATE.test(s)) return { error: DATE_FORMAT_ERROR }
+  const [y, m, d] = s.split('-').map(Number)
+  // Round-trip through a UTC Date so 1953-02-30 is caught here as a 400
+  // rather than in Postgres as a 500. setUTCFullYear (not Date.UTC) so a
+  // four-digit year below 0100 is not silently read as 19xx.
+  const dt = new Date(0); dt.setUTCFullYear(y, m - 1, d)
+  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== m - 1 || dt.getUTCDate() !== d) {
+    return { error: DATE_FORMAT_ERROR }
+  }
+  return { value: s }
+}
+
 // Columns a PATCH may touch, and how to read each from the body. Closed
 // allowlist so a caller can never set organization_id or an unknown column.
 const EDITABLE = {
   type:           v => (SACRAMENT_TYPES.has(v) ? v : undefined),
-  date:           v => (v === null || v === '' ? null : String(v)),
+  // undefined → 400. Same strictness as POST and commit: a date correction
+  // that Postgres has to guess at is the same defect on the write side.
+  date:           v => readRegisterDate(v).value,
   minister:       v => (v == null ? null : String(v).trim() || null),
   place:          v => (v == null ? null : String(v).trim() || null),
   certificate_no: v => (v == null ? null : String(v).trim() || null),
   notes:          v => (v == null ? null : String(v).trim() || null),
+  // A misspelling in the original register notation is corrected HERE, which
+  // means it goes through readReason and lands in the amendment history like
+  // any other change to the book. It is deliberately not editable from the
+  // member record: renaming a person is not correcting a register entry.
+  member_name:    v => readSubjectName(v),
 }
 
 // Confirm a client belongs to the caller's org. Returns true/false.
@@ -104,9 +147,37 @@ const REGISTER_COLS = [
 const cols = (p = '') =>
   [`to_char(${p}date, 'YYYY-MM-DD') AS date`, ...REGISTER_COLS.map(c => `${p}${c}`)].join(', ')
 
-// Unprefixed, for INSERT/UPDATE ... RETURNING.
-const SELECT_COLS = cols()
-// Prefixed, for the queries that JOIN ochr_clients to resolve member_name.
+// ── HISTORICAL SUBJECT IDENTITY ─────────────────────────────────────────
+//
+// A sacramental record names the person the sacrament was administered to,
+// AS RECORDED AT THE TIME. That is not the same fact as the current name of
+// the member it happens to be linked to, and the two must not be confused:
+//
+//   Maria Ruiz is baptised in 2019 and the entry says Maria Ruiz.
+//   She marries in 2026 and her member record becomes Maria Ruiz Garcia.
+//   Her BAPTISMAL certificate still reads Maria Ruiz, because that is who
+//   was baptised, under the name the register recorded.
+//
+// The resolver used to read COALESCE(c.name, s.member_name) — the live
+// member name first — so renaming a member silently rewrote every
+// sacramental record and certificate that pointed at them. The order is now
+// reversed. The snapshot is the record; the live name survives only as a
+// fallback for rows predating migration 054's backfill.
+//
+// The member link is still valuable — lookup, navigation, household context,
+// tying a historical entry to the person in front of you — it is simply not
+// the identity on the record.
+//
+// This is a data-integrity and historical-fidelity rule for OpenChurch. It is
+// NOT a claim about canon law, which differs by tradition.
+const SUBJECT_NAME = 'COALESCE(s.member_name, c.name) AS member_name'
+
+// Unprefixed, for INSERT/UPDATE ... RETURNING and for the amendment
+// snapshot, which must carry the stored name so a correction to it shows up
+// in the record's history like any other change.
+const SELECT_COLS = cols() + ', member_name'
+// Prefixed, for the queries that JOIN ochr_clients. These pair with
+// SUBJECT_NAME above, so the raw column is deliberately absent here.
 const SELECT_COLS_S = cols('s.')
 
 // GET /api/sacraments?client_id=ID  (member timeline)
@@ -126,15 +197,22 @@ router.get('/', async (req, res) => {
     if (typeFilter) {
       params.push(typeFilter); where.push(`s.type = $${params.length}`)
     }
-    // Keyword search across the member's name, minister, place, and
+    // Keyword search across the subject's name, minister, place, and
     // certificate number. LIKE metacharacters are escaped so a stray % or _
     // is treated literally.
+    //
+    // The name searched is the same expression the list DISPLAYS
+    // (SUBJECT_NAME): the recorded snapshot, live member name only as the
+    // pre-054 fallback. It used to be c.name alone, which meant an unlinked
+    // historic subject could not be found by name at all, and a renamed
+    // member's baptism turned up under a name nobody was baptised with while
+    // the row on screen showed a name that did not contain the query.
     const q = typeof req.query.q === 'string' ? req.query.q.trim() : ''
     if (q) {
       const escaped = q.replace(/[\\%_]/g, ch => `\\${ch}`)
       params.push(`%${escaped}%`)
       const p = `$${params.length}`
-      where.push(`(c.name ILIKE ${p} OR s.minister ILIKE ${p} OR s.place ILIKE ${p} OR s.certificate_no ILIKE ${p})`)
+      where.push(`(COALESCE(s.member_name, c.name) ILIKE ${p} OR s.minister ILIKE ${p} OR s.place ILIKE ${p} OR s.certificate_no ILIKE ${p})`)
     }
 
     // Voided entries leave the working register but never the record.
@@ -148,8 +226,7 @@ router.get('/', async (req, res) => {
     // join is org-matched so a detached (client_id NULL) record just yields a
     // null name rather than crossing tenants.
     const { rows } = await pool.query(
-      `SELECT ${SELECT_COLS_S},
-              COALESCE(c.name, s.member_name) AS member_name
+      `SELECT ${SELECT_COLS_S}, ${SUBJECT_NAME}
          FROM ochr_sacramental_records s
          LEFT JOIN ochr_clients c
                 ON c.id = s.client_id AND c.organization_id = s.organization_id
@@ -190,6 +267,7 @@ router.get('/anniversaries', async (req, res) => {
          JOIN ochr_clients c
            ON c.id = s.client_id AND c.organization_id = s.organization_id AND c.status = 'active'
         WHERE s.organization_id = $1 AND s.date IS NOT NULL
+          AND s.voided_at IS NULL  -- a retired entry has nothing to congratulate anyone on
           AND s.type <> 'burial'  -- no burial "anniversaries" — see migration 070
           AND EXTRACT(MONTH FROM s.date) = ANY($2::int[])
         LIMIT 2000`,
@@ -228,7 +306,12 @@ router.get('/anniversaries', async (req, res) => {
 
 const DRAFT_SOURCES  = new Set(['csv', 'ocr', 'manual'])
 const DRAFT_STATUSES = new Set(['pending', 'committed', 'discarded'])
-const DRAFT_FIELDS   = new Set(['client_id', 'type', 'date', 'minister', 'place', 'certificate_no', 'notes', 'meta_attributes'])
+// member_name is here because this is the DIGITISATION path — the one built
+// for transcribing a paper register — and without it a CSV or OCR import
+// could stage the date, the minister, the place and the certificate number
+// of a 1953 baptism but not the name of the person baptised, unless that
+// person happened to be a current member.
+const DRAFT_FIELDS   = new Set(['client_id', 'member_name', 'type', 'date', 'minister', 'place', 'certificate_no', 'notes', 'meta_attributes'])
 
 const DRAFT_COLS = `id, source, raw_payload, draft, status, committed_record_id,
                     created_by, created_at, updated_at`
@@ -382,20 +465,39 @@ router.post('/drafts/:id/commit', async (req, res) => {
     const meta = await parseMetaAttributes(draft.meta_attributes, req.organizationId)
     if (meta.error) { await conn.query('ROLLBACK'); return res.status(400).json({ error: meta.error }) }
 
-    const date          = draft.date ? String(draft.date) : null
+    // Strict here, not at staging: a draft may hold the raw text of the
+    // paper page ("10/05/1953"), but the register does not take it until a
+    // human has resolved which day that was.
+    const dateRead = readRegisterDate(draft.date)
+    if (dateRead.error) { await conn.query('ROLLBACK'); return res.status(400).json({ error: dateRead.error }) }
+    const date          = dateRead.value
     const minister      = draft.minister != null ? String(draft.minister).trim() || null : null
     const place         = draft.place != null ? String(draft.place).trim() || null : null
     const certificateNo = draft.certificate_no != null ? String(draft.certificate_no).trim() || null : null
     const notes         = draft.notes != null ? String(draft.notes).trim() || null : null
 
+    let memberName = readSubjectName(draft.member_name)
+    if (memberName == null && resolvedClientId != null) {
+      const { rows: c } = await conn.query(
+        'SELECT name FROM ochr_clients WHERE id = $1 AND organization_id = $2',
+        [resolvedClientId, req.organizationId]
+      )
+      memberName = c[0]?.name ?? null
+    }
+    if (memberName == null) {
+      await conn.query('ROLLBACK')
+      return res.status(400).json({
+        error: 'This draft names no subject. Add the name as written in the register, or link a member, before committing it.',
+      })
+    }
+
     const { rows: created } = await conn.query(
       `INSERT INTO ochr_sacramental_records
          (organization_id, client_id, type, date, minister, place, certificate_no, notes, meta_attributes, member_name)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb,
-               (SELECT name FROM ochr_clients WHERE id = $2 AND organization_id = $1))
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)
        RETURNING ${SELECT_COLS}`,
       [req.organizationId, resolvedClientId, draft.type, date, minister, place, certificateNo, notes,
-       JSON.stringify(meta.value)]
+       JSON.stringify(meta.value), memberName]
     )
 
     const { rows: updated } = await conn.query(
@@ -423,8 +525,7 @@ router.get('/:id', async (req, res) => {
   const id = requireIntParam(req, res); if (id === null) return
   try {
     const { rows } = await pool.query(
-      `SELECT ${SELECT_COLS_S},
-              COALESCE(c.name, s.member_name) AS member_name
+      `SELECT ${SELECT_COLS_S}, ${SUBJECT_NAME}
          FROM ochr_sacramental_records s
          LEFT JOIN ochr_clients c
                 ON c.id = s.client_id AND c.organization_id = s.organization_id
@@ -446,7 +547,10 @@ router.post('/', async (req, res) => {
     return res.status(400).json({ error: `type must be one of: ${[...SACRAMENT_TYPES].join(', ')}` })
   }
   const clientId = req.body?.client_id != null ? Number(req.body.client_id) : null
-  const date = req.body?.date ? String(req.body.date) : null
+  const subjectName = readSubjectName(req.body?.member_name)
+  const dateRead = readRegisterDate(req.body?.date)
+  if (dateRead.error) return res.status(400).json({ error: dateRead.error })
+  const date = dateRead.value
   const minister = req.body?.minister != null ? String(req.body.minister).trim() || null : null
   const place = req.body?.place != null ? String(req.body.place).trim() || null : null
   const certificateNo = req.body?.certificate_no != null ? String(req.body.certificate_no).trim() || null : null
@@ -464,14 +568,33 @@ router.post('/', async (req, res) => {
     const meta = await parseMetaAttributes(req.body?.meta_attributes, req.organizationId)
     if (meta.error) return res.status(400).json({ error: meta.error })
 
+    // An entry that names nobody can never produce a truthful certificate,
+    // and Pass 6 observed exactly that shipping as a printable document. The
+    // subject comes from the linked member if there is one, or from the name
+    // the caller recorded. One of the two is required — but a MEMBER is not,
+    // because historic register digitisation involves people who are not
+    // current members and some of whom died decades ago.
+    let memberName = subjectName
+    if (memberName == null && resolvedClientId != null) {
+      const { rows: c } = await pool.query(
+        'SELECT name FROM ochr_clients WHERE id = $1 AND organization_id = $2',
+        [resolvedClientId, req.organizationId]
+      )
+      memberName = c[0]?.name ?? null
+    }
+    if (memberName == null) {
+      return res.status(400).json({
+        error: 'A sacramental record must name its subject: link a member, or supply member_name.',
+      })
+    }
+
     const { rows } = await pool.query(
       `INSERT INTO ochr_sacramental_records
          (organization_id, client_id, type, date, minister, place, certificate_no, notes, meta_attributes, member_name)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb,
-               (SELECT name FROM ochr_clients WHERE id = $2 AND organization_id = $1))
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)
        RETURNING ${SELECT_COLS}`,
       [req.organizationId, resolvedClientId, type, date, minister, place, certificateNo, notes,
-       JSON.stringify(meta.value)]
+       JSON.stringify(meta.value), memberName]
     )
     res.status(201).json(rows[0])
   } catch (err) {
@@ -504,7 +627,11 @@ function readReason(req) {
 // read without knowing the schema of the day it was written.
 async function snapshot(conn, id, orgId) {
   const { rows } = await conn.query(
-    `SELECT ${cols()}
+    // SELECT_COLS, not cols() — the snapshot must carry member_name or a
+    // correction to the recorded name lands in the history with
+    // before: null, which is worse than no history: it reads as though the
+    // entry never named anyone. Caught by running it, not by reading it.
+    `SELECT ${SELECT_COLS}
        FROM ochr_sacramental_records
       WHERE id = $1 AND organization_id = $2
       FOR UPDATE`,
@@ -534,12 +661,29 @@ router.patch('/:id', async (req, res) => {
   const r = readReason(req)
   if (r.error) return res.status(400).json({ error: r.error })
 
+  // A correction may not empty the register of its subject — linked or not.
+  // This used to be allowed when a member link remained, on the theory that
+  // the link could still answer who this is. It cannot: the link points at a
+  // present-day roster row that can be renamed, merged or deleted, and the
+  // moment it is, the entry names nobody. A register entry says who was
+  // baptised; it does not defer the question to another table.
+  if (Object.prototype.hasOwnProperty.call(req.body ?? {}, 'member_name')
+      && readSubjectName(req.body.member_name) == null) {
+    return res.status(400).json({
+      error: 'A sacramental record must name its subject. Give the name as recorded in the register.',
+    })
+  }
+
   const sets = []
   const params = []
   for (const [col, read] of Object.entries(EDITABLE)) {
     if (Object.prototype.hasOwnProperty.call(req.body ?? {}, col)) {
       const val = read(req.body[col])
-      if (val === undefined) return res.status(400).json({ error: `Invalid value for ${col}` })
+      if (val === undefined) {
+        // The date message names the accepted format; "invalid value" would
+        // send the transcriber back to guess which of MDY/DMY was wanted.
+        return res.status(400).json({ error: col === 'date' ? DATE_FORMAT_ERROR : `Invalid value for ${col}` })
+      }
       params.push(val); sets.push(`${col} = $${params.length}`)
     }
   }
@@ -560,10 +704,15 @@ router.patch('/:id', async (req, res) => {
         params.push(null); sets.push(`client_id = $${params.length}`)
       } else if (Number.isInteger(cid) && cid > 0 && (await clientInOrg(cid, req.organizationId))) {
         params.push(cid); sets.push(`client_id = $${params.length}`)
-        // Re-stamp the identity snapshot to the newly linked member
-        // (clientInOrg validated org membership above; the qualified
-        // org match keeps the subquery honest regardless).
-        sets.push(`member_name = (SELECT c.name FROM ochr_clients c WHERE c.id = $${params.length} AND c.organization_id = ochr_sacramental_records.organization_id)`)
+        // The snapshot is NOT re-stamped here, and that is the point.
+        // Linking a 1994 baptism to the member it belongs to is discovering a
+        // relationship; it is not evidence that the register said something
+        // other than what it says. Relinking used to overwrite the recorded
+        // name with the current member's, which is the same defect as the
+        // resolver having the live name first — just on the write side.
+        // A name genuinely recorded wrong is corrected by sending
+        // member_name, which goes through the amendment history with a
+        // reason attached.
       } else {
         return res.status(404).json({ error: 'Member not found in your church' })
       }
@@ -585,6 +734,36 @@ router.patch('/:id', async (req, res) => {
         return res.status(409).json({
           error: 'This entry is void and cannot be corrected. Restore it first, or add a new entry.',
         })
+      }
+
+      // A row with no stored snapshot (pre-054, never backfilled) has been
+      // showing its linked member's name through the COALESCE fallback. If
+      // this correction moves or removes that link, the name it has been
+      // showing is written down FIRST — otherwise the entry silently adopts
+      // the new member's name, and the history reads null → null as though
+      // it never named anyone. Rows that already carry a snapshot are left
+      // alone: relinking those must not re-stamp (see the note above).
+      const touchesLink = Object.prototype.hasOwnProperty.call(req.body ?? {}, 'client_id')
+      const suppliesName = Object.prototype.hasOwnProperty.call(req.body ?? {}, 'member_name')
+      if (touchesLink && before.member_name == null && !suppliesName) {
+        const { rows: c } = before.client_id == null ? { rows: [] } : await conn.query(
+          'SELECT name FROM ochr_clients WHERE id = $1 AND organization_id = $2',
+          [before.client_id, req.organizationId]
+        )
+        const shown = c[0]?.name ?? null
+        if (shown == null) {
+          // A true orphan: no snapshot and no member to read one from. The
+          // relink is not allowed to define who was baptised — the caller
+          // has to say what the register page says.
+          await conn.query('ROLLBACK')
+          return res.status(400).json({
+            error: 'A sacramental record must name its subject. This entry has no recorded name — supply member_name as written in the register before changing its member link.',
+          })
+        }
+        params.push(shown); sets.push(`member_name = $${params.length}`)
+        // The amendment's "before" is what the record SAID, and it said
+        // this name (via the fallback) — not null.
+        before.member_name = shown
       }
 
       params.push(id, req.organizationId)

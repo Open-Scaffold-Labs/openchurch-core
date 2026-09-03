@@ -39,4 +39,98 @@
   .divider-brass {
     @apply border-t border-brass-200/60 dark:border-brass-900/40;
   }
+
+  /* ---------------------------------------------------------------
+     Touch targets (MOB.1)
+     ---------------------------------------------------------------
+     A finger is not a cursor. 44x44 CSS px is the smallest control a
+     thumb hits reliably, and an audit at 390px found the persistent
+     header shipping 34x34 icon buttons — including "Open navigation
+     menu", which is the most-tapped control in the app on a phone.
+
+     Both utilities are gated on `pointer: coarse`, so a mouse-driven
+     desktop keeps exactly the density it has today. Nothing here
+     changes a single pixel on a laptop.
+
+     `.tap`  — grows the control itself. Use where there is room:
+               header icons, toolbar buttons, standalone controls.
+     `.tap-reach` — keeps the visual box and extends only the *touch*
+               area, centred, via a pseudo-element. Use for inline text
+               links, where growing the box would break the line it
+               sits in. The link still looks like a link; the hit area
+               is simply larger than the ink. */
+  @media (pointer: coarse) {
+    .tap {
+      min-width: 44px;
+      min-height: 44px;
+    }
+
+    .tap-reach {
+      position: relative;
+    }
+
+    /* Centred on the element, so the reach grows in every direction
+       rather than hanging off one edge. `inset` cannot express this
+       against an unknown box, so it is computed from 44px. */
+    .tap-reach::after {
+      content: '';
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      /* 48, not 44. Measured reach on a couple of inline links came back
+         at 36 — a neighbour paints into the top of the reach — so the
+         nominal box needs a little margin over the 44 minimum for the
+         real, hit-tested reach to clear it. */
+      min-width: 48px;
+      min-height: 48px;
+      width: 100%;
+      height: 100%;
+    }
+  }
+}
+
+@layer base {
+  /* Form fields are the one class of control where growing to 44px is
+     uniformly right — nothing is made clumsy by a slightly taller input,
+     and the audit found essentially every field sitting at 41-42px, two
+     pixels short of reliable. Checkboxes and radios are excluded: they
+     are judged together with their label, which is the real target. */
+  @media (pointer: coarse) {
+    input:not([type='checkbox']):not([type='radio']):not([type='hidden']),
+    select,
+    textarea {
+      min-height: 44px;
+    }
+
+    /* Standalone buttons, same reasoning. The audit found roughly thirty
+       page-level actions — Add Event, Add Donation, Import CSV, New Task —
+       sitting between 24px and 42px tall. Every one is a deliberate button
+       with its own padding, so a floor costs nothing visually and the
+       alternative is thirty hand-edits that the next new button misses.
+
+       `.tap-reach` is excluded on purpose: that class exists precisely for
+       controls whose box must NOT grow — an inline link mid-sentence, or
+       the show/hide-password eye sitting inside a field. Growing those
+       would reintroduce the layout problem the class was written to avoid. */
+    button:not(.tap-reach),
+    [role='button']:not(.tap-reach) {
+      min-height: 44px;
+    }
+
+    /* Links laid out as buttons — "Year-end statements", "Change history",
+       "Digitize". They are buttons in every way a thumb cares about, so
+       they get the same floor. Plain inline links are untouched: they are
+       inside a sentence, and `.tap-reach` is their fix. */
+    a.inline-flex:not(.tap-reach),
+    a.flex:not(.tap-reach) {
+      min-height: 44px;
+    }
+
+    /* An icon-only control has no text to widen it, so the height floor
+       alone leaves a tall thin sliver. Square it off. */
+    button:not(.tap-reach) > svg:only-child {
+      min-width: 24px;
+    }
+  }
 }

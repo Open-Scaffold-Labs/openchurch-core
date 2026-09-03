@@ -4,6 +4,7 @@ import { motion } from 'framer-motion'
 import { Loader2, Newspaper } from 'lucide-react'
 import { apiUrl } from '../api'
 import { LIT_COLOR_TEXT, LIT_COLOR_DOT, LIT_COLOR_DOT_NONE } from '../utils/liturgicalColors'
+import { useLocale } from '../i18n'
 
 // Public read-online bulletin (BUL.3b). Token-free; reached at
 // /p/:slug/bulletin. Shows the parish's most recent PUBLISHED bulletin
@@ -29,6 +30,7 @@ function Section({ title, body }) {
 }
 
 export default function PublicBulletin() {
+  const { setPublicLocale } = useLocale()
   const { slug } = useParams()
   const [data, setData]       = useState(null)
   const [loading, setLoading] = useState(true)
@@ -42,7 +44,12 @@ export default function PublicBulletin() {
         if (!r.ok) throw new Error(`${r.status}`)
         return r.json()
       })
-      .then(d => { if (!cancelled && d) setData(d) })
+      .then(d => {
+        if (cancelled || !d) return
+        // The parish's language, from the endpoint — nobody is signed in here.
+        setPublicLocale(d.org?.locale)
+        setData(d)
+      })
       .catch(() => { if (!cancelled) setNotFound(true) })
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }

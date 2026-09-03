@@ -2,6 +2,14 @@ import { Router } from 'express'
 import pool from '../db.js'
 import { requireIntParam } from '../utils/params.js'
 
+// Staff rows carry a GENERATED search_vec. The list endpoint computes its
+// own projection and never had the problem; create and update said
+// `RETURNING *` and shipped the tsvector on every response — measured 27 Aug
+// against the running server.
+const STAFF_PUBLIC_COLUMNS = [
+  'id', 'organization_id', 'name', 'role', 'pay_rate', 'status', 'created_at',
+].join(', ')
+
 const router = Router()
 
 // Verify a staff_id belongs to the caller's org before attaching a shift
@@ -48,7 +56,7 @@ router.post('/staff', async (req, res) => {
     if (!name?.trim()) return res.status(400).json({ error: 'Name is required' })
     const { rows } = await pool.query(
       `INSERT INTO ochr_payroll_staff (organization_id, name, role, pay_rate, status)
-       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+       VALUES ($1, $2, $3, $4, $5) RETURNING ${STAFF_PUBLIC_COLUMNS}`,
       [req.organizationId, name, role || 'Staff', pay_rate ?? 0, status || 'active']
     )
     res.status(201).json(rows[0])
@@ -65,7 +73,7 @@ router.patch('/staff/:id', async (req, res) => {
     const { name, role, pay_rate, status } = req.body
     const { rows } = await pool.query(
       `UPDATE ochr_payroll_staff SET name=$1, role=$2, pay_rate=$3, status=$4
-       WHERE id = $5 AND organization_id = $6 RETURNING *`,
+       WHERE id = $5 AND organization_id = $6 RETURNING ${STAFF_PUBLIC_COLUMNS}`,
       [name, role, pay_rate, status, id, req.organizationId]
     )
     if (!rows.length) return res.status(404).json({ error: 'Not found' })

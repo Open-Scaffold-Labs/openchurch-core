@@ -1,17 +1,63 @@
 // Minimal RFC-4180-ish CSV parser. Handles the cases that matter for
 // our strict-schema member import:
-//   - comma-separated values
 //   - CR, LF, or CRLF line endings
-//   - double-quoted fields containing commas or newlines
+//   - double-quoted fields containing separators or newlines
 //   - "" escape inside a quoted field → single "
-// Anything fancier (custom delimiters, BOM-stripping beyond the leading
-// one, UTF-16) is out of scope — users export as UTF-8 CSV from Excel,
-// Google Sheets, or Numbers and this handles those fine.
+//   - a leading BOM, which Excel writes
+//   - comma, SEMICOLON, tab or pipe separators
+//
+// The separator used to be assumed to be a comma, and "users export as
+// UTF-8 CSV from Excel" was doing a lot of work in that sentence. Excel
+// on a Spanish or most European system writes SEMICOLONS — because in
+// those locales the comma is the decimal point — and it does it silently,
+// from a menu item that still says CSV. A semicolon file parsed as one
+// single column called "Nombre;Correo", imported "successfully", and
+// eventually failed several screens later complaining about an unmapped
+// field. The person who exported it did nothing wrong.
 //
 // Returns rows as an array of string arrays. `parseCSVToObjects` on top
 // keys each row by its header row so routes can read `row.email` etc.
 
-export function parseCSV(text) {
+const SEPARATORS = [',', ';', '\t', '|']
+
+// Which separator is this file using? Counted on the header line only,
+// outside quotes, because a header line is the one row guaranteed not to
+// contain free text full of commas.
+//
+// The rule is "most occurrences wins, comma breaks ties". A file with no
+// separator at all comes back as a comma, which yields one column — and
+// one column is a case the caller has to handle anyway, since a
+// single-column file is legitimate for some imports.
+export function detectSeparator(text) {
+  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1)
+  let line = '', inQuotes = false
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]
+    if (ch === '"') { inQuotes = !inQuotes; line += ch; continue }
+    if (!inQuotes && (ch === '\n' || ch === '\r')) break
+    line += ch
+  }
+  // Count outside quotes only: "Smith, John" must not vote for a comma.
+  const count = (sep) => {
+    let n = 0, q = false
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i]
+      if (ch === '"') { q = !q; continue }
+      if (!q && ch === sep) n++
+    }
+    return n
+  }
+  let best = ',', bestN = count(',')
+  for (const sep of SEPARATORS) {
+    if (sep === ',') continue
+    const n = count(sep)
+    if (n > bestN) { best = sep; bestN = n }
+  }
+  return best
+}
+
+export function parseCSV(text, separator) {
+  const sep = separator || detectSeparator(text)
   // Strip a leading BOM if Excel wrote one.
   if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1)
 
@@ -44,7 +90,7 @@ export function parseCSV(text) {
       continue
     }
     if (ch === '"') { inQuotes = true; i++; continue }
-    if (ch === ',') { pushField(); i++; continue }
+    if (ch === sep) { pushField(); i++; continue }
     if (ch === '\n' || ch === '\r') {
       pushField()
       pushRow()

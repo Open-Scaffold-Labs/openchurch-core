@@ -634,8 +634,9 @@ function FundsDrawer({ onClose }) {
 
   async function removeFund(f) {
     if (!(await ask({
-      title: `Delete the “${f.name}” fund?`,
-      body: 'Gifts already recorded to it stay. It just stops being offered for new gifts.',
+      title: `Remove the “${f.name}” fund?`,
+      body: 'Gifts already recorded to it stay on the books — they simply stop naming a fund. It stops being offered for new gifts.',
+      recoverable: true,
       confirmLabel: 'Delete fund',
     }))) return
     try {
@@ -767,8 +768,14 @@ export default function Donations() {
   const [donations, setDonations]       = useState([])
   const [cashCounts, setCashCounts]     = useState([])
   const [summary, setSummary]           = useState(null)
+  const [summaryFailed, setSummaryFailed] = useState(false)
   const [funds, setFunds]               = useState([]) // giving-by-fund breakdown (GIV.4)
   const [recurring, setRecurring]       = useState([]) // active recurring gifts (GIV.7)
+  // Gifts the charger gave up on after three attempts — an expired card,
+  // almost always. The donor was told each time; this is the office finding
+  // out. Kept separate from the active list because "who needs a word" is a
+  // different question from "what is coming in".
+  const [needsAttention, setNeedsAttention] = useState([])
   const [loading, setLoading]           = useState(true)
   const [showDonationModal, setShowDonationModal] = useState(false)
   const { canWrite, user } = useAuth()
@@ -804,10 +811,27 @@ export default function Donations() {
         // A full page implies there may be more; a short page is the end.
         setHasMore(rows.length === PAGE_SIZE)
       }
-      if (sRes.ok)  setSummary(await sRes.json())
+      // A 200 is not a shape. Observed 27 Aug: /api/donations/summary
+      // answering 200 with an ARRAY made `summary` truthy-but-empty, so
+      // `Number(summary.donor_count)` was NaN and the Unique Donors tile
+      // rendered "NaN" to the parish. The four tiles below already render
+      // "—" when `summary` is null, which is the honest answer — they just
+      // never got the chance, because [] is truthy.
+      if (sRes.ok) {
+        const body = await sRes.json()
+        const usable = body !== null && typeof body === 'object' && !Array.isArray(body)
+        setSummary(usable ? body : null)
+        setSummaryFailed(!usable)
+      } else {
+        setSummaryFailed(true)
+      }
       if (ccRes.ok) setCashCounts(await ccRes.json())
       if (fRes.ok)  { const d = await fRes.json(); setFunds(d.funds ?? []) }
-      if (rgRes.ok) { const d = await rgRes.json(); setRecurring(d.recurring ?? []) }
+      if (rgRes.ok) {
+        const d = await rgRes.json()
+        setRecurring(d.recurring ?? [])
+        setNeedsAttention(d.needs_attention ?? [])
+      }
     } catch (err) {
       console.error(err)
     } finally {
@@ -837,7 +861,12 @@ export default function Donations() {
   }
 
   async function deleteDonation(id) {
-    if (!(await ask({ title: 'Delete this donation entry?', confirmLabel: 'Delete gift' }))) return
+    if (!(await ask({
+      title: 'Remove this gift?',
+      body: 'It comes off the giving records and out of the totals for that period.',
+      confirmLabel: 'Remove gift',
+      recoverable: true,
+    }))) return
     const res = await fetch(apiUrl(`/api/donations/${id}`), { method: 'DELETE' })
     if (!res.ok && res.status !== 204) {
       const data = await res.json().catch(() => ({}))
@@ -876,7 +905,12 @@ export default function Donations() {
       toast.error(data.error || "That didn't save — nothing was lost. Please try again.")
       return
     }
+    // Both lists, because the same button clears a paused gift from the
+    // "stopped" card. Filtering only `recurring` left the amber row and its
+    // count on screen after a successful cancel, and a second click then
+    // 404'd into "that didn't save" on an operation that had already worked.
     setRecurring(prev => prev.filter(r => r.id !== id))
+    setNeedsAttention(prev => prev.filter(r => String(r.id) !== String(id)))
     toast.success('Recurring gift cancelled')
   }
 
@@ -998,7 +1032,14 @@ export default function Donations() {
         <SummaryCard icon={DollarSign} label="This Month"    value={summary ? fmtCurrency(summary.month_total) : '—'} sub="Total donations"     accent="violet" />
         <SummaryCard icon={TrendingUp} label="This Week"     value={summary ? fmtCurrency(summary.week_total)  : '—'} sub="7-day running total" accent="indigo" />
         <SummaryCard icon={Award}      label="Largest Gift"  value={summary ? fmtCurrency(summary.largest)     : '—'} sub="Single donation"     accent="amber"  />
-        <SummaryCard icon={Users}      label="Unique Donors" value={summary ? Number(summary.donor_count)      : 0}   sub="All time"            accent="emerald"/>
+        <SummaryCard icon={Users}      label="Unique Donors" value={summary ? Number(summary.donor_count)      : '—'} sub="All time"            accent="emerald"/>
+      </div>
+      {summaryFailed && (
+        <p role="status" className="-mt-4 mb-6 text-xs text-amber-700 dark:text-amber-400">
+          These totals didn't load, so they're shown as —. That's a connection problem, not a month with no giving.
+        </p>
+      )}
+      <div className="hidden">
       </div>
 
       {/* Chart */}
@@ -1014,7 +1055,7 @@ export default function Donations() {
           <div className="h-[200px] flex flex-col items-center justify-center text-center px-6">
             <TrendingUp size={22} className="text-ink-300 dark:text-parchment-400/50 mb-2" />
             <p className="text-sm font-medium text-ink-500 dark:text-parchment-300/70">No giving data yet</p>
-            <p className="text-xs text-ink-400 dark:text-parchment-300/50 mt-0.5">Gifts from the last 30 days will chart here.</p>
+            <p className="text-xs text-ink-400 dark:text-parchment-300/70 mt-0.5">Gifts from the last 30 days will chart here.</p>
           </div>
         ) : (
           <ResponsiveContainer width="100%" height={200}>
@@ -1071,6 +1112,50 @@ export default function Donations() {
                 )
               })
             })()}
+          </div>
+        </motion.div>
+      )}
+
+      {/* Recurring gifts that stopped. Deliberately ABOVE the active list and
+          deliberately quiet — amber, not red. Nobody did anything wrong; a
+          card expired. The copy is written to prompt a conversation, not to
+          open a collections task. */}
+      {needsAttention.length > 0 && (
+        <motion.div variants={itemVariants}
+          className="bg-parchment-50 dark:bg-ink-900 rounded-2xl border border-amber-300/70 dark:border-amber-700/40 p-5 mb-6">
+          <div className="flex items-center gap-2 mb-1">
+            <Repeat size={15} className="text-amber-700 dark:text-amber-400" />
+            <h2 className="text-sm font-semibold text-ink-900 dark:text-parchment-50">Recurring gifts that stopped</h2>
+            <span className="text-xs font-semibold text-ink-500 dark:text-parchment-300/70">({needsAttention.length})</span>
+          </div>
+          <p className="text-xs text-ink-600 dark:text-parchment-300/80 mb-4">
+            We tried three times and let the giver know each time. Nothing was charged.
+            Usually this is a card that expired.
+          </p>
+          <div className="space-y-2">
+            {needsAttention.map(r => (
+              <div key={r.id}
+                className="flex items-center justify-between gap-3 rounded-xl border border-parchment-300/60 dark:border-brass-900/30 px-4 py-2.5">
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-ink-900 dark:text-parchment-50 truncate">
+                    {r.donor_name}
+                    <span className="text-ink-500 dark:text-parchment-300/70 font-normal"> · {fmtCurrency(r.amount, 2)} {r.frequency}</span>
+                  </p>
+                  <p className="text-[11px] text-ink-500 dark:text-parchment-300/70">
+                    {r.fund_name || 'General'}
+                    {r.last_failed_at ? ` · stopped ${fmtDate(r.last_failed_at)}` : ''}
+                    {r.donor_email ? ` · ${r.donor_email}` : ''}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => cancelRecurring(r.id)}
+                  className="shrink-0 px-2.5 py-1.5 text-xs font-semibold rounded-lg border border-parchment-300/70 dark:border-brass-900/40 text-ink-500 dark:text-parchment-300/70 hover:text-church-800 dark:hover:text-brass-200 transition-colors"
+                >
+                  Clear
+                </button>
+              </div>
+            ))}
           </div>
         </motion.div>
       )}
@@ -1207,7 +1292,7 @@ export default function Donations() {
                         </div>
                       </td>
                       <td className="px-5 py-3.5">
-                        <span className={`font-semibold ${d.refunded_at ? 'text-ink-400 dark:text-parchment-300/50 line-through' : 'text-ink-900 dark:text-parchment-50'}`}>{fmtCurrency(d.amount, 2)}</span>
+                        <span className={`font-semibold ${d.refunded_at ? 'text-ink-400 dark:text-parchment-300/70 line-through' : 'text-ink-900 dark:text-parchment-50'}`}>{fmtCurrency(d.amount, 2)}</span>
                         {d.refunded_at && (
                           <span className="ml-2 px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wider bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300">Refunded</span>
                         )}

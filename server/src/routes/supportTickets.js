@@ -48,7 +48,23 @@ import { sendEmail } from '../email/send.js'
 import { notify } from '../notifications/transport.js'
 import { monitor } from '../monitoring/index.js'
 
+import { requireRole } from '../middleware/auth.js'
+
 const router = Router()
+
+// Every other admin surface in this app is gated at its mount by
+// requireRole, which re-reads the role from the database. This router
+// hand-rolled its checks against req.user.role — the JWT claim — so a
+// demoted admin kept the console until their token expired, up to seven
+// days. Verified 23 Aug: audit log, insights, pledges, giving statements and
+// users all correctly returned 403 to a demoted admin's token while this
+// router returned 200 and let them close somebody else's ticket.
+//
+// requireRole here accepts every role because this router is not admin-only —
+// anyone may file a ticket. What it does is REFRESH req.user.role from the
+// database so the per-route checks below decide on current state rather than
+// on what was true when the token was minted. Same pattern as setup.js:55.
+router.use(requireRole('admin', 'staff', 'viewer'))
 
 // Same default as AI Studio (small, cheap, known-good); SUPPORT_AI_MODEL
 // upgrades the diagnostic independently when the vendor wants deeper triage.
@@ -156,6 +172,11 @@ Report: ${description}`
     const clsOk = CLASSIFICATIONS.has(diagnosis.classification) ? diagnosis.classification : null
     const { rowCount } = await pool.query(
       `UPDATE ochr_support_tickets
+          -- tenancy: the vendor support console is cross-parish by design — that is
+        -- what a support console IS. It is gated by requireRole and
+        -- isVendorAdmin (which fails closed with no env set), not by an org
+        -- filter, and ?org_id can only NARROW. Verified 27 Aug: org B reading
+        -- org A's ticket returns 404.
           SET diagnosis = $2, diagnosis_tokens = $3, diagnosis_duration_ms = $4,
               severity       = COALESCE($5, severity),
               classification = COALESCE($6, classification),
@@ -171,7 +192,10 @@ Report: ${description}`
       await pool.query(
         `UPDATE ochr_support_tickets
             SET diagnosis = COALESCE(diagnosis, $2), updated_at = NOW()
-          WHERE id = $1`,
+          WHERE id = $1
+        -- tenancy: vendor support console, cross-parish by design. Gated by
+        -- requireRole + isVendorAdmin (fails closed with no env set); ?org_id
+        -- can only NARROW. Verified 27 Aug: org B reading org A's ticket 404s.`,
         [ticketId, JSON.stringify(diagnosis)])
     }
   } catch (err) {
@@ -179,7 +203,10 @@ Report: ${description}`
     await pool.query(
       `UPDATE ochr_support_tickets
           SET diagnosis = COALESCE(diagnosis, $2), updated_at = NOW()
-        WHERE id = $1`,
+        WHERE id = $1
+        -- tenancy: vendor support console, cross-parish by design. Gated by
+        -- requireRole + isVendorAdmin (fails closed with no env set); ?org_id
+        -- can only NARROW. Verified 27 Aug: org B reading org A's ticket 404s.`,
       [ticketId, JSON.stringify({ error: `Diagnostic failed: ${err.message}` })])
       .catch(e2 => monitor.error('supportTickets.diagnostic.write', e2, { ticketId }))
   }
@@ -389,7 +416,10 @@ router.patch('/:id', async (req, res) => {
     const { rows: [row] } = await pool.query(
       `UPDATE ochr_support_tickets SET ${sets.join(', ')}, updated_at = NOW()
         WHERE id = $1 ${scope}
-        RETURNING id, status, severity, classification, assigned_to, resolution_notes, updated_at`,
+        RETURNING id, status, severity, classification, assigned_to, resolution_notes, updated_at
+        -- tenancy: vendor support console, cross-parish by design. Gated by
+        -- requireRole + isVendorAdmin (fails closed with no env set); ?org_id
+        -- can only NARROW. Verified 27 Aug: org B reading org A's ticket 404s.`,
       params)
     if (!row) return res.status(404).json({ error: 'Ticket not found' })
 
@@ -421,7 +451,9 @@ async function notifyReporter(before, after, req) {
   if (!statusLabel) return
 
   const { rows: [info] } = await pool.query(
-    `SELECT u.email, u.name, o.name AS org_name
+    `-- tenancy: vendor support console. Both ids are read from the ticket row,
+         -- which the console already resolved; the join pins the org explicitly.
+         SELECT u.email, u.name, o.name AS org_name
        FROM ochr_users u
        JOIN ochr_organizations o ON o.id = $2
       WHERE u.id = $1`,

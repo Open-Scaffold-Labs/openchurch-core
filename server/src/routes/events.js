@@ -8,8 +8,14 @@ import { scheduleNotification } from '../notifications/scheduler.js'
 import { liturgicalLine } from '../notifications/calendarReminders.js'
 import { zonedDateTimeToUtc } from '../utils/timezone.js'
 import { monitor } from '../monitoring/index.js'
+import { TASK_COLUMNS, EVENT_COLUMNS } from './publicColumns.js'
 
 const router = Router()
+
+// An event row is not an event response. ochr_events carries a GENERATED
+// `search_vec`; GET /api/events was shipping it, reproduced 27 Aug.
+const EVENT_PUBLIC_COLUMNS = EVENT_COLUMNS.list
+
 
 // Columns the events CSV importer accepts. assigned_members and
 // language are app-managed defaults — we don't expose them via CSV
@@ -236,7 +242,7 @@ router.get('/', async (req, res) => {
     const { limit, offset } = parsePagination(req.query)
     const { rows } = search
       ? await pool.query(
-          `SELECT * FROM ochr_events
+          `SELECT ${EVENT_PUBLIC_COLUMNS} FROM ochr_events
            WHERE organization_id = $1
              AND (title ILIKE $2 OR service_division ILIKE $2 OR location ILIKE $2)
            ORDER BY date ASC, time ASC
@@ -244,7 +250,7 @@ router.get('/', async (req, res) => {
           [orgId, `%${search}%`, limit, offset]
         )
       : await pool.query(
-          'SELECT * FROM ochr_events WHERE organization_id = $1 ORDER BY date ASC, time ASC LIMIT $2 OFFSET $3',
+          `SELECT ${EVENT_PUBLIC_COLUMNS} FROM ochr_events WHERE organization_id = $1 ORDER BY date ASC, time ASC LIMIT $2 OFFSET $3`,
           [orgId, limit, offset]
         )
     await attachMembers(rows, orgId)
@@ -260,7 +266,7 @@ router.get('/:id', async (req, res) => {
   const id = requireIntParam(req, res); if (id === null) return
   try {
     const { rows } = await pool.query(
-      'SELECT * FROM ochr_events WHERE id = $1 AND organization_id = $2',
+      `SELECT ${EVENT_PUBLIC_COLUMNS} FROM ochr_events WHERE id = $1 AND organization_id = $2`,
       [id, req.organizationId]
     )
     if (!rows.length) return res.status(404).json({ error: 'Not found' })
@@ -285,7 +291,9 @@ router.get('/:id/tasks', async (req, res) => {
     if (!ev.length) return res.status(404).json({ error: 'Not found' })
 
     const { rows } = await pool.query(
-      `SELECT t.*, c.name AS assigned_member_name
+      // `SELECT t.*` shipped ochr_tasks.search_vec on every linked task —
+      // measured 27 Aug. Reads as a tidy join; is not one.
+      `SELECT ${TASK_COLUMNS.prefixed('t')}, c.name AS assigned_member_name
          FROM ochr_tasks t
          JOIN ochr_event_members em ON em.member_id = t.assigned_member_id
          LEFT JOIN ochr_clients c   ON c.id          = t.assigned_member_id
@@ -306,35 +314,64 @@ router.get('/:id/tasks', async (req, res) => {
 })
 
 // POST /api/events
+// A pooled client is released in `finally`, never by hand.
+//
+// This handler used to release on each exit path individually, and one path
+// was missed: `if (!title?.trim()) return res.status(400)` sits AFTER
+// pool.connect() and returned without giving the connection back. Every
+// title-less POST leaked one client permanently.
+//
+// PG_POOL_MAX defaults to 5, so five of them exhausted the pool for the
+// whole process. Measured: idle 2 -> 1 -> 0, total climbing 2 -> 5 as the
+// pool opened replacements, and then the next request needing a connection
+// hung for connectionTimeoutMillis and answered 500 after 10,007 ms.
+//
+// That is the import-mapping flake. It was never a fault in imports.js at
+// all — a leak here starved the pool that route shares, the mapping call
+// timed out, its rows stayed 'pending', and the reader was sent looking at
+// the duplicate detector, which had done nothing wrong. It appeared roughly
+// one run in seventeen because it depended on how many title-less event
+// POSTs happened to run before an import test asked for a connection.
 router.post('/', async (req, res) => {
+  const { title, service_division, date, time, location, liturgical_season, liturgical_color, feast_name, member_ids, is_public } = req.body
+  if (!title?.trim()) return res.status(400).json({ error: 'Title is required' })
+  // is_public defaults FALSE — every event is private until the
+  // admin explicitly opts in via the modal toggle (Sprint P).
+  const isPublic = is_public === true
+  const rawIds = normalizeMemberIds(member_ids)
+
+  // Auto-map liturgical context when the caller omitted any of the
+  // three fields and a date is present. Explicit body values always
+  // win — admins can still pin a non-default color for one-offs.
+  //
+  // RESOLVED BEFORE THE CLIENT IS TAKEN, and that is not tidiness.
+  // resolveLiturgicalContext() runs its own `pool.query`, so calling it while
+  // holding a pooled client meant this handler needed TWO connections at
+  // once. PG_POOL_MAX defaults to 5, so three simultaneous event creations
+  // wanted six, and the third waited out connectionTimeoutMillis and
+  // answered 500 after ten seconds — a deadlock reachable on an ordinary
+  // Sunday, not under load.
+  let resolvedSeason = liturgical_season
+  let resolvedColor  = liturgical_color
+  let resolvedFeast  = feast_name
+  if (date && (!liturgical_season || !liturgical_color || feast_name === undefined)) {
+    const ctx = await resolveLiturgicalContext(date, req.organizationId)
+    if (!resolvedSeason) resolvedSeason = ctx.season
+    if (!resolvedColor)  resolvedColor  = ctx.color
+    if (resolvedFeast === undefined) resolvedFeast = ctx.feast_name
+  }
+
+  // Everything above needs no transaction. Take the client as late as
+  // possible and hold it for as little as possible.
   const client = await pool.connect()
   let created, newlyAdded
   try {
-    const { title, service_division, date, time, location, liturgical_season, liturgical_color, feast_name, member_ids, is_public } = req.body
-    if (!title?.trim()) return res.status(400).json({ error: 'Title is required' })
-    // is_public defaults FALSE — every event is private until the
-    // admin explicitly opts in via the modal toggle (Sprint P).
-    const isPublic = is_public === true
-    const rawIds = normalizeMemberIds(member_ids)
     const ids = await filterMemberIdsToOrg(client, rawIds, req.organizationId)
-
-    // Auto-map liturgical context when the caller omitted any of the
-    // three fields and a date is present. Explicit body values always
-    // win — admins can still pin a non-default color for one-offs.
-    let resolvedSeason = liturgical_season
-    let resolvedColor  = liturgical_color
-    let resolvedFeast  = feast_name
-    if (date && (!liturgical_season || !liturgical_color || feast_name === undefined)) {
-      const ctx = await resolveLiturgicalContext(date, req.organizationId)
-      if (!resolvedSeason) resolvedSeason = ctx.season
-      if (!resolvedColor)  resolvedColor  = ctx.color
-      if (resolvedFeast === undefined) resolvedFeast = ctx.feast_name
-    }
-
     await client.query('BEGIN')
     const { rows } = await client.query(
       `INSERT INTO ochr_events (organization_id, title, service_division, date, time, location, liturgical_season, liturgical_color, feast_name, is_public)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+       RETURNING ${EVENT_PUBLIC_COLUMNS}`,
       [req.organizationId, title, service_division, date || null, time || null, location, resolvedSeason || null, resolvedColor || null, resolvedFeast || null, isPublic]
     )
     created = rows[0]
@@ -342,11 +379,11 @@ router.post('/', async (req, res) => {
     await client.query('COMMIT')
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {})
-    client.release()
     console.error(err)
     return res.status(500).json({ error: 'Failed to create event' })
+  } finally {
+    client.release()
   }
-  client.release()
 
   try {
     await notifyEventAssignments(pool, created, newlyAdded, req.organizationId)
@@ -460,7 +497,6 @@ router.patch('/:id', async (req, res) => {
     const { title, service_division, date, time, location, liturgical_season, liturgical_color, feast_name, member_ids, is_public } = req.body
 
     if (title !== undefined && !String(title).trim()) {
-      client.release()
       return res.status(400).json({ error: 'Title is required' })
     }
 
@@ -488,20 +524,20 @@ router.patch('/:id', async (req, res) => {
     if (sets.length) {
       ;({ rows } = await client.query(
         `UPDATE ochr_events SET ${sets.join(', ')}
-          WHERE id = $${vals.length + 1} AND organization_id = $${vals.length + 2} RETURNING *`,
+          WHERE id = $${vals.length + 1} AND organization_id = $${vals.length + 2}
+           RETURNING ${EVENT_PUBLIC_COLUMNS}`,
         [...vals, id, req.organizationId]
       ))
     } else {
       // Roster-only PATCH (member_ids with no column changes) — fetch
       // the row for the response without touching it.
       ;({ rows } = await client.query(
-        `SELECT * FROM ochr_events WHERE id = $1 AND organization_id = $2`,
+        `SELECT ${EVENT_PUBLIC_COLUMNS} FROM ochr_events WHERE id = $1 AND organization_id = $2`,
         [id, req.organizationId]
       ))
     }
     if (!rows.length) {
       await client.query('ROLLBACK')
-      client.release()
       return res.status(404).json({ error: 'Not found' })
     }
 
@@ -513,11 +549,15 @@ router.patch('/:id', async (req, res) => {
     updated = rows[0]
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {})
-    client.release()
     console.error(err)
     return res.status(500).json({ error: 'Failed to update event' })
+  } finally {
+    // Four hand-placed releases used to live on the exit paths here. They
+    // were all correct — and the identical shape in the handler above had
+    // one missing, which is the whole argument for the structure rather
+    // than the discipline.
+    client.release()
   }
-  client.release()
 
   if (newlyAdded.length) {
     try {

@@ -23,7 +23,7 @@
 // dateLocale feeds toLocaleDateString so weekday and month names follow
 // the language everywhere dates are formatted.
 
-import { createContext, useContext, useMemo, useState } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
 import { useAuth } from '../context/AuthContext'
 import { STRINGS } from './strings'
 import { TRADITION_STRINGS } from './traditions'
@@ -36,7 +36,33 @@ export function LocaleProvider({ children }) {
     try { return localStorage.getItem('ochr_locale') || '' } catch { return '' }
   })
 
-  const locale = override || user?.organization?.locale || 'en'
+  // The parish's own language (migration 093). Until that column existed
+  // this term was permanently null and the whole i18n spine ran off the
+  // per-device override below — so a parish could not be Spanish, only a
+  // browser could, and every new device started in English.
+  const orgLocale = user?.organization?.locale || 'en'
+
+  // A parishioner on a giving page, a check-in kiosk or a form is NOT signed
+  // in, so `user` is null and every one of those screens resolved to English
+  // no matter what the parish had set. There is no session to read the
+  // language from, so the page tells us: each public endpoint now returns
+  // its organization's locale alongside the church's name, and the page
+  // hands it here after its own fetch.
+  //
+  // This is the half of the locale work that reaches the person who may not
+  // read English at all. The signed-in half only ever reached staff.
+  const [publicLocale, setPublicLocale] = useState('')
+
+  // Order matters, and both halves are deliberate. An explicit per-device
+  // choice wins, because a bilingual parish really does have one secretary
+  // reading English and another reading Spanish on the same roster. The
+  // parish default is what applies when nobody has chosen — which is now
+  // most of the time, and is the case that was broken.
+  // A signed-in user of one parish looking at ANOTHER parish's public page
+  // should see that page in its own language, which is why publicLocale
+  // outranks orgLocale — you are looking at them, not at yourself. An
+  // explicit per-device choice still wins over both.
+  const locale = override || publicLocale || orgLocale
   // 'general' rather than Catholic-by-default: an org that has not told us
   // its tradition must not be shown another one's words.
   const tradition = user?.organization?.tradition || 'general'
@@ -49,6 +75,17 @@ export function LocaleProvider({ children }) {
     } catch { /* private mode — the choice just won't persist */ }
   }
 
+  // Stable identity. Public pages put this in a useCallback/useEffect load
+  // chain (PublicGive, and any sibling that learns the parish language from
+  // its own endpoint). When publicLocale was listed in the memo deps below,
+  // every successful load rebuilt this function, which rebuilt `load`, which
+  // re-fired the effect, which set loading=true again and flashed the
+  // spinner over a form that had just appeared — flaking the give-page
+  // suite in CI on a race of a few milliseconds.
+  const setPublicLocaleStable = useCallback((l) => {
+    setPublicLocale(STRINGS[l] ? l : '')
+  }, [])
+
   const value = useMemo(() => {
     const dict = STRINGS[locale] ?? STRINGS.en
     const trad = TRADITION_STRINGS[tradition]
@@ -59,13 +96,32 @@ export function LocaleProvider({ children }) {
     }
     return {
       locale,
+      // Exposed so the settings screen can say what the parish default is
+      // and offer to fall back to it. A device override that silently
+      // outranks a newly-set parish language, with nothing on screen
+      // explaining why, is the same "confidently wrong" failure this
+      // codebase has been removing everywhere else.
+      orgLocale,
+      usingOverride: Boolean(override) && override !== orgLocale,
+      // Public pages call this with the locale their endpoint returned.
+      // Ignores anything not shipped, so a future locale in the database
+      // cannot put a page into a language the bundle has no strings for.
+      setPublicLocale: setPublicLocaleStable,
       tradition,
       setLocale,
       t,
       // BCP-47 tag for date/number formatting.
       dateLocale: locale === 'es' ? 'es' : 'en-US',
     }
-  }, [locale, tradition]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [locale, orgLocale, override, setPublicLocaleStable, tradition]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // index.html ships `<html lang="en">` as a literal. A screen reader
+  // announces the page in whatever that attribute says, and browsers offer
+  // to translate on it — so a fully Spanish parish was telling assistive
+  // technology it was reading English on every single page.
+  useEffect(() => {
+    document.documentElement.lang = locale
+  }, [locale])
 
   return <LocaleContext.Provider value={value}>{children}</LocaleContext.Provider>
 }

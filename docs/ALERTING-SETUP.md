@@ -1,9 +1,18 @@
 # Alerting Setup — "know before the priest calls"
 
-_All configuration, no code: the health endpoint already returns 503 when
-the DB is unreachable, Sentry is already live behind `SENTRY_DSN`, and the
-Saturday backup email doubles as a cron heartbeat. This wires them to your
-phone. Total setup: ~40 minutes, once._
+_All configuration, no code — with one correction made on 27 Aug, because
+the sentence below used to overstate the starting point._
+
+_The health endpoint already returns 503 when the DB is unreachable, and the
+Saturday backup email doubles as a cron heartbeat. **Sentry is wired, not
+live.** `@sentry/node` is a declared dependency and
+`server/src/monitoring/index.js` forwards `monitor.error` to it — but ONLY
+when `SENTRY_DSN` is set AND `NODE_ENV === 'production'`. `SENTRY_DSN` is
+empty in `.env.example` and whether it is set on the deployment is **not
+verified**. Until somebody queries the deployment, assume runtime errors go
+to stderr — which on Vercel means the platform's runtime logs, where they
+are readable but nobody is told. Choosing a destination is an open decision
+(see PICKUP), not a setup step._
 
 ## 1. Sentry → phone (runtime errors)
 

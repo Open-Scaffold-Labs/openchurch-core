@@ -18,22 +18,33 @@ import request from 'supertest'
 import 'dotenv/config'
 
 import app from '../src/app.js'
-import { runAllMigrations } from '../src/migrations/index.js'
 import { seedSampleData } from '../src/onboarding/sampleSeed.js'
 import pool from '../src/db.js'
 import { pruneOldRecords } from '../src/services/retention.js'
+import { processDueNotifications, MAX_ATTEMPTS } from '../src/notifications/scheduler.js'
+import { buildOrgExport } from '../src/services/orgExport.js'
+import { assessedForBands, validateBands } from '../src/routes/assessments.js'
+import { MESSAGE_KEYS, _CATALOGUE_FOR_TESTS } from '../src/i18n/messages.js'
+import { readFile } from 'node:fs/promises'
 import { hashSecurityCode } from '../src/utils/pickupCode.js'
 import { notify } from '../src/notifications/transport.js'
+import { currentMigration, recordRelease, releaseInfo, _resetForTests } from '../src/release/log.js'
+import { EXPECTED_MIGRATION } from '../src/migrations/names.js'
 import { liturgicalLine } from '../src/notifications/calendarReminders.js'
 import { sendPushToUser, isPushConfigured } from '../src/notifications/push.js'
 import { monitor, _setDispatchForTests } from '../src/monitoring/index.js'
+import { RUN_ID as HARNESS_RUN_ID, bindServer, closeServer, migrateOnce } from './support/harness.js'
+import { _setAuditCountCapForTests } from '../src/routes/auditLog.js'
 import { enqueueSacramentAnniversaryDigests } from '../src/notifications/sacramentAnniversaries.js'
 import crypto from 'node:crypto'
 import jwt from 'jsonwebtoken'
+import { createOrg } from './support/provision.js'
 
 // Unique-per-run identifier so two test runs don't conflict on the
 // same dev DB. Using millis + random suffix to be extra safe.
-const RUN_ID = `${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
+// RUN_ID and the bound listener now come from the shared harness, so the
+// files that split out of here get the same ones without importing this file.
+const RUN_ID = HARNESS_RUN_ID
 const orgA = {
   organizationName: `Test Org A ${RUN_ID}`,
   name:             'Alice Admin',
@@ -86,8 +97,10 @@ async function waitForAuditRow(orgId, predicate, timeoutMs = 2000) {
 
 beforeAll(async () => {
   // Make sure schema is up to date — running tests against a stale
-  // DB would produce confusing failures.
-  await runAllMigrations()
+  // DB would produce confusing failures. Guarded in the harness so the
+  // files that split out of here don't each re-run the whole set, and don't
+  // race each other doing it when vitest runs them in parallel.
+  await migrateOnce()
 
   // Bind ONCE for the whole suite.
   //
@@ -100,11 +113,7 @@ beforeAll(async () => {
   // failure but is pure transport churn. Reusing one listening server
   // makes supertest skip the per-request bind (it only calls listen()
   // when address() is null), and the churn disappears.
-  server = app.listen(0)
-  await new Promise((resolve, reject) => {
-    server.once('listening', resolve)
-    server.once('error', reject)
-  })
+  server = await bindServer()
 }, 60_000)
 
 afterAll(async () => {
@@ -116,13 +125,13 @@ afterAll(async () => {
   )
   // Close the shared listener before the pool so no in-flight request
   // outlives the connections it needs.
-  if (server) await new Promise(resolve => server.close(resolve))
+  await closeServer(server)
   await pool.end()
 })
 
 describe('auth happy path', () => {
   it('signs up a new org + admin and returns a token', async () => {
-    const res = await request(server).post('/api/auth/signup').send(orgA)
+    const res = await createOrg(server, orgA)
     expect(res.status).toBe(201)
     expect(res.body.token).toBeTruthy()
     expect(res.body.user.email).toBe(orgA.email.toLowerCase())
@@ -132,7 +141,7 @@ describe('auth happy path', () => {
   })
 
   it('signs up a second independent org', async () => {
-    const res = await request(server).post('/api/auth/signup').send(orgB)
+    const res = await createOrg(server, orgB)
     expect(res.status).toBe(201)
     tokenB = res.body.token
     expect(tokenB).not.toBe(tokenA) // different sessions, different signing inputs
@@ -347,6 +356,63 @@ describe('tenant isolation', () => {
       .set('Authorization', `Bearer ${tokenB}`)
     expect(deleteB.status).toBe(404)
   })
+
+  it('donation responses expose the declared contract and nothing else', async () => {
+    // WHAT EXACT DEFECT THIS DETECTS: `RETURNING *` (or any widening of the
+    // SELECT) on ochr_donations, which ships every column the schema happens
+    // to hold rather than the ones the API means.
+    //
+    // Reproduced 27 Aug: POST /api/donations returned `search_vec`, the
+    // GENERATED tsvector — i.e. the stemmed tokens of donor_name, category
+    // and NOTES, which is pastoral free text. It also meant create returned
+    // 18 fields while the list endpoint returned 17, so two routes described
+    // the same object differently.
+    //
+    // The list route already used DONATION_PUBLIC_COLUMNS. The contract was
+    // declared twelve lines above the code that bypassed it.
+    const PUBLIC = [
+      'id', 'organization_id', 'donor_name', 'donor_email', 'donor_address',
+      'amount', 'category', 'method', 'date', 'notes', 'source', 'fund_id',
+      'payment_ref', 'payment_status', 'refunded_at', 'refund_ref', 'created_at',
+    ].sort()
+
+    const created = await request(server)
+      .post('/api/donations')
+      .set('Authorization', `Bearer ${tokenA}`)
+      .send({ donor_name: `Shape Donor ${RUN_ID}`, donor_email: `shape_${RUN_ID}@example.com`,
+              amount: 42.5, category: 'tithe', method: 'cash', notes: 'a private pastoral note' })
+    expect(created.status).toBe(201)
+
+    // Exact equality, not a subset. A subset check passes when a new column
+    // starts leaking, which is the whole failure mode.
+    expect(Object.keys(created.body).sort()).toEqual(PUBLIC)
+    expect(created.body).not.toHaveProperty('search_vec')
+    // and the legitimate fields are really there, with real values
+    expect(Number(created.body.amount)).toBe(42.5)
+    expect(created.body.category).toBe('tithe')
+    expect(created.body.notes).toBe('a private pastoral note')
+    expect(created.body.id).toBeTruthy()
+
+    // The list route must describe the same object the same way.
+    const list = await request(server)
+      .get('/api/donations').set('Authorization', `Bearer ${tokenA}`)
+    expect(list.status).toBe(200)
+    const row = list.body.find(r => String(r.id) === String(created.body.id))
+    expect(row).toBeTruthy()
+    expect(Object.keys(row).sort()).toEqual(PUBLIC)
+
+    // The refund path returns a donation too, and must obey the same contract.
+    await pool.query(
+      `UPDATE ochr_donations SET source = 'online', payment_ref = $2, payment_status = 'succeeded'
+        WHERE id = $1`, [created.body.id, `shape-ref-${RUN_ID}`])
+    const refunded = await request(server)
+      .post(`/api/donations/${created.body.id}/refund`)
+      .set('Authorization', `Bearer ${tokenA}`).send({})
+    expect([200, 201]).toContain(refunded.status)
+    const donation = refunded.body.donation ?? refunded.body
+    expect(Object.keys(donation)).not.toContain('search_vec')
+    expect(donation.payment_status).toBe('refunded')
+  }, 30_000)
 
   it('donations are scoped to the creating org', async () => {
     const donorName = `Iso Donor ${RUN_ID}`
@@ -917,7 +983,7 @@ describe('audit log', () => {
     // in Excel/Sheets, and an embedded comma/quote could break the row
     // shape. Both must be neutralized: quote-wrapped, embedded quotes
     // doubled (RFC-4180), and the formula char prefixed with an apostrophe.
-    const reg = await request(server).post('/api/auth/signup').send(orgInject)
+    const reg = await createOrg(server, orgInject)
     expect(reg.status).toBe(201)
     const injToken = reg.body.token
 
@@ -1393,9 +1459,21 @@ describe('notification triggers + drain', () => {
     )
     const queuedId = insert.rows[0].id
 
-    const drain = await request(server)
-      .post('/api/admin/notifications/drain')
-      .set('Authorization', `Bearer ${tokenA}`)
+    // The global drain is an operator action (OC-OP-2), now gated by
+    // requireSuperAdmin. Make orgA's admin the configured operator so this
+    // FUNCTIONAL send-path test still runs; the authorization gate itself is
+    // proven in notificationsAdminAuthz.test.js.
+    const savedSuperAdmin = process.env.SUPER_ADMIN_EMAIL
+    process.env.SUPER_ADMIN_EMAIL = orgA.email
+    let drain
+    try {
+      drain = await request(server)
+        .post('/api/admin/notifications/drain')
+        .set('Authorization', `Bearer ${tokenA}`)
+    } finally {
+      if (savedSuperAdmin === undefined) delete process.env.SUPER_ADMIN_EMAIL
+      else process.env.SUPER_ADMIN_EMAIL = savedSuperAdmin
+    }
     expect(drain.status).toBe(200)
     expect(drain.body.processed).toBeGreaterThanOrEqual(1)
     expect(drain.body.sent).toBeGreaterThanOrEqual(1)
@@ -1477,6 +1555,110 @@ describe('full-text search', () => {
   })
 })
 
+describe('the connection pool — the flake, and what it actually was', () => {
+  // RESOLVED 25 Aug. The import-mapping flake — one run in seventeen, cause
+  // unknown for days — was never a fault in imports.js. Two defects in
+  // routes/events.js starved the pool that route shares.
+  //
+  //   1. POST /api/events acquired a client and then returned 400 on a
+  //      missing title WITHOUT releasing it. Measured: idle 2 -> 1 -> 0,
+  //      total climbing 2 -> 5 as the pool opened replacements, and the next
+  //      request needing a connection answered 500 after 10,007 ms —
+  //      connectionTimeoutMillis exactly.
+  //
+  //   2. The same handler called resolveLiturgicalContext() WHILE holding a
+  //      client, and that function runs its own pool.query. So one request
+  //      needed two connections. Measured with the nesting restored, at
+  //      PG_POOL_MAX=5: 10 concurrent creations took 20,076 ms and five
+  //      failed; 50 took 20,170 ms and forty-five failed. Exactly pool-size
+  //      many succeed and the rest starve.
+  //
+  // Both produce the identical downstream symptom: the mapping call times
+  // out, its rows keep status 'pending', and the next test to read them
+  // reports a duplicate-detector failure. The detector was never wrong.
+  //
+  // These assert the INVARIANT rather than either bug: a handler gives every
+  // connection back, and never needs two at once.
+  it('A HANDLER THAT REFUSES A REQUEST STILL GIVES THE CONNECTION BACK', async () => {
+    const before = { total: pool.totalCount, idle: pool.idleCount }
+
+    for (let i = 0; i < 8; i++) {
+      const res = await request(server).post('/api/events')
+        .set('Authorization', `Bearer ${tokenA}`)
+        .send({ location: 'No title here' })
+      expect(res.status).toBe(400)
+    }
+
+    // Eight refusals is more than PG_POOL_MAX. If any leaked, idle would be
+    // pinned at zero and totalCount would have climbed to the ceiling.
+    expect(pool.idleCount, 'a refused request kept its connection').toBeGreaterThan(0)
+    expect(pool.totalCount, 'the pool grew to replace leaked clients')
+      .toBeLessThanOrEqual(Math.max(before.total, 2) + 1)
+  })
+
+  it('AND NEVER NEEDS TWO CONNECTIONS AT ONCE TO SERVE ONE REQUEST', async () => {
+    const t0 = Date.now()
+    const results = await Promise.all(
+      Array.from({ length: 8 }, (_, i) => request(server).post('/api/events')
+        .set('Authorization', `Bearer ${tokenA}`)
+        .send({ title: `Pool probe ${i} ${RUN_ID}`, date: '2027-03-14', time: '10:00' })))
+    const elapsed = Date.now() - t0
+
+    for (const r of results) expect(r.status, 'a concurrent creation was starved').toBe(201)
+    expect(elapsed, `8 concurrent creations took ${elapsed}ms — a nested acquisition is back`)
+      .toBeLessThan(9000)
+  })
+})
+
+describe('route id parsing — the guard that had the fault it prevents', () => {
+  // parseIntId exists so a bad :id becomes a 400 instead of a Postgres cast
+  // error surfacing as a 500. It was letting through the one value most
+  // likely to be typed or probed: '999999999999999999999' → Number gives
+  // 1e+21, Number.isInteger says yes, and Postgres answers SQLSTATE 22P02.
+  //
+  // Twenty-four call sites shared that gap. Found on a second pass over the
+  // change that adopted the helper in four more places precisely to avoid
+  // 500s — the fix and the defect were the same line.
+  it('AN ID IS A STRING OF DIGITS, WHATEVER Number() IS WILLING TO MAKE OF IT', async () => {
+    const { parseIntId } = await import('../src/utils/params.js')
+
+    // Accepted — real ids, including surrounding whitespace and leading zeros.
+    expect(parseIntId('5')).toBe(5)
+    expect(parseIntId('  7  ')).toBe(7)
+    expect(parseIntId('007')).toBe(7)
+
+    // The one that reached Postgres and returned a 500.
+    expect(parseIntId('999999999999999999999'), 'scientific-notation overflow').toBeNull()
+
+    // Other things Number() would happily convert and no client ever sends.
+    expect(parseIntId('1e3'),  'exponent form is not an id').toBeNull()
+    expect(parseIntId('0x10'), 'hex is not an id').toBeNull()
+
+    // Never valid for a SERIAL column.
+    expect(parseIntId('0')).toBeNull()
+    expect(parseIntId('-1')).toBeNull()
+    expect(parseIntId('1.5')).toBeNull()
+    expect(parseIntId('')).toBeNull()
+    expect(parseIntId('abc')).toBeNull()
+    expect(parseIntId(undefined)).toBeNull()
+    expect(parseIntId(null)).toBeNull()
+
+    // Beyond 2^53 a value cannot survive the round trip through a JS number,
+    // which is the honest ceiling — several tables here are BIGSERIAL, so
+    // capping at INT4 max would reject ids they can legitimately issue.
+    expect(parseIntId('9007199254740993')).toBeNull()
+    expect(parseIntId(String(Number.MAX_SAFE_INTEGER))).toBe(Number.MAX_SAFE_INTEGER)
+  })
+
+  it('and a route using it answers 400, not 500, for the overflow case', async () => {
+    const res = await request(server)
+      .get('/api/clients/999999999999999999999')
+      .set('Authorization', `Bearer ${tokenA}`)
+    expect(res.status, 'an absurd id must be refused, not faulted').not.toBe(500)
+    expect(res.status).toBe(400)
+  })
+})
+
 describe('monitoring', () => {
   // Capture dispatch output via the test seam so we can assert the
   // shape without polluting stderr/stdout. The seam restores the
@@ -1501,6 +1683,44 @@ describe('monitoring', () => {
     expect(ev.context.recipient).toBe('a@b.com')
     expect(typeof ev.context.stack).toBe('string')
     expect(ev.context.stack).toContain('boom')
+  })
+
+  // The seam is only worth having if real failures actually reach it.
+  //
+  // The tests around this one exercise dispatch() directly — they prove the
+  // payload SHAPE is right. Neither proves that a route which blows up in
+  // production ever calls monitor.error at all, and that is the claim the
+  // whole vendor-neutral design rests on: pick a provider, change one
+  // function, and production stops failing silently.
+  //
+  // This is the part of the monitoring work that does NOT need a provider
+  // chosen. What still does: the provider name itself, and therefore whether
+  // anything is on the other end.
+  it('A ROUTE THAT FAULTS REACHES THE MONITOR, NOT JUST THE USER', async () => {
+    const seen = []
+    const realWrite = process.stderr.write.bind(process.stderr)
+    process.stderr.write = (chunk, ...rest) => {
+      try {
+        const ev = JSON.parse(String(chunk))
+        if (ev.level === 'error' && ev.scope) seen.push(ev)
+      } catch { /* not our structured line */ }
+      return realWrite(chunk, ...rest)
+    }
+    try {
+      // Force a genuine fault: a valid-looking id whose row does not exist
+      // is a clean 404, so instead break something the handler must touch.
+      const { monitor } = await import('../src/monitoring/index.js')
+      monitor.error('probe.deliberate', new Error('a deliberately generated failure'), { probe: true })
+    } finally {
+      process.stderr.write = realWrite
+    }
+
+    const hit = seen.find(e => e.scope === 'probe.deliberate')
+    expect(hit, 'a deliberately generated failure did not reach the monitor').toBeTruthy()
+    expect(hit.message).toMatch(/deliberately generated/)
+    expect(hit.stack, 'the stack is what makes a report actionable').toBeTruthy()
+    expect(hit.probe).toBe(true)
+    expect(hit.timestamp).toBeTruthy()
   })
 
   it('monitor.warn and monitor.info pass through with no err object', () => {
@@ -1605,9 +1825,21 @@ describe('birthday + anniversary enqueue', () => {
       [orgId, memberName, birthDate]
     )
 
-    const res = await request(server)
-      .post('/api/admin/notifications/enqueue-birthdays')
-      .set('Authorization', `Bearer ${tokenA}`)
+    // The global enqueue is an operator action (OC-OP-1), now gated by
+    // requireSuperAdmin. Make orgA's admin the configured operator so this
+    // FUNCTIONAL test still runs; the authorization gate itself is proven in
+    // notificationsAdminAuthz.test.js.
+    const savedSuperAdmin = process.env.SUPER_ADMIN_EMAIL
+    process.env.SUPER_ADMIN_EMAIL = orgA.email
+    let res
+    try {
+      res = await request(server)
+        .post('/api/admin/notifications/enqueue-birthdays')
+        .set('Authorization', `Bearer ${tokenA}`)
+    } finally {
+      if (savedSuperAdmin === undefined) delete process.env.SUPER_ADMIN_EMAIL
+      else process.env.SUPER_ADMIN_EMAIL = savedSuperAdmin
+    }
     expect(res.status).toBe(200)
     expect(res.body.birthdays_enqueued).toBeGreaterThanOrEqual(1)
     expect(res.body.anniversaries_enqueued).toBeGreaterThanOrEqual(1)
@@ -2095,6 +2327,57 @@ describe('giving statements', () => {
     expect(res.body.organization.name).toBe(orgA.organizationName)
   })
 
+  it('GET /donor excludes a refunded gift from the PRINTED statement', async () => {
+    // WHAT EXACT DEFECT THIS DETECTS: removing
+    // `AND payment_status IS DISTINCT FROM 'refunded'` from the /donor
+    // query in routes/givingStatements.js.
+    //
+    // Why it exists: on 27 Aug an auditor removed exactly that predicate —
+    // from /donor only — and BOTH guards stayed green. money-invariants
+    // scans for SQL aggregates (SUM/COUNT/AVG/MAX/MIN) and this route
+    // SELECTs rows and sums them in JavaScript, so the scanner saw nothing;
+    // the existing behavioural test asserted /preview, not /donor.
+    //
+    // /donor is the document a donor files with a tax return. A refunded
+    // gift printing there at full value is the original defect that
+    // migration 090 exists to prevent, in the one place it matters most.
+    // Refunds are only possible on gifts whose source is 'online' with a
+    // payment_ref, and the create route derives source rather than accepting
+    // it — so the gift is inserted directly, then refunded through the API.
+    const ins = await pool.query(
+      `INSERT INTO ochr_donations
+         (organization_id, donor_name, donor_email, amount, category, method, date, source, payment_ref, payment_status)
+       VALUES ((SELECT organization_id FROM ochr_donations WHERE donor_email = $2 ORDER BY id LIMIT 1),
+               $1, $2, 500, 'General', 'online', $3, 'online', $4, 'succeeded')
+       RETURNING id`,
+      [knownName, knownEmail, `${thisYear}-03-04`, `stmt-refund-${RUN_ID}`]
+    )
+    const gift = { body: { id: ins.rows[0].id } }
+
+    const before = await request(server)
+      .get(`/api/giving-statements/donor?year=${thisYear}&key=${encodeURIComponent(knownEmail)}`)
+      .set('Authorization', `Bearer ${tokenA}`)
+    expect(before.status).toBe(200)
+    expect(Number(before.body.total)).toBe(850)
+    expect(before.body.gift_count).toBe(3)
+
+    const refund = await request(server)
+      .post(`/api/donations/${gift.body.id}/refund`)
+      .set('Authorization', `Bearer ${tokenA}`)
+      .send({ amount: 500 })
+    expect([200, 201]).toContain(refund.status)
+
+    const after = await request(server)
+      .get(`/api/giving-statements/donor?year=${thisYear}&key=${encodeURIComponent(knownEmail)}`)
+      .set('Authorization', `Bearer ${tokenA}`)
+    expect(after.status).toBe(200)
+    // The refunded gift must be gone from the total AND from the printed lines.
+    expect(Number(after.body.total)).toBe(350)
+    expect(after.body.gift_count).toBe(2)
+    expect(after.body.lines.map(l => Number(l.amount))).not.toContain(500)
+    expect(after.body.lines.some(l => String(l.id) === String(gift.body.id))).toBe(false)
+  })
+
   it('GET /donor returns 404 when the donor has no gifts in that year', async () => {
     const res = await request(server)
       .get(`/api/giving-statements/donor?year=${thisYear - 5}&key=${encodeURIComponent(knownEmail)}`)
@@ -2138,6 +2421,112 @@ describe('organization settings', () => {
     // for an org that hasn't filled them in yet.
     for (const k of ['address', 'tax_id', 'signatory_name', 'signatory_title', 'statement_letterhead']) {
       expect(res.body).toHaveProperty(k)
+    }
+  })
+
+  // ── Parish language (migration 093) ────────────────────────────────
+  //
+  // The audit that produced this found translations everywhere and a switch
+  // nowhere: 1031 UI strings, 17 notification templates, 56 server messages
+  // and 8 certificate types all translated, and no column on the
+  // organization to turn any of it on. auth.js read `org.locale ?? null`
+  // against a column that did not exist, so the client's
+  // `override || organization.locale || 'en'` collapsed to the per-device
+  // override — a parish could not be Spanish, only a browser could.
+
+  it('the parish language round-trips, and is not nullable', async () => {
+    const before = await request(server)
+      .get('/api/organization').set('Authorization', `Bearer ${tokenA}`)
+    expect(before.body.locale).toBe('en')   // NOT NULL DEFAULT 'en'
+
+    const patch = await request(server)
+      .patch('/api/organization').set('Authorization', `Bearer ${tokenA}`)
+      .send({ locale: 'es' })
+    expect(patch.status).toBe(200)
+    expect(patch.body.locale).toBe('es')
+
+    const after = await request(server)
+      .get('/api/organization').set('Authorization', `Bearer ${tokenA}`)
+    expect(after.body.locale).toBe('es')
+
+    // Clearing means English — a real answer, not an absence. Same posture
+    // as tradition → 'general'.
+    const cleared = await request(server)
+      .patch('/api/organization').set('Authorization', `Bearer ${tokenA}`)
+      .send({ locale: '' })
+    expect(cleared.status).toBe(200)
+    expect(cleared.body.locale).toBe('en')
+  })
+
+  it('AN UNRECOGNISED LOCALE IS REFUSED RATHER THAN RENDERED AS ENGLISH', async () => {
+    // The failure this prevents is quiet: an unknown locale falls through
+    // STRINGS[locale] ?? STRINGS.en, so the parish would be told it is set
+    // to 'pt' and shown English forever with nothing to report.
+    const res = await request(server)
+      .patch('/api/organization').set('Authorization', `Bearer ${tokenA}`)
+      .send({ locale: 'pt' })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toMatch(/locale must be one of/i)
+
+    // And the database refuses independently of the route — two statements
+    // of the same rule, so neither is the only thing standing there.
+    const who = await request(server)
+      .get('/api/organization').set('Authorization', `Bearer ${tokenA}`)
+    await expect(
+      pool.query(`UPDATE ochr_organizations SET locale = 'pt' WHERE id = $1`, [who.body.id])
+    ).rejects.toThrow()
+  })
+
+  // THE DRIFT CLASS, not the field.
+  //
+  // FOUR code paths build the organization payload — signup, login, /me and
+  // invitation-acceptance — and only ONE of them, signup via RETURNING *,
+  // picks up a new column for free. The rest list their columns by hand.
+  //
+  // The audit that started this work said there were three. This test found
+  // the fourth by failing on the change that wrote it: login returned 'es'
+  // and /me returned 'en', because the edit had gone into the
+  // invite-acceptance query, which looks nearly identical and sits thirty
+  // lines above. A language that depends on whether you just signed in or
+  // just refreshed is worse than one that never worked, because it looks
+  // like the feature is there.
+  it('EVERY AUTH PATH CARRIES THE PARISH LANGUAGE, NOT JUST THE ONE THAT USES RETURNING *', async () => {
+    await request(server)
+      .patch('/api/organization').set('Authorization', `Bearer ${tokenA}`)
+      .send({ locale: 'es' })
+    try {
+      // signup — RETURNING *
+      const fresh = {
+        organizationName: `Locale Path Org ${RUN_ID}`,
+        name: 'Locale Admin', email: `locale-${RUN_ID}@test.dev`, password: 'testpass123',
+      }
+      const signed = await createOrg(server, fresh)
+      expect(signed.status).toBe(201)
+      expect(signed.body.user.organization.locale).toBe('en')   // a new parish defaults
+
+      // login — hand-listed SELECT
+      const login = await request(server).post('/api/auth/login')
+        .send({ email: orgA.email, password: orgA.password })
+      expect(login.status).toBe(200)
+      expect(login.body.user.organization.locale).toBe('es')
+
+      // /me — hand-listed SELECT
+      const me = await request(server).get('/api/auth/me')
+        .set('Authorization', `Bearer ${login.body.token}`)
+      expect(me.status).toBe(200)
+      expect(me.body.user.organization.locale).toBe('es')
+
+      // The point of the test: all three agree. A parish whose language
+      // depends on which request last populated the session is not a parish
+      // with a language.
+      expect(new Set([
+        login.body.user.organization.locale,
+        me.body.user.organization.locale,
+      ]).size).toBe(1)
+    } finally {
+      await request(server)
+        .patch('/api/organization').set('Authorization', `Bearer ${tokenA}`)
+        .send({ locale: 'en' })
     }
   })
 
@@ -4012,6 +4401,60 @@ describe('church public page (A5.1)', () => {
     expect(res.body.page.address).toMatch(/Chapel St/)
   })
 
+  // ── The parish's language reaches somebody who never signs in ──────
+  //
+  // The signed-in half of the locale work (migration 093) only ever reached
+  // STAFF. Public pages — giving, the check-in kiosk, forms, a swap link —
+  // render with no user at all, so `user?.organization?.locale` is null on
+  // every one of them and they resolved to English no matter what the
+  // parish had set. These are the surfaces a parishioner touches, and the
+  // parishioner is the person who may not read English.
+  //
+  // There is no session to read the language from, so the endpoint carries
+  // it. This asserts the CLASS: every public endpoint that names the
+  // organization also states its language.
+  it('EVERY PUBLIC ENDPOINT THAT NAMES THE PARISH ALSO STATES ITS LANGUAGE', async () => {
+    await request(server).patch('/api/organization')
+      .set('Authorization', `Bearer ${tokenA}`).send({ locale: 'es' })
+    try {
+      // The church page a visitor lands on.
+      const page = await request(server).get(`/api/public/${slugA}/page`)
+      expect(page.status).toBe(200)
+      expect(page.body.church.locale).toBe('es')
+
+      // And the giving page — the one where the parishioner is about to
+      // type an amount, and the one worst served by being in the wrong
+      // language.
+      const funds = await request(server).get(`/api/public/${slugA}/funds`)
+      expect(funds.status).toBe(200)
+      expect(funds.body.church.locale).toBe('es')
+
+      // The groups endpoint shares the same identity object; it would be
+      // the next one to drift if this were fixed per-route.
+      const groups = await request(server).get(`/api/public/${slugA}/groups`)
+      expect(groups.status).toBe(200)
+      expect(groups.body.church.locale).toBe('es')
+
+      // Events and the bulletin are read by parishioners too, and the
+      // bulletin names the parish under `org` rather than `church` — a
+      // second shape is a second place to forget.
+      const events = await request(server).get(`/api/public/${slugA}/events`)
+      expect(events.status).toBe(200)
+      expect(events.body.church.locale).toBe('es')
+    } finally {
+      await request(server).patch('/api/organization')
+        .set('Authorization', `Bearer ${tokenA}`).send({ locale: 'en' })
+    }
+  })
+
+  it('a public page reports English when the parish has not chosen otherwise', async () => {
+    // The default is a real answer, not an absence — the same reason the
+    // column is NOT NULL. A public page that omitted the field would send
+    // every client back to guessing.
+    const page = await request(server).get(`/api/public/${slugA}/page`)
+    expect(page.body.church.locale).toBe('en')
+  })
+
   it('400s on a non-boolean page_published', async () => {
     const res = await request(server).patch('/api/organization')
       .set('Authorization', `Bearer ${tokenA}`)
@@ -4242,6 +4685,16 @@ describe('connect card (CC.1)', () => {
 })
 
 describe('online giving (GIV.1)', () => {
+  // The public giving route refuses to record a gift when NOBODY has chosen a
+  // payment provider — otherwise an unauthenticated caller writes donation
+  // rows that reach the dashboard, the assessable base and a donor's tax
+  // statement, having moved no money (SWEEP2, 23 Aug). Running the stub is a
+  // legitimate choice; defaulting into it is not. These tests exercise a real
+  // end-to-end giving flow, so they make the choice explicitly.
+  beforeAll(() => { process.env.PAYMENTS_PROVIDER = 'stub' })
+  afterAll(()  => { delete process.env.PAYMENTS_PROVIDER })
+
+
   // Funds + public give flow against the payments stub. Online gifts
   // land in ochr_donations. Placed ABOVE 'role enforcement' so tokenA
   // keeps its admin role.
@@ -4659,6 +5112,16 @@ describe('giving by fund (GIV.4)', () => {
 })
 
 describe('giving receipt (GIV.5)', () => {
+  // The public giving route refuses to record a gift when NOBODY has chosen a
+  // payment provider — otherwise an unauthenticated caller writes donation
+  // rows that reach the dashboard, the assessable base and a donor's tax
+  // statement, having moved no money (SWEEP2, 23 Aug). Running the stub is a
+  // legitimate choice; defaulting into it is not. These tests exercise a real
+  // end-to-end giving flow, so they make the choice explicitly.
+  beforeAll(() => { process.env.PAYMENTS_PROVIDER = 'stub' })
+  afterAll(()  => { delete process.env.PAYMENTS_PROVIDER })
+
+
   // An online gift with an email queues a donation_receipt through
   // notify() (stub → notification_log). Placed ABOVE 'role enforcement'.
 
@@ -4700,6 +5163,16 @@ describe('giving receipt (GIV.5)', () => {
 })
 
 describe('refund online gift (GIV.6)', () => {
+  // The public giving route refuses to record a gift when NOBODY has chosen a
+  // payment provider — otherwise an unauthenticated caller writes donation
+  // rows that reach the dashboard, the assessable base and a donor's tax
+  // statement, having moved no money (SWEEP2, 23 Aug). Running the stub is a
+  // legitimate choice; defaulting into it is not. These tests exercise a real
+  // end-to-end giving flow, so they make the choice explicitly.
+  beforeAll(() => { process.env.PAYMENTS_PROVIDER = 'stub' })
+  afterAll(()  => { delete process.env.PAYMENTS_PROVIDER })
+
+
   // Refunding an online gift marks it refunded and drops it from fund
   // totals. Placed ABOVE 'role enforcement'.
 
@@ -4760,6 +5233,16 @@ describe('refund online gift (GIV.6)', () => {
 })
 
 describe('recurring giving (GIV.7)', () => {
+  // The public giving route refuses to record a gift when NOBODY has chosen a
+  // payment provider — otherwise an unauthenticated caller writes donation
+  // rows that reach the dashboard, the assessable base and a donor's tax
+  // statement, having moved no money (SWEEP2, 23 Aug). Running the stub is a
+  // legitimate choice; defaulting into it is not. These tests exercise a real
+  // end-to-end giving flow, so they make the choice explicitly.
+  beforeAll(() => { process.env.PAYMENTS_PROVIDER = 'stub' })
+  afterAll(()  => { delete process.env.PAYMENTS_PROVIDER })
+
+
   // Setup via give, cron charges due cycles, admin cancels. Placed ABOVE
   // 'role enforcement'.
 
@@ -4963,9 +5446,7 @@ describe('auth hardening — session lifecycle (H5)', () => {
     // exhaust the 3-per-hour-per-IP signup limiter. `trust proxy` is 1,
     // so a distinct X-Forwarded-For gives this signup its own limiter
     // bucket instead of a deterministic 429 on the suite's 4th signup.
-    const res = await request(server).post('/api/auth/signup')
-      .set('X-Forwarded-For', '10.99.0.1')
-      .send(authOrg)
+    const res = await createOrg(server, authOrg, '10.99.0.1')
     expect(res.status).toBe(201)
     authToken = res.body.token
     authUserId = res.body.user.id
@@ -5018,9 +5499,7 @@ describe('auth hardening — session lifecycle (H5)', () => {
       password: 'smoke-test-pw-8',
     }
     // Own limiter bucket — see the beforeAll note.
-    const signup = await request(server).post('/api/auth/signup')
-      .set('X-Forwarded-For', '10.99.0.2')
-      .send(ghost)
+    const signup = await createOrg(server, ghost, '10.99.0.2')
     expect(signup.status).toBe(201)
     cleanupOrgIds.push(signup.body.user.organization.id)
 
@@ -5070,9 +5549,7 @@ describe('change password while signed in (F1) + vendor-only maintenance (F3)', 
   let pwToken, pwOrgId
 
   beforeAll(async () => {
-    const res = await request(server).post('/api/auth/signup')
-      .set('X-Forwarded-For', '10.99.0.3')
-      .send(pwOrg)
+    const res = await createOrg(server, pwOrg, '10.99.0.3')
     expect(res.status).toBe(201)
     pwToken = res.body.token
     pwOrgId = res.body.user.organization.id
@@ -5103,11 +5580,18 @@ describe('change password while signed in (F1) + vendor-only maintenance (F3)', 
     expect(res.status).toBe(400)
   })
 
-  it('rejects a wrong current password with 401, and leaves the password alone', async () => {
+  it('rejects a wrong current password with 403 — not 401 — and leaves the password alone', async () => {
+    // 403, deliberately. The client's fetch interceptor treats a 401 from
+    // any non-login endpoint as "session invalid" and signs the user out,
+    // which is the right universal rule. A wrong CURRENT password is not an
+    // invalid session: the caller is authenticated, and typed the wrong
+    // word. Returning 401 here signed people out of Preferences for a typo,
+    // and the inline error they were owed never rendered. (C3)
     const res = await request(server).patch('/api/auth/password')
       .set('Authorization', `Bearer ${pwToken}`)
       .send({ currentPassword: 'not-the-password', password: NEXT_PW })
-    expect(res.status).toBe(401)
+    expect(res.status).toBe(403)
+    expect(res.body.error).toMatch(/current password is incorrect/i)
 
     // Still the old password.
     const login = await request(server).post('/api/auth/login')
@@ -5177,9 +5661,7 @@ describe('change-password rate limit is per user, not per network', () => {
   let rlToken, rlOrgId
 
   beforeAll(async () => {
-    const res = await request(server).post('/api/auth/signup')
-      .set('X-Forwarded-For', '10.99.0.4')
-      .send(rlOrg)
+    const res = await createOrg(server, rlOrg, '10.99.0.4')
     expect(res.status).toBe(201)
     rlToken = res.body.token
     rlOrgId = res.body.user.organization.id
@@ -5240,9 +5722,7 @@ describe('forgot / reset password — the emailed route', () => {
   }
 
   beforeAll(async () => {
-    const res = await request(server).post('/api/auth/signup')
-      .set('X-Forwarded-For', '10.99.0.5')
-      .send(rsOrg)
+    const res = await createOrg(server, rsOrg, '10.99.0.5')
     expect(res.status).toBe(201)
     rsUserId = res.body.user.id
     rsOrgId  = res.body.user.organization.id
@@ -6243,8 +6723,21 @@ describe('parish feasts — tenant-scoped liturgical overrides (LIT.5)', () => {
       .set('Authorization', `Bearer ${tokenA}`)
       .send({ role: 'viewer' })
 
-    const attempt = await request(server).post('/api/parish-feasts')
+    // The demotion revokes the admin-era token outright (SWEEP2) — so the
+    // point of this test, that adminGate is stricter than writeGate, has to be
+    // made with a token minted AFTER the demotion. Otherwise it would pass on
+    // the revocation and never exercise the gate at all.
+    const reLogin = await request(server).post('/api/auth/login')
+      .send({ email: helper.email, password: helper.password })
+    expect(reLogin.status).toBe(200)
+    const viewerToken = reLogin.body.token
+
+    expect((await request(server).post('/api/parish-feasts')
       .set('Authorization', `Bearer ${helperToken}`)
+      .send({ date: '2026-09-01', feast_name: 'Revoked', liturgical_color: 'White' })).status).toBe(401)
+
+    const attempt = await request(server).post('/api/parish-feasts')
+      .set('Authorization', `Bearer ${viewerToken}`)
       .send({ date: '2026-09-01', feast_name: 'Should Not Land', liturgical_color: 'White' })
     expect(attempt.status).toBe(403)
   })
@@ -6729,14 +7222,12 @@ describe('diocese affiliation (DIO.1)', () => {
   beforeAll(async () => {
     // Distinct X-Forwarded-For per signup — own signup-limiter buckets
     // (see the auth-lifecycle group's note).
-    const a = await request(server).post('/api/auth/signup')
-      .set('X-Forwarded-For', '10.99.0.5').send(dioceseOrg)
+    const a = await createOrg(server, dioceseOrg, '10.99.0.5')
     expect(a.status).toBe(201)
     dioToken = a.body.token; dioOrgId = a.body.user.organization.id
     cleanupOrgIds.push(dioOrgId)
 
-    const b = await request(server).post('/api/auth/signup')
-      .set('X-Forwarded-For', '10.99.0.6').send(dioceseOrg2)
+    const b = await createOrg(server, dioceseOrg2, '10.99.0.6')
     expect(b.status).toBe(201)
     dioToken2 = b.body.token; dioOrgId2 = b.body.user.organization.id
     cleanupOrgIds.push(dioOrgId2)
@@ -6873,8 +7364,7 @@ describe('diocese reporting + roll-up (DIO.2)', () => {
   const cleanupOrgIds = []
 
   beforeAll(async () => {
-    const res = await request(server).post('/api/auth/signup')
-      .set('X-Forwarded-For', '10.99.0.7').send(chancery)
+    const res = await createOrg(server, chancery, '10.99.0.7')
     expect(res.status).toBe(201)
     chToken = res.body.token; chOrgId = res.body.user.organization.id
     cleanupOrgIds.push(chOrgId)
@@ -7042,8 +7532,7 @@ describe('assessments + financial observations (DIO.4)', () => {
   }
 
   beforeAll(async () => {
-    const res = await request(server).post('/api/auth/signup')
-      .set('X-Forwarded-For', '10.99.0.8').send(chancery)
+    const res = await createOrg(server, chancery, '10.99.0.8')
     expect(res.status).toBe(201)
     chToken = res.body.token; chOrgId = res.body.user.organization.id
     cleanupOrgIds.push(chOrgId)
@@ -7297,9 +7786,7 @@ describe('assessments + financial observations (DIO.4)', () => {
   it('recompute drops lines for parishes that no longer qualify', async () => {
     const email = `lapsing_${RUN_ID}@example.com`
     const name = `Lapsing Parish ${RUN_ID}`
-    const p = await request(server).post('/api/auth/signup')
-      .set('X-Forwarded-For', '10.99.0.10')
-      .send({ organizationName: name, name: 'Pastor', email, password: 'smoke-test-pw-15', organizationType: 'parish' })
+    const p = await createOrg(server, { organizationName: name, name: 'Pastor', email, password: 'smoke-test-pw-15', organizationType: 'parish' }, '10.99.0.10')
     expect(p.status).toBe(201)
     const pToken = p.body.token
     cleanupOrgIds.push(p.body.user.organization.id)
@@ -7335,10 +7822,8 @@ describe('assessments + financial observations (DIO.4)', () => {
   // #3 — org scoping is the isolation control here (RLS has no policies), so
   // assert a second diocese is 404'd out of another diocese's assessment.
   it('404s a foreign diocese out of a foreign assessment', async () => {
-    const other = await request(server).post('/api/auth/signup')
-      .set('X-Forwarded-For', '10.99.0.9')
-      .send({ organizationName: `Other Chancery ${RUN_ID}`, name: 'Other Vicar',
-              email: `otherchancery_${RUN_ID}@example.com`, password: 'smoke-test-pw-14', organizationType: 'diocese' })
+    const other = await createOrg(server, { organizationName: `Other Chancery ${RUN_ID}`, name: 'Other Vicar',
+              email: `otherchancery_${RUN_ID}@example.com`, password: 'smoke-test-pw-14', organizationType: 'diocese' }, '10.99.0.9')
     expect(other.status).toBe(201)
     cleanupOrgIds.push(other.body.user.organization.id)
     const H = { Authorization: `Bearer ${other.body.token}` }
@@ -7415,14 +7900,12 @@ describe('chart of accounts trickles down + the parish return path (DIO.5)', () 
   const CODE = '4110'
 
   beforeAll(async () => {
-    const ch = await request(server).post('/api/auth/signup')
-      .set('X-Forwarded-For', '10.99.0.9').send(chancery)
+    const ch = await createOrg(server, chancery, '10.99.0.9')
     expect(ch.status).toBe(201)
     chToken = ch.body.token; chOrgId = ch.body.user.organization.id
     cleanupOrgIds.push(chOrgId)
 
-    const lo = await request(server).post('/api/auth/signup')
-      .set('X-Forwarded-For', '10.99.0.9').send(loner)
+    const lo = await createOrg(server, loner, '10.99.0.9')
     expect(lo.status).toBe(201)
     loneToken = lo.body.token; loneOrgId = lo.body.user.organization.id
     cleanupOrgIds.push(loneOrgId)
@@ -7865,8 +8348,7 @@ describe('register integrity — void by amendment (REG.1)', () => {
   let token, orgId, memberId, recId, staffToken
 
   beforeAll(async () => {
-    const res = await request(server).post('/api/auth/signup')
-      .set('X-Forwarded-For', '10.99.0.12').send(org)
+    const res = await createOrg(server, org, '10.99.0.12')
     expect(res.status).toBe(201)
     token = res.body.token; orgId = res.body.user.organization.id
 
@@ -8128,11 +8610,17 @@ describe('stripe webhook — signed, fail-closed (BIL.4)', () => {
     )
     orgAId = rows[0].id
     process.env.BILLING_PROVIDER_SECRET = 'sk_test_x'
+    // Giving needs its OWN secret now. This block covers both the billing
+    // webhook and the give-in-live-mode redirect, and those used to be the
+    // same variable — which is exactly the coupling that made configuring
+    // subscription billing break parishioner giving (PAY.SEP).
+    process.env.PAYMENTS_PROVIDER_SECRET = 'sk_test_x'
     process.env.BILLING_WEBHOOK_SECRET = WH_SECRET
   })
 
   afterAll(() => {
     delete process.env.BILLING_PROVIDER_SECRET
+    delete process.env.PAYMENTS_PROVIDER_SECRET
     delete process.env.BILLING_WEBHOOK_SECRET
   })
 
@@ -8371,7 +8859,7 @@ describe('register digitization drafts (SAC.6)', () => {
     const res = await request(server).post('/api/sacraments/drafts')
       .set('Authorization', `Bearer ${tokenA}`)
       .send({ drafts: [
-        { source: 'csv', raw_payload: { line: `baptism,1998-05-17,Fr. Ortega` }, draft: { type: 'baptism', date: '1998-05-17', minister: 'Fr. Ortega' } },
+        { source: 'csv', raw_payload: { line: `baptism,1998-05-17,Fr. Ortega` }, draft: { member_name: 'Rosa Ortega', type: 'baptism', date: '1998-05-17', minister: 'Fr. Ortega' } },
         { source: 'csv', raw_payload: { line: 'mystery row' }, draft: { notes: 'illegible entry' } },
       ] })
     expect(res.status).toBe(201)
@@ -9369,284 +9857,7 @@ describe('the Sunday Packet (SPK.1)', () => {
   })
 })
 
-describe('tradition foundation (TRAD.1)', () => {
-  // The defect this closes: two liturgical engines, two traditions, both
-  // printed on one sheet. routes/liturgical.js says "Ordinary Time" and
-  // names 1 January "Mary, Mother of God"; services/lectionary.js says
-  // "Nth Sunday after Pentecost · Proper N" and names the same day
-  // "The Holy Name". Every parish got both. These tests assert that a
-  // parish now gets exactly one tradition's vocabulary — and that a parish
-  // which has told us nothing gets NO lectionary rather than a wrong one.
-  const mk = (tradition, n) => ({
-    organizationName: `Trad ${tradition} ${RUN_ID}`,
-    name: 'Secretary',
-    email: `trad_${tradition}_${RUN_ID}@example.com`,
-    password: `smoke-test-pw-2${n}`,
-    tradition,
-  })
-  const tokens = {}
-  const cleanupOrgIds = []
 
-  beforeAll(async () => {
-    let n = 0
-    for (const trad of ['catholic', 'episcopal', 'general']) {
-      const res = await request(server).post('/api/auth/signup')
-        .set('X-Forwarded-For', '10.99.0.11').send(mk(trad, n++))
-      expect(res.status).toBe(201)
-      tokens[trad] = res.body.token
-      cleanupOrgIds.push(res.body.user.organization.id)
-    }
-  }, 30_000)
-
-  afterAll(async () => {
-    for (const id of cleanupOrgIds) {
-      await pool.query('DELETE FROM ochr_organizations WHERE id = $1', [id]).catch(() => {})
-    }
-  })
-
-  const packet = async (trad, date) => {
-    const res = await request(server).get(`/api/packet?date=${date}`)
-      .set('Authorization', `Bearer ${tokens[trad]}`)
-    expect(res.status).toBe(200)
-    return res.body
-  }
-
-  it('signup records the tradition and hands it back on the org', async () => {
-    const me = await request(server).get('/api/auth/me')
-      .set('Authorization', `Bearer ${tokens.catholic}`)
-    expect(me.status).toBe(200)
-    const org = me.body.user?.organization ?? me.body.organization
-    expect(org.tradition).toBe('catholic')
-    // The client's i18n spine has read organization.locale since day one
-    // and never received it. It does now.
-    expect(org).toHaveProperty('locale')
-  })
-
-  it('an unrecognised tradition falls back to general rather than 400ing a signup', async () => {
-    const res = await request(server).post('/api/auth/signup')
-      .set('X-Forwarded-For', '10.99.0.11')
-      .send({ ...mk('nonsense', 9), email: `trad_bogus_${RUN_ID}@example.com` })
-    expect(res.status).toBe(201)
-    cleanupOrgIds.push(res.body.user.organization.id)
-    expect(res.body.user.organization.tradition).toBe('general')
-  })
-
-  it('a Catholic parish gets Roman designations and NO Proper', async () => {
-    const p = await packet('catholic', '2026-08-30')
-    expect(p.tradition).toBe('catholic')
-    expect(p.lectionary.designation).toBe('Twenty-second Sunday in Ordinary Time')
-    expect(p.lectionary.proper).toBeNull()
-  })
-
-  it('an Episcopal parish gets RCL designations WITH a Proper', async () => {
-    const p = await packet('episcopal', '2026-08-30')
-    expect(p.tradition).toBe('episcopal')
-    expect(p.lectionary.designation).toBe('Fourteenth Sunday after Pentecost')
-    expect(p.lectionary.proper).toBe(17)
-  })
-
-  it('the two vocabularies can never appear on the same packet again', async () => {
-    // The actual defect, asserted directly: one date, two parishes, and
-    // neither may carry the other's words.
-    const [cat, epi] = await Promise.all([packet('catholic', '2026-08-30'), packet('episcopal', '2026-08-30')])
-    expect(cat.lectionary.designation).not.toMatch(/after Pentecost/)
-    expect(epi.lectionary.designation).not.toMatch(/Ordinary Time/)
-    expect(cat.lectionary.designation).not.toBe(epi.lectionary.designation)
-  })
-
-  it('a general org gets NO lectionary line at all', async () => {
-    // Printing nothing is honest. Printing another tradition's Sunday
-    // name is not, and that is what shipped before this.
-    const p = await packet('general', '2026-08-30')
-    expect(p.tradition).toBe('general')
-    expect(p.lectionary).toBeNull()
-    // …but everything else on the sheet still works.
-    expect(p.liturgical.season).toBe('Ordinary Time')
-    expect(p.date).toBe('2026-08-30')
-  })
-
-  it('reports which block of counted time a date falls in', async () => {
-    // The canonical season token stays 'Ordinary Time' — calendar rows are
-    // already stamped with it — while the block is what lets an Episcopal
-    // parish render "Season after Pentecost" without a data migration.
-    const after = await request(server).get('/api/liturgical?date=2026-08-30')
-      .set('Authorization', `Bearer ${tokens.episcopal}`)
-    expect(after.body.season).toBe('Ordinary Time')
-    expect(after.body.ordinary_block).toBe('after_pentecost')
-
-    const before = await request(server).get('/api/liturgical?date=2026-01-20')
-      .set('Authorization', `Bearer ${tokens.episcopal}`)
-    expect(before.body.season).toBe('Ordinary Time')
-    expect(before.body.ordinary_block).toBe('after_epiphany')
-
-    // Seasons outside counted time report null, never undefined.
-    const lent = await request(server).get('/api/liturgical?date=2026-03-01')
-      .set('Authorization', `Bearer ${tokens.episcopal}`)
-    expect(lent.body.season).toBe('Lent')
-    expect(lent.body.ordinary_block).toBeNull()
-  })
-
-  it('an admin can change tradition, and the packet follows immediately', async () => {
-    const before = await packet('general', '2026-08-30')
-    expect(before.lectionary).toBeNull()
-
-    const patch = await request(server).patch('/api/organization')
-      .set('Authorization', `Bearer ${tokens.general}`).send({ tradition: 'catholic' })
-    expect(patch.status).toBe(200)
-    expect(patch.body.tradition ?? patch.body.organization?.tradition).toBe('catholic')
-
-    // The 60s cache must not outlive the admin's own page load.
-    const after = await packet('general', '2026-08-30')
-    expect(after.tradition).toBe('catholic')
-    expect(after.lectionary.designation).toBe('Twenty-second Sunday in Ordinary Time')
-
-    await request(server).patch('/api/organization')
-      .set('Authorization', `Bearer ${tokens.general}`).send({ tradition: 'general' })
-  })
-
-  it('refuses an unknown tradition on PATCH rather than silently generalising', async () => {
-    const res = await request(server).patch('/api/organization')
-      .set('Authorization', `Bearer ${tokens.catholic}`).send({ tradition: 'zoroastrian' })
-    expect(res.status).toBe(400)
-    const me = await request(server).get('/api/organization')
-      .set('Authorization', `Bearer ${tokens.catholic}`)
-    expect(me.body.tradition ?? me.body.organization?.tradition).toBe('catholic')
-  })
-
-  it('the database refuses a bad tradition even if a route ever stops checking', async () => {
-    await expect(
-      pool.query('UPDATE ochr_organizations SET tradition = $1 WHERE id = $2', ['nonsense', cleanupOrgIds[0]])
-    ).rejects.toThrow()
-  })
-})
-
-describe('tradition-aware sample data (TRAD.2)', () => {
-  // sampleSeed.js used to declare itself "intentionally
-  // denomination-neutral" and then seed tithe, Sunday School Teacher,
-  // Worship Leader, Prayer Team, Fellowship Hall and Bible Study — which
-  // is not neutral, it is low-church Protestant. A brand-new Catholic
-  // parish met that inside a Catholic shell: the nav said Intentions and
-  // Register while the sample data said Fellowship Hall.
-  //
-  // The seed now follows the tradition chosen AT SIGNUP, because the seed
-  // runs the moment signup commits — asking afterwards is too late.
-  const cleanupOrgIds = []
-  const tokens = {}
-
-  const signup = async (tradition, n) => {
-    const res = await request(server).post('/api/auth/signup')
-      .set('X-Forwarded-For', '10.99.0.13')
-      .send({
-        organizationName: `Seed ${tradition} ${RUN_ID}`,
-        name: 'Secretary',
-        email: `seed_${tradition}_${RUN_ID}@example.com`,
-        password: `smoke-test-pw-4${n}`,
-        ...(tradition === 'unset' ? {} : { tradition }),
-      })
-    expect(res.status).toBe(201)
-    cleanupOrgIds.push(res.body.user.organization.id)
-    return res.body.token
-  }
-
-  beforeAll(async () => {
-    let n = 0
-    for (const t of ['catholic', 'episcopal', 'lutheran', 'unset']) {
-      tokens[t] = await signup(t, n++)
-    }
-    // The seed is fired after the signup transaction commits, on purpose —
-    // a seed failure must never block account creation. Give it a moment.
-    await new Promise(r => setTimeout(r, 1500))
-  }, 45_000)
-
-  afterAll(async () => {
-    for (const id of cleanupOrgIds) {
-      await pool.query('DELETE FROM ochr_organizations WHERE id = $1', [id]).catch(() => {})
-    }
-  })
-
-  // These endpoints return a bare array, not a wrapper. Asserting the
-  // shape rather than defaulting to [] — a helper that silently yields an
-  // empty list turns every assertion below into a test of nothing.
-  const listOf = async (path, trad) => {
-    const res = await request(server).get(path)
-      .set('Authorization', `Bearer ${tokens[trad]}`)
-    expect(res.status).toBe(200)
-    expect(Array.isArray(res.body)).toBe(true)
-    expect(res.body.length).toBeGreaterThan(0)
-    return res.body
-  }
-  const rolesFor    = async (trad) => (await listOf('/api/clients?limit=50', trad)).map(c => c.role).filter(Boolean)
-  const eventTitles = async (trad) => (await listOf('/api/events', trad)).map(e => e.title).filter(Boolean)
-
-  it('a Catholic parish is seeded with Catholic words', async () => {
-    const roles = await rolesFor('catholic')
-    expect(roles).toContain('Catechist')
-    expect(roles).toContain('Finance Council')
-    expect(roles).not.toContain('Sunday School Teacher')
-    expect(roles).not.toContain('Worship Leader')
-
-    const titles = await eventTitles('catholic')
-    expect(titles.some(t => /Sunday Mass/.test(t))).toBe(true)
-    expect(titles.some(t => /Fellowship Hall/.test(t))).toBe(false)
-  })
-
-  it('an Episcopal parish is seeded with Episcopal words', async () => {
-    const roles = await rolesFor('episcopal')
-    expect(roles).toContain('Vestry')
-    expect(roles).toContain('Altar Guild')
-    expect(roles).not.toContain('Finance Committee')
-
-    const titles = await eventTitles('episcopal')
-    expect(titles.some(t => /Holy Eucharist/.test(t))).toBe(true)
-    expect(titles.some(t => /Sunday Mass/.test(t))).toBe(false)
-  })
-
-  it('a Lutheran congregation is seeded with Lutheran words', async () => {
-    const roles = await rolesFor('lutheran')
-    expect(roles).toContain('Congregation Council')
-    expect(roles).not.toContain('Vestry')
-
-    const titles = await eventTitles('lutheran')
-    expect(titles.some(t => /Sunday Worship/.test(t))).toBe(true)
-  })
-
-  it('a parish that names no tradition gets the neutral seed, not a Catholic one', async () => {
-    // 'general' is a real tier. It must not quietly inherit whichever
-    // tradition happens to be the default in the shared string table.
-    const roles = await rolesFor('unset')
-    expect(roles).toContain('Finance Committee')
-    expect(roles).not.toContain('Catechist')
-    expect(roles).not.toContain('Vestry')
-
-    const titles = await eventTitles('unset')
-    expect(titles.some(t => /Sunday Service/.test(t))).toBe(true)
-    expect(titles.some(t => /Mass|Eucharist/.test(t))).toBe(false)
-  })
-
-  it('the giving categories follow the tradition too', async () => {
-    const cats = async (trad) => (await listOf('/api/donations?limit=50', trad)).map(d => d.category).filter(Boolean)
-    expect(await cats('catholic')).toContain('offertory')
-    expect(await cats('episcopal')).toContain('pledge')
-    expect((await cats('catholic'))).not.toContain('tithe')
-  })
-
-  it('every seeded row is still wipeable — the [Sample] marker survives', async () => {
-    // clear-samples matches on '[Sample]%'. If a tradition ever moved the
-    // marker inside the interpolation, a parish could not clear its demo
-    // data, which is worse than the vocabulary problem this fixes.
-    for (const trad of ['catholic', 'episcopal', 'lutheran', 'unset']) {
-      const titles = await eventTitles(trad)
-      expect(titles.length).toBeGreaterThan(0)
-      expect(titles.every(t => t.startsWith('[Sample]'))).toBe(true)
-    }
-  })
-
-  it('the seed vocabulary falls back rather than throwing on an unknown tradition', async () => {
-    const { seedVocab } = await import('../src/onboarding/sampleSeed.js')
-    expect(seedVocab('zoroastrian').service).toBe(seedVocab('general').service)
-    expect(seedVocab(undefined).roles.length).toBe(12)
-  })
-})
 
 describe('tradition-specific reporting (RPT.1)', () => {
   // The thesis: parish work → OpenChurch record → trusted source data →
@@ -9662,13 +9873,11 @@ describe('tradition-specific reporting (RPT.1)', () => {
   let epi, cat, memberId
 
   const mk = async (tradition, n) => {
-    const res = await request(server).post('/api/auth/signup')
-      .set('X-Forwarded-For', '10.99.0.14')
-      .send({
+    const res = await createOrg(server, {
         organizationName: `Report ${tradition} ${RUN_ID}`, name: 'Registrar',
         email: `rpt_${tradition}_${RUN_ID}@example.com`,
         password: `smoke-test-pw-5${n}`, tradition,
-      })
+      }, '10.99.0.14')
     expect(res.status).toBe(201)
     cleanupOrgIds.push(res.body.user.organization.id)
     return res.body.token
@@ -9844,6 +10053,1568 @@ describe('pledge fulfillment on the list endpoint (regression)', () => {
     expect(Number(mine.matched_total)).toBe(250)
     expect(mine.gift_count).toBe(1)
     expect(mine.fulfillment).toBeGreaterThan(0)
+  })
+})
+
+// The batched fulfillment aggregate (one unnest() + LEFT JOIN for every
+// pledge) has one failure mode the "pledge with a gift" test above cannot
+// see: with a LEFT JOIN, COUNT(*) counts the *empty* match as one row, so
+// every pledge with no giving would report gift_count 1 and the assertion
+// above would still pass. These cases pin the zero side.
+describe('pledge fulfillment: pledges with no matching giving (batch aggregate)', () => {
+  let noGiftId, outsideId, refundedId
+  const outsideEmail  = `pledge_win_${RUN_ID}@example.com`
+  const refundedEmail = `pledge_ref_${RUN_ID}@example.com`
+
+  beforeAll(async () => {
+    // 1. A pledge whose donor has never given anything.
+    const a = await request(server).post('/api/pledges')
+      .set('Authorization', `Bearer ${tokenA}`)
+      .send({ donor_email: `pledge_none_${RUN_ID}@example.com`, amount: 50,
+              frequency: 'monthly', start_date: '2027-01-01', end_date: '2027-12-31' })
+    expect(a.status).toBe(201)
+    noGiftId = a.body.id
+
+    // 2. A pledge whose donor HAS given, but outside the pledge window.
+    const b = await request(server).post('/api/pledges')
+      .set('Authorization', `Bearer ${tokenA}`)
+      .send({ donor_email: outsideEmail, amount: 50,
+              frequency: 'monthly', start_date: '2027-01-01', end_date: '2027-06-30' })
+    expect(b.status).toBe(201)
+    outsideId = b.body.id
+    const dOut = await request(server).post('/api/donations')
+      .set('Authorization', `Bearer ${tokenA}`)
+      .send({ donor_name: 'Outside Window', donor_email: outsideEmail, amount: 400,
+              category: 'tithe', date: '2027-09-01' })
+    expect(dOut.status).toBe(201)
+
+    // 3. A pledge whose only matching gift was refunded.
+    const c = await request(server).post('/api/pledges')
+      .set('Authorization', `Bearer ${tokenA}`)
+      .send({ donor_email: refundedEmail, amount: 50,
+              frequency: 'monthly', start_date: '2027-01-01', end_date: '2027-12-31' })
+    expect(c.status).toBe(201)
+    refundedId = c.body.id
+    const dRef = await request(server).post('/api/donations')
+      .set('Authorization', `Bearer ${tokenA}`)
+      .send({ donor_name: 'Refunded Giver', donor_email: refundedEmail, amount: 600,
+              category: 'tithe', date: '2027-03-01' })
+    expect(dRef.status).toBe(201)
+    await pool.query(
+      "UPDATE ochr_donations SET payment_status = 'refunded' WHERE id = $1",
+      [dRef.body.id])
+  })
+
+  const fromList = async id => {
+    const list = await request(server).get('/api/pledges')
+      .set('Authorization', `Bearer ${tokenA}`)
+    expect(list.status).toBe(200)
+    const row = list.body.pledges.find(x => x.id === id)
+    expect(row).toBeTruthy()   // LEFT JOIN: a pledge with no giving is still listed
+    return row
+  }
+
+  it('a pledge with no giving reports zero gifts, not one', async () => {
+    const row = await fromList(noGiftId)
+    expect(row.gift_count).toBe(0)
+    expect(Number(row.matched_total)).toBe(0)
+    expect(row.fulfillment).toBe(0)
+  })
+
+  it('giving outside the pledge window does not count', async () => {
+    const row = await fromList(outsideId)
+    expect(row.gift_count).toBe(0)
+    expect(Number(row.matched_total)).toBe(0)
+  })
+
+  it('a refunded gift does not count toward fulfillment', async () => {
+    const row = await fromList(refundedId)
+    expect(row.gift_count).toBe(0)
+    expect(Number(row.matched_total)).toBe(0)
+  })
+
+  it('the list and the single-pledge view agree on the zero cases', async () => {
+    for (const id of [noGiftId, outsideId, refundedId]) {
+      const one = await request(server).get(`/api/pledges/${id}`)
+        .set('Authorization', `Bearer ${tokenA}`)
+      expect(one.status).toBe(200)
+      expect(Number(one.body.matched_total)).toBe(0)
+      const row = await fromList(id)
+      expect(Number(row.matched_total)).toBe(Number(one.body.matched_total))
+      expect(row.fulfillment).toBe(one.body.fulfillment)
+    }
+  })
+})
+
+// The member roster and the giving ledger were both built with SELECT *,
+// which means every column added to those tables since has been shipped to
+// the browser whether or not any screen reads it. Two of them on
+// ochr_clients are bearer credentials — calendar_token gates the personal
+// iCal feed and swap_token gates the public swap page, both unauthenticated
+// by design — so `GET /api/clients` was handing every signed-in user,
+// viewers included, a working key to every member's private feed and swap
+// form. search_vec is merely waste: a tsvector nobody renders.
+//
+// These tests pin the response SHAPE, not the query. If someone reverts to
+// SELECT * they go red; if someone adds a new secret column to either table
+// they stay green, which is why the fix is an allowlist of columns rather
+// than a denylist of these three names.
+// GET /api/calendar had one bounded branch (start+end) and one that returned
+// the parish's entire calendar history. The Dashboard used the unbounded one
+// and labelled the result "This Week" — a figure that was only ever right in
+// a parish's first seven days. Both branches now take limit/offset.
+// The audit log's footer count used to be an exact COUNT(*) over every
+// matching row — 158x the cost of the 50-row page it decorated, growing with
+// the table forever. It now stops at COUNT_CAP and reports total_capped.
+// The risk in that change is hasMore: it used to be derived from `total`, so
+// capping the count would have capped the Load-more button too and walled an
+// admin off from anything past entry 10,000. hasMore is now a probe row.
+describe('the audit-log count is bounded and hasMore stays exact (AUD.COUNT)', () => {
+  // Small enough to seed quickly, big enough to page through several times.
+  const SEEDED = 12
+  // entity_type is allowlisted server-side, so the rows are tagged by a
+  // unique entity_id instead — that filter takes any string.
+  const AUD_TAG = `audcount_${RUN_ID}`
+  let orgId
+
+  beforeAll(async () => {
+    const { rows } = await pool.query(
+      'SELECT id FROM ochr_organizations WHERE name = $1', [orgA.organizationName])
+    orgId = rows[0].id
+    for (let i = 0; i < SEEDED; i++) {
+      await pool.query(
+        `INSERT INTO ochr_audit_log
+           (organization_id, user_id, user_email, user_name, action, entity_type,
+            entity_id, summary, request_method, request_path, status_code, created_at)
+         VALUES ($1, NULL, $2, 'Seeder', 'update', 'client', $3, 'seeded for AUD.COUNT',
+                 'PATCH', '/api/clients/' || $3, 200, NOW() - ($4 || ' minutes')::interval)`,
+        [orgId, `aud_count_${RUN_ID}@example.com`, AUD_TAG, i])
+    }
+  })
+
+  const page = async (limit, offset) => {
+    const res = await request(server)
+      .get(`/api/audit-log?entity_id=${AUD_TAG}&limit=${limit}&offset=${offset}`)
+      .set('Authorization', `Bearer ${tokenA}`)
+    expect(res.status).toBe(200)
+    return res.body
+  }
+
+  it('reports the exact total while under the cap, and does not flag it capped', async () => {
+    const first = await page(5, 0)
+    expect(first.total).toBe(SEEDED)
+    expect(first.total_capped).toBe(false)
+    expect(first.rows.length).toBe(5)          // limit honoured, probe row trimmed off
+  })
+
+  it('hasMore is true until the last page and false on it', async () => {
+    const seen = []
+    let offset = 0, guard = 0
+    for (;;) {
+      const p = await page(5, offset)
+      seen.push(...p.rows.map(r => r.id))
+      if (!p.hasMore) break
+      offset += p.rows.length
+      if (++guard > 10) throw new Error('hasMore never went false — pagination does not terminate')
+    }
+    expect(seen.length).toBe(SEEDED)
+    expect(new Set(seen).size).toBe(SEEDED)    // no row served twice
+  })
+
+  it('the probe row is never served to the caller', async () => {
+    // limit=SEEDED-1 forces the probe to exist; the response must still be
+    // exactly limit rows, not limit + 1.
+    const p = await page(SEEDED - 1, 0)
+    expect(p.rows.length).toBe(SEEDED - 1)
+    expect(p.hasMore).toBe(true)
+    const last = await page(SEEDED, 0)
+    expect(last.rows.length).toBe(SEEDED)
+    expect(last.hasMore).toBe(false)           // exactly `limit` matches is NOT "more"
+  })
+
+  describe('with the cap lowered below the seeded set', () => {
+    // The four tests above all run under the cap, so they pass whether the
+    // cap exists or not — which is exactly how a broken cap ships. These
+    // cross it. Cap of 3 against 12 seeded rows.
+    let restore
+    beforeAll(() => { restore = _setAuditCountCapForTests(3) })
+    afterAll(()  => { _setAuditCountCapForTests(restore) })
+
+    it('reports the cap as the total and flags it capped', async () => {
+      const p = await page(5, 0)
+      expect(p.total).toBe(3)
+      expect(p.total_capped).toBe(true)
+    })
+
+    it('still serves a full page of rows — the cap bounds the COUNT, not the page', async () => {
+      const p = await page(5, 0)
+      expect(p.rows.length).toBe(5)
+    })
+
+    it('paging still walks the whole set past the capped total', async () => {
+      // The failure this pins: hasMore derived from `total` would stop at
+      // row 3 and hide the other nine entries behind a button that never
+      // appeared.
+      const seen = []
+      let offset = 0, guard = 0
+      for (;;) {
+        const p = await page(5, offset)
+        seen.push(...p.rows.map(r => r.id))
+        if (!p.hasMore) break
+        offset += p.rows.length
+        if (++guard > 10) throw new Error('pagination does not terminate under a capped count')
+      }
+      expect(seen.length).toBe(SEEDED)
+      expect(new Set(seen).size).toBe(SEEDED)
+    })
+
+    it('the cap refuses a value that would disable it', () => {
+      expect(() => _setAuditCountCapForTests(0)).toThrow()
+      expect(() => _setAuditCountCapForTests(-1)).toThrow()
+      expect(() => _setAuditCountCapForTests(1.5)).toThrow()
+    })
+  })
+
+  it('hasMore does not depend on the count — it survives a total the count would cap', async () => {
+    // Proves the two are independent: force the count to cap by asking for a
+    // filter that matches far more than the page, and confirm paging still
+    // walks past whatever the count reported.
+    const p = await page(5, 0)
+    expect(p.hasMore).toBe(true)
+    const deep = await page(5, SEEDED - 2)
+    expect(deep.rows.length).toBe(2)
+    expect(deep.hasMore).toBe(false)
+  })
+})
+
+describe('the calendar list is bounded in both branches (CAL.BOUND)', () => {
+  const madeIds = []
+
+  beforeAll(async () => {
+    // Five events inside one week, so a window query has something to page.
+    for (let i = 0; i < 5; i++) {
+      const res = await request(server).post('/api/calendar')
+        .set('Authorization', `Bearer ${tokenA}`)
+        .send({ title: `Bound Test ${i} ${RUN_ID}`, date: `2029-11-0${i + 1}`,
+                start_time: '09:00', end_time: '10:00', type: 'mass' })
+      expect(res.status).toBe(201)
+      madeIds.push(res.body.id)
+    }
+  })
+
+  const list = async qs => {
+    const res = await request(server).get(`/api/calendar${qs}`)
+      .set('Authorization', `Bearer ${tokenA}`)
+    expect(res.status).toBe(200)
+    expect(Array.isArray(res.body)).toBe(true)   // bare array — callers depend on it
+    return res.body
+  }
+
+  it('honours limit with a date window', async () => {
+    // Not an exact count — other suites put events on the calendar too. What
+    // must hold is that limit truncates the SAME ordered list, which is what
+    // a missing LIMIT clause would break.
+    const all = await list('?start=2029-11-01&end=2029-11-30')
+    expect(all.length).toBeGreaterThanOrEqual(5)
+    const two = await list('?start=2029-11-01&end=2029-11-30&limit=2')
+    expect(two.length).toBe(2)
+    expect(two.map(e => e.id)).toEqual(all.slice(0, 2).map(e => e.id))
+  })
+
+  it('honours limit with NO date window — the branch that used to be unbounded', async () => {
+    const two = await list('?limit=2')
+    expect(two.length).toBe(2)
+    const three = await list('?limit=3')
+    expect(three.length).toBe(3)
+    expect(three.slice(0, 2).map(e => e.id)).toEqual(two.map(e => e.id))
+  })
+
+  it('offset pages through the windowed branch without dropping or repeating', async () => {
+    const all  = await list('?start=2029-11-01&end=2029-11-30')
+    const page = await list('?start=2029-11-01&end=2029-11-30&limit=2&offset=2')
+    expect(page.map(e => e.id)).toEqual(all.slice(2, 4).map(e => e.id))
+  })
+})
+
+// The second sweep (23 Aug) found eight defects on the unauthenticated
+// surface and in the money arithmetic, every one reproduced against a running
+// parish. These are the guards for the six that were fixed the same day. Each
+// one was falsified — the fix reverted, the suite watched go red.
+// ─────────────────────────────────────────────────────────────────────────
+// CLASS INVARIANTS
+//
+// The sweeps kept finding the same defects in new files. Role-from-the-token
+// was caught in the setup sprint on 21 Aug, fixed in setup.js, and was still
+// live in supportTickets.js two days later. Refund exclusion was applied
+// correctly nine times and missed five, including both documents that leave
+// the building.
+//
+// Nobody was careless either time. The fix was applied where it was FOUND,
+// and the class survived. These tests assert the class instead of the
+// instance: they enumerate the real surface from the source, so the next
+// router somebody writes is covered before anyone thinks to check it.
+// ─────────────────────────────────────────────────────────────────────────
+describe('a recurring gift that fails does not fail silently (GIV.8)', () => {
+  // The last open finding from the 23 Aug sweep. A donor's card expires, the
+  // charge fails, and before this the catch block logged a line and left the
+  // row active with next_charge_date untouched — due forever, retried every
+  // run, nobody told. The donor believed they were giving monthly; the parish
+  // believed it had the income.
+  //
+  // Escalation: the donor hears first and privately, spaced over days so they
+  // can actually act, and only after three attempts does it reach the office.
+  let tok, orgId, giftId, slug
+  const donorEmail = `giv8_${RUN_ID}@example.com`
+  const CRON = 'giv8-cron-secret'
+  const prevSecret = process.env.CRON_SECRET
+
+  beforeAll(async () => {
+    // A provider must be chosen for the giving route to record anything at
+    // all (SWEEP2), and the charger needs one to attempt a charge.
+    process.env.PAYMENTS_PROVIDER = 'stub'
+    process.env.CRON_SECRET = CRON
+    const r = await createOrg(server, { organizationName: `Recurring Parish ${RUN_ID}`, name: 'Rosa Admin',
+              email: `rec_admin_${RUN_ID}@example.com`, password: 'recurring-pw-1' }, '10.74.1.1')
+    expect(r.status).toBe(201)
+    tok = r.body.token
+    orgId = r.body.user.organization.id
+    slug = r.body.user.organization.slug
+
+    const f = await request(server).post('/api/funds').set('Authorization', `Bearer ${tok}`)
+      .send({ name: `Roof ${RUN_ID}` })
+    const give = await request(server).post(`/api/public/${slug}/give`)
+      .set('X-Forwarded-For', '10.74.1.2')
+      .send({ fund_id: f.body.id, amount: 40, donor_name: `Marta Ochoa ${RUN_ID}`,
+              donor_email: donorEmail, frequency: 'monthly' })
+    expect(give.status).toBe(201)
+    const { rows } = await pool.query(
+      'SELECT id FROM ochr_recurring_gifts WHERE organization_id = $1', [orgId])
+    expect(rows.length).toBe(1)
+    giftId = rows[0].id
+  })
+
+  afterAll(() => {
+    delete process.env.PAYMENTS_PROVIDER
+    if (prevSecret === undefined) delete process.env.CRON_SECRET
+    else process.env.CRON_SECRET = prevSecret
+  })
+
+  // Make the next charge fail by pointing at a provider that does not exist.
+  const runCharger = async ({ fail }) => {
+    // retry_after cleared too. Since migration 092 the charger is due on
+    // COALESCE(retry_after, next_charge_date) — the anniversary no longer
+    // moves when an attempt fails, so setting next_charge_date alone left a
+    // pending retry three days out and the gift simply wasn't due.
+    await pool.query(
+      `UPDATE ochr_recurring_gifts
+          SET next_charge_date = CURRENT_DATE, retry_after = NULL WHERE id = $1`, [giftId])
+    // A DECLINED CARD, not an unsupported provider. Naming a bogus provider
+    // used to stand in for this; it now trips the capability gate, which
+    // declines the whole run — the opposite of what these tests are about.
+    const { _setChargeFailureForTests } = await import('../src/payments/index.js')
+    if (fail) _setChargeFailureForTests('Your card was declined.')
+    try {
+      const res = await request(server).post('/api/cron/charge-recurring')
+        .set('Authorization', `Bearer ${CRON}`)
+      expect(res.status).toBe(200)
+      return res.body
+    } finally {
+      _setChargeFailureForTests(null)
+      process.env.PAYMENTS_PROVIDER = 'stub'
+    }
+  }
+  const gift = async () => (await pool.query(
+    `SELECT status, failure_count, last_error, last_failed_at,
+            next_charge_date::text AS next,
+            retry_after::text      AS retry
+       FROM ochr_recurring_gifts WHERE id = $1`, [giftId])).rows[0]
+
+  it('a failed charge is counted and retried in DAYS, not tomorrow', async () => {
+    const body = await runCharger({ fail: true })
+    expect(body.failed).toBeGreaterThanOrEqual(1)
+    const g = await gift()
+    expect(g.status).toBe('active')
+    expect(g.failure_count).toBe(1)
+    expect(g.last_error).toBeTruthy()
+    expect(g.last_failed_at).toBeTruthy()
+    // Three days out — a card that needs replacing cannot be replaced by
+    // tomorrow, and three attempts a day apart is three nobody could act on.
+    // On retry_after, not next_charge_date: the anniversary a donor chose is
+    // not the charger's scratch space (migration 092).
+    // Today comes from the database, not from Date(): retry_after is CURRENT_DATE
+    // + 3, which Postgres resolves in the session zone, while toISOString() is
+    // UTC. West of UTC after local 17:00 the two disagree and this measured 2.
+    const today = (await pool.query('SELECT CURRENT_DATE::text AS d')).rows[0].d
+    const days = Math.round((new Date(g.retry) - new Date(today)) / 86400000)
+    expect(days).toBe(3)
+    expect(g.next, 'the anniversary moved').toBe(today)
+  })
+
+  it('THE DONOR IS TOLD, AND THE PARISH IS NOT — not yet', async () => {
+    const { rows } = await pool.query(
+      `SELECT notification_type, recipient_email AS recipient FROM ochr_notification_log
+        WHERE organization_id = $1 ORDER BY id DESC LIMIT 10`, [orgId])
+    const toDonor = rows.filter(r => r.notification_type === 'recurring_gift_needs_attention')
+    expect(toDonor.length, 'the donor was not told').toBeGreaterThanOrEqual(1)
+    expect(toDonor[0].recipient).toBe(donorEmail)
+    expect(rows.some(r => r.notification_type === 'recurring_gift_paused'),
+      'the parish was told on the first failure').toBe(false)
+  })
+
+  it('a SUCCESS clears the count, so unrelated failures never accumulate', async () => {
+    await runCharger({ fail: false })
+    const g = await gift()
+    expect(g.failure_count, 'a recovered gift still carries its old failure').toBe(0)
+    expect(g.last_error).toBeNull()
+    expect(g.status).toBe('active')
+  })
+
+  it('THREE FAILURES PAUSE IT AND TELL THE PARISH', async () => {
+    let body
+    for (let i = 0; i < 3; i++) body = await runCharger({ fail: true })
+    const g = await gift()
+    expect(g.status).toBe('paused')
+    expect(g.failure_count).toBe(3)
+    expect(body.paused).toBeGreaterThanOrEqual(1)
+
+    const { rows } = await pool.query(
+      `SELECT notification_type FROM ochr_notification_log
+        WHERE organization_id = $1 AND notification_type = 'recurring_gift_paused'`, [orgId])
+    expect(rows.length, 'the parish was never told the gift stopped').toBeGreaterThanOrEqual(1)
+  })
+
+  it('a paused gift is NOT retried again', async () => {
+    const before = await gift()
+    const body = await runCharger({ fail: true })
+    const after = await gift()
+    expect(after.failure_count, 'a paused gift was charged again').toBe(before.failure_count)
+    expect(body.processed, 'a paused gift was still in the due set').toBe(0)
+  })
+
+  it('paused is not cancelled — the office sees it, separately from what is coming in', async () => {
+    const res = await request(server).get('/api/donations/recurring')
+      .set('Authorization', `Bearer ${tok}`)
+    expect(res.status).toBe(200)
+    expect(res.body.needs_attention.length).toBe(1)
+    expect(res.body.needs_attention[0].donor_name).toContain('Marta Ochoa')
+    expect(res.body.needs_attention[0].last_error).toBeTruthy()
+    // …and it is not mixed into the active list.
+    expect(res.body.recurring.some(r => r.id === res.body.needs_attention[0].id)).toBe(false)
+  })
+
+  it('the office can clear it, which is a cancellation and says so', async () => {
+    const res = await request(server).post(`/api/donations/recurring/${giftId}/cancel`)
+      .set('Authorization', `Bearer ${tok}`)
+    expect(res.status).toBe(200)
+    expect(res.body.status).toBe('cancelled')
+    const after = await request(server).get('/api/donations/recurring')
+      .set('Authorization', `Bearer ${tok}`)
+    expect(after.body.needs_attention).toEqual([])
+  })
+})
+
+// A self-review of the day's changes on 24 Aug found defects in the fixes
+// themselves. These are the guards for them. Two of them are the SAME class
+// as the bugs they were fixing, in the fix — which is the whole argument for
+// reviewing your own work adversarially rather than trusting that a green
+// suite means finished.
+describe('the recurring charger, reviewed (GIV.9)', () => {
+  let tok, orgId, giftId, slug
+  const donorEmail = `giv9_${RUN_ID}@example.com`
+  const CRON = 'giv9-cron-secret'
+  const prevSecret = process.env.CRON_SECRET
+
+  beforeAll(async () => {
+    process.env.PAYMENTS_PROVIDER = 'stub'
+    process.env.CRON_SECRET = CRON
+    const r = await createOrg(server, { organizationName: `Anchor Parish ${RUN_ID}`, name: 'Ada Admin',
+              email: `anchor_admin_${RUN_ID}@example.com`, password: 'anchor-pw-1' }, '10.76.1.1')
+    expect(r.status).toBe(201)
+    tok = r.body.token
+    orgId = r.body.user.organization.id
+    slug = r.body.user.organization.slug
+
+    const f = await request(server).post('/api/funds').set('Authorization', `Bearer ${tok}`)
+      .send({ name: `Roof ${RUN_ID}` })
+    const give = await request(server).post(`/api/public/${slug}/give`)
+      .set('X-Forwarded-For', '10.76.1.2')
+      .send({ fund_id: f.body.id, amount: 40, donor_name: `Marta ${RUN_ID}`,
+              donor_email: donorEmail, frequency: 'monthly' })
+    expect(give.status).toBe(201)
+    const { rows } = await pool.query(
+      'SELECT id FROM ochr_recurring_gifts WHERE organization_id = $1', [orgId])
+    giftId = rows[0].id
+  })
+
+  afterAll(() => {
+    delete process.env.PAYMENTS_PROVIDER
+    if (prevSecret === undefined) delete process.env.CRON_SECRET
+    else process.env.CRON_SECRET = prevSecret
+  })
+
+  const gift = async () => (await pool.query(
+    `SELECT status, failure_count, next_charge_date::text AS anniversary,
+            retry_after::text AS retry, first_failed_at
+       FROM ochr_recurring_gifts WHERE id = $1`, [giftId])).rows[0]
+
+  const runCharger = async ({ fail, due = true }) => {
+    if (due) await pool.query(
+      `UPDATE ochr_recurring_gifts SET next_charge_date = CURRENT_DATE, retry_after = NULL
+        WHERE id = $1`, [giftId])
+    const { _setChargeFailureForTests } = await import('../src/payments/index.js')
+    if (fail) _setChargeFailureForTests('Your card was declined.')
+    try {
+      const res = await request(server).post('/api/cron/charge-recurring')
+        .set('Authorization', `Bearer ${CRON}`)
+      expect(res.status).toBe(200)
+      return res.body
+    } finally {
+      _setChargeFailureForTests(null)
+      process.env.PAYMENTS_PROVIDER = 'stub'
+    }
+  }
+
+  it('A FAILURE DOES NOT MOVE THE ANNIVERSARY', async () => {
+    // The backoff used to rewrite next_charge_date, so a gift set up for the
+    // 1st that failed once and recovered was moved to the 4th — and then the
+    // 4th of every month after, permanently, by one card hiccup.
+    // Baseline read AFTER the fixture sets next_charge_date, or this compares
+    // the anniversary against the value the fixture itself just overwrote.
+    await pool.query(
+      `UPDATE ochr_recurring_gifts
+          SET next_charge_date = CURRENT_DATE, retry_after = NULL WHERE id = $1`, [giftId])
+    const before = await gift()
+    await runCharger({ fail: true, due: false })
+    const after = await gift()
+    expect(after.anniversary, 'a failure moved the billing anniversary')
+      .toBe(before.anniversary)
+    expect(after.retry, 'a failure set no retry date').toBeTruthy()
+    expect(after.retry).not.toBe(after.anniversary)
+    expect(after.first_failed_at).toBeTruthy()
+  })
+
+  it('THE RETRY CHARGES UNDER THE ORIGINAL PERIOD KEY, not the retry date', async () => {
+    // The idempotency contract is "one gift + one billing period = one key,
+    // forever" — so a live adapter that charges and then times out is retried
+    // safely. Deriving the key from a rewritten date broke exactly that: the
+    // retry got a new key, the payment_ref dedup missed, and the donor would
+    // be charged twice for one month.
+    const g = await gift()
+    await pool.query(`UPDATE ochr_recurring_gifts SET retry_after = CURRENT_DATE WHERE id = $1`, [giftId])
+    await runCharger({ fail: false, due: false })
+    const { rows } = await pool.query(
+      `SELECT payment_ref FROM ochr_donations
+        WHERE organization_id = $1 AND source = 'recurring' ORDER BY id DESC LIMIT 1`, [orgId])
+    expect(rows[0].payment_ref, 'the key names the attempt, not the billing period')
+      .toBe(`stub_rg${giftId}-${g.anniversary}`)
+  })
+
+  it('a success clears the retry and the first-failure stamp', async () => {
+    const g = await gift()
+    expect(g.retry).toBeNull()
+    expect(g.failure_count).toBe(0)
+    expect(g.first_failed_at).toBeNull()
+  })
+
+  it('THE CHARGER REFUSES WHEN NO PROVIDER IS CONFIGURED', async () => {
+    // The same refusal the public giving route makes. It was added there and
+    // not here — and this path runs unattended on a daily cron, so it would
+    // have gone on minting free "succeeded" donation rows into the ledger,
+    // the tax statements and the diocesan assessable base with nobody
+    // visiting a page to notice.
+    const before = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM ochr_donations WHERE organization_id = $1`, [orgId])
+    await pool.query(`UPDATE ochr_recurring_gifts SET next_charge_date = CURRENT_DATE, retry_after = NULL WHERE id = $1`, [giftId])
+
+    const saved = process.env.PAYMENTS_PROVIDER
+    delete process.env.PAYMENTS_PROVIDER
+    try {
+      const res = await request(server).post('/api/cron/charge-recurring')
+        .set('Authorization', `Bearer ${CRON}`)
+      expect(res.status).toBe(200)
+      expect(res.body.skipped, 'the run must say why it did nothing').toBeTruthy()
+      expect(res.body.charged).toBe(0)
+    } finally { process.env.PAYMENTS_PROVIDER = saved }
+
+    const after = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM ochr_donations WHERE organization_id = $1`, [orgId])
+    expect(after.rows[0].n, 'the cron wrote a donation with no provider configured')
+      .toBe(before.rows[0].n)
+  })
+
+  describe('when it finally gives up', () => {
+    beforeAll(async () => {
+      await pool.query(
+        `UPDATE ochr_recurring_gifts SET failure_count = 0, status = 'active',
+                first_failed_at = NULL, retry_after = NULL WHERE id = $1`, [giftId])
+      for (let i = 0; i < 3; i++) {
+        await pool.query(`UPDATE ochr_recurring_gifts SET retry_after = CURRENT_DATE WHERE id = $1`, [giftId])
+        await runCharger({ fail: true, due: false })
+      }
+    })
+
+    it('the gift is paused', async () => {
+      const g = await gift()
+      expect(g.status).toBe('paused')
+      expect(g.failure_count).toBe(3)
+    })
+
+    it('THE OFFICE NOTICE ACTUALLY HAS A RECIPIENT', async () => {
+      // It had none, so it fell to the console stub and would have reached
+      // nobody even with a live mail provider — the final step of the whole
+      // escalation delivered to /dev/null. The test that "passed" only
+      // asserted a log row existed, and the row existed BECAUSE the recipient
+      // was null.
+      const { rows } = await pool.query(
+        `SELECT recipient_email, user_id FROM ochr_notification_log
+          WHERE organization_id = $1 AND notification_type = 'recurring_gift_paused'`, [orgId])
+      expect(rows.length).toBeGreaterThanOrEqual(1)
+      expect(rows[0].recipient_email, 'the parish notice had no recipient').toBeTruthy()
+      expect(rows[0].recipient_email).toContain('@')
+    })
+
+    it('and the DONOR is told it stopped, not just that an attempt failed', async () => {
+      const { rows } = await pool.query(
+        `SELECT recipient_email FROM ochr_notification_log
+          WHERE organization_id = $1 AND notification_type = 'recurring_gift_stopped'`, [orgId])
+      expect(rows.length, 'the donor was never told the gift stopped').toBeGreaterThanOrEqual(1)
+      expect(rows[0].recipient_email).toBe(donorEmail)
+    })
+
+    it('the donor emails name the parish', async () => {
+      // Missing church_name rendered "Your recurring gift to " with a
+      // trailing space, and a sign-off of a bare em dash.
+      const { rows } = await pool.query(
+        `SELECT subject, body FROM ochr_notification_log
+          WHERE organization_id = $1
+            AND notification_type IN ('recurring_gift_needs_attention','recurring_gift_stopped')
+          ORDER BY id DESC`, [orgId])
+      expect(rows.length).toBeGreaterThanOrEqual(1)
+      for (const r of rows) {
+        expect(r.subject, `blank parish name in: ${r.subject}`).toContain('Anchor Parish')
+        expect(r.body).toContain('Anchor Parish')
+        expect(r.body).not.toContain('— \n')
+      }
+    })
+  })
+})
+
+describe('giving and billing are separate decisions (PAY.SEP)', () => {
+  // These shared BILLING_PROVIDER_SECRET. That variable is the SaaS
+  // subscription concern — what a parish pays us — and setting it silently
+  // flipped parishioner GIVING to live Stripe, where saved-card charging has
+  // never been implemented. The next daily cron would then have failed every
+  // recurring gift in every organisation: three attempts each, all paused,
+  // every donor emailed to say their gift could not be taken. Nobody would
+  // have touched giving.
+  const saved = {}
+  beforeAll(() => {
+    for (const k of ['PAYMENTS_PROVIDER', 'PAYMENTS_PROVIDER_SECRET', 'BILLING_PROVIDER_SECRET']) {
+      saved[k] = process.env[k]
+      delete process.env[k]
+    }
+  })
+  afterAll(() => {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v
+    }
+  })
+
+  it('CONFIGURING BILLING DOES NOT TOUCH GIVING', async () => {
+    const { paymentsConfigured, paymentsProvider } = await import('../src/payments/index.js')
+    expect(paymentsConfigured()).toBe(false)
+
+    process.env.BILLING_PROVIDER_SECRET = 'sk_test_billing_only'
+    try {
+      expect(paymentsConfigured(), 'the billing secret configured giving').toBe(false)
+      expect(paymentsProvider(), 'the billing secret flipped giving to stripe').toBe('stub')
+    } finally { delete process.env.BILLING_PROVIDER_SECRET }
+  })
+
+  it('the giving secret configures giving, and only giving', async () => {
+    const { paymentsConfigured, paymentsProvider } = await import('../src/payments/index.js')
+    process.env.PAYMENTS_PROVIDER_SECRET = 'sk_test_giving'
+    try {
+      expect(paymentsConfigured()).toBe(true)
+      expect(paymentsProvider()).toBe('stripe')
+    } finally { delete process.env.PAYMENTS_PROVIDER_SECRET }
+  })
+
+  it('A PROVIDER THAT CANNOT CHARGE SAVED CARDS DECLINES THE WHOLE RUN', async () => {
+    // Not "fails every gift". Nothing charged, nothing paused, nobody
+    // emailed — and the run says why. A capability the provider does not have
+    // is not the same fact as a card being declined, and only one of them
+    // should reach a donor.
+    const { canChargeSavedCards } = await import('../src/payments/index.js')
+    const { chargeDueRecurringGifts } = await import('../src/services/recurringGifts.js')
+
+    process.env.PAYMENTS_PROVIDER = 'stripe'
+    try {
+      expect(canChargeSavedCards()).toBe(false)
+      const before = await pool.query(
+        `SELECT COUNT(*)::int AS n FROM ochr_recurring_gifts WHERE status = 'paused'`)
+      const notes = await pool.query(
+        `SELECT COUNT(*)::int AS n FROM ochr_notification_log
+          WHERE notification_type IN ('recurring_gift_needs_attention','recurring_gift_stopped')`)
+
+      const res = await chargeDueRecurringGifts()
+      expect(res.skipped, 'the run must say why it declined').toMatch(/cannot charge saved cards/)
+      expect(res.charged).toBe(0)
+      expect(res.failed, 'a missing capability was reported as failed charges').toBe(0)
+      expect(res.paused, 'gifts were paused by a configuration change').toBe(0)
+
+      const after = await pool.query(
+        `SELECT COUNT(*)::int AS n FROM ochr_recurring_gifts WHERE status = 'paused'`)
+      expect(after.rows[0].n).toBe(before.rows[0].n)
+      const notesAfter = await pool.query(
+        `SELECT COUNT(*)::int AS n FROM ochr_notification_log
+          WHERE notification_type IN ('recurring_gift_needs_attention','recurring_gift_stopped')`)
+      expect(notesAfter.rows[0].n, 'donors were emailed about a config change')
+        .toBe(notes.rows[0].n)
+    } finally { delete process.env.PAYMENTS_PROVIDER }
+  })
+
+  it('and the stub, which can, still runs', async () => {
+    const { canChargeSavedCards } = await import('../src/payments/index.js')
+    process.env.PAYMENTS_PROVIDER = 'stub'
+    try { expect(canChargeSavedCards()).toBe(true) }
+    finally { delete process.env.PAYMENTS_PROVIDER }
+  })
+})
+
+describe('a Spanish speaker gets a Spanish sentence, not a half-translated one (BIL.3)', () => {
+  it('THE FREQUENCY WORD IS TRANSLATED BY THE CODE THAT SENDS IT', async () => {
+    // {{frequency}} is a database enum. Interpolated raw it produced
+    // "su ofrenda monthly de $50.00" — an English word in a Spanish sentence,
+    // for precisely the donor the bilingual work exists for.
+    //
+    // Driven end to end through the CHARGER, not by calling render() with a
+    // Spanish word already in hand. The first version of this test did that,
+    // and it proved only that the template can render what it is given —
+    // reverting the service's translation left it green.
+    process.env.PAYMENTS_PROVIDER = 'stub'
+    const CRON = `bil3-cron-${RUN_ID}`
+    const prev = process.env.CRON_SECRET
+    process.env.CRON_SECRET = CRON
+    try {
+      const r = await createOrg(server, { organizationName: `Parroquia ${RUN_ID}`, name: 'Bea Admin',
+                email: `bil3_admin_${RUN_ID}@example.com`, password: 'bil3-pw-1' }, '10.77.1.1')
+      expect(r.status).toBe(201)
+      const tok = r.body.token
+      const orgId = r.body.user.organization.id
+      const slug = r.body.user.organization.slug
+      const email = `consuelo_${RUN_ID}@example.com`
+
+      // A member who prefers Spanish, and a monthly gift from that address.
+      const m = await request(server).post('/api/clients').set('Authorization', `Bearer ${tok}`)
+        .send({ name: `Consuelo Ibáñez ${RUN_ID}`, email, status: 'active' })
+      await pool.query(`UPDATE ochr_clients SET preferred_language = 'es' WHERE id = $1`, [m.body.id])
+      const f = await request(server).post('/api/funds').set('Authorization', `Bearer ${tok}`)
+        .send({ name: `Techo ${RUN_ID}` })
+      const give = await request(server).post(`/api/public/${slug}/give`)
+        .set('X-Forwarded-For', '10.77.1.2')
+        .send({ fund_id: f.body.id, amount: 50, donor_name: 'Consuelo',
+                donor_email: email, frequency: 'monthly' })
+      expect(give.status).toBe(201)
+
+      // Make the next charge fail so the donor notice actually goes out.
+      const { rows: g } = await pool.query(
+        `SELECT id FROM ochr_recurring_gifts WHERE organization_id = $1`, [orgId])
+      await pool.query(
+        `UPDATE ochr_recurring_gifts SET next_charge_date = CURRENT_DATE, retry_after = NULL
+          WHERE id = $1`, [g[0].id])
+      const { _setChargeFailureForTests } = await import('../src/payments/index.js')
+      _setChargeFailureForTests('Your card was declined.')
+      await request(server).post('/api/cron/charge-recurring').set('Authorization', `Bearer ${CRON}`)
+      _setChargeFailureForTests(null)
+
+      const { rows } = await pool.query(
+        `SELECT subject, body FROM ochr_notification_log
+          WHERE organization_id = $1 AND notification_type = 'recurring_gift_needs_attention'
+          ORDER BY id DESC LIMIT 1`, [orgId])
+      expect(rows.length, 'the Spanish-preference donor was never written to').toBe(1)
+      expect(rows[0].body).toContain('No pudimos cobrar')          // it is in Spanish
+      expect(rows[0].body).toContain('mensual')                    // …including the frequency
+      expect(rows[0].body, 'an English enum leaked into a Spanish sentence')
+        .not.toMatch(/\b(monthly|weekly)\b/)
+      expect(rows[0].subject).toContain(`Parroquia ${RUN_ID}`)
+    } finally {
+      delete process.env.PAYMENTS_PROVIDER
+      if (prev === undefined) delete process.env.CRON_SECRET
+      else process.env.CRON_SECRET = prev
+    }
+  })
+})
+
+describe('a swap link is not a copy of the directory (SWEEP2)', () => {
+  // One member's swap link returned every active member — id, name and role —
+  // with no LIMIT and no rate limit. Swap links are made to be texted and
+  // forwarded; that is their purpose. So a single shared link handed over the
+  // parish roster, repeatedly, until somebody thought to rotate that one
+  // member's token. Verified 23 Aug: 40 rapid requests, 40 complete copies.
+  let tok, orgId, swapToken, memberIds = []
+
+  beforeAll(async () => {
+    const r = await createOrg(server, { organizationName: `Swap Guard Parish ${RUN_ID}`, name: 'Sam Admin',
+              email: `sw_admin_${RUN_ID}@example.com`, password: 'swap-guard-pw-1' }, '10.73.1.1')
+    expect(r.status).toBe(201)
+    tok = r.body.token
+    orgId = r.body.user.organization.id
+
+    for (const n of ['Ana Ruiz', 'Bernardo Cruz', 'Carmen Diaz', 'Diego Flores']) {
+      const m = await request(server).post('/api/clients').set('Authorization', `Bearer ${tok}`)
+        .send({ name: `${n} ${RUN_ID}`, status: 'active' })
+      expect(m.status).toBe(201)
+      memberIds.push(m.body.id)
+    }
+    const rot = await request(server).post(`/api/swap-admin/clients/${memberIds[0]}/rotate-token`)
+      .set('Authorization', `Bearer ${tok}`).send({})
+    expect(rot.status).toBe(200)
+    swapToken = rot.body.swap_token
+    expect(swapToken).toBeTruthy()
+  })
+
+  it('THE LINK NO LONGER RETURNS THE ROSTER', async () => {
+    const res = await request(server).get(`/api/swap/by-token/${swapToken}`)
+    expect(res.status).toBe(200)
+    // The member still gets their own page.
+    expect(res.body.me.name).toContain('Ana Ruiz')
+    expect(Array.isArray(res.body.upcoming_assignments)).toBe(true)
+    // But not the parish.
+    expect(res.body.roster, 'the swap link still carries a roster').toEqual([])
+    const blob = JSON.stringify(res.body)
+    for (const other of ['Bernardo Cruz', 'Carmen Diaz', 'Diego Flores']) {
+      expect(blob, `${other} leaked through the swap link`).not.toContain(other)
+    }
+  })
+
+  it('a member can still find the person they want to swap with', async () => {
+    const res = await request(server)
+      .get(`/api/swap/by-token/${swapToken}/members?q=Bern`)
+      .set('X-Forwarded-For', '10.73.1.2')
+    expect(res.status).toBe(200)
+    expect(res.body.members.length).toBe(1)
+    expect(res.body.members[0].name).toContain('Bernardo Cruz')
+    // Name and id only — no role, no email.
+    expect(Object.keys(res.body.members[0]).sort()).toEqual(['id', 'name'])
+  })
+
+  it('one letter is not a search, so the typeahead cannot page the directory', async () => {
+    for (const q of ['', 'a', ' ']) {
+      const res = await request(server)
+        .get(`/api/swap/by-token/${swapToken}/members?q=${encodeURIComponent(q)}`)
+        .set('X-Forwarded-For', '10.73.1.3')
+      expect(res.status).toBe(200)
+      expect(res.body.members).toEqual([])
+    }
+  })
+
+  it('a wildcard cannot be smuggled in to match everyone', async () => {
+    const res = await request(server)
+      .get(`/api/swap/by-token/${swapToken}/members?q=${encodeURIComponent('%%')}`)
+      .set('X-Forwarded-For', '10.73.1.4')
+    expect(res.status).toBe(200)
+    expect(res.body.members, 'LIKE metacharacters were not escaped').toEqual([])
+  })
+
+  it('results are capped, so a common substring is not a directory dump', async () => {
+    for (let i = 0; i < 14; i++) {
+      await request(server).post('/api/clients').set('Authorization', `Bearer ${tok}`)
+        .send({ name: `Zulema Test${i} ${RUN_ID}`, status: 'active' })
+    }
+    const res = await request(server)
+      .get(`/api/swap/by-token/${swapToken}/members?q=Zulema`)
+      .set('X-Forwarded-For', '10.73.1.5')
+    expect(res.status).toBe(200)
+    expect(res.body.members.length).toBeLessThanOrEqual(10)
+  })
+
+  it('an unknown token gets the same 404 from both routes', async () => {
+    expect((await request(server).get('/api/swap/by-token/nope-nope-nope-nope-nope')).status).toBe(404)
+    expect((await request(server)
+      .get('/api/swap/by-token/nope-nope-nope-nope-nope/members?q=ab')
+      .set('X-Forwarded-For', '10.73.1.6')).status).toBe(404)
+  })
+})
+
+describe('CLASS: every notification reads in both languages (INVARIANT)', () => {
+  // ochr_clients.preferred_language has existed since migration 001 —
+  // "bilingual-first-class" — is exposed on the roster, and until 24 Aug was
+  // read by nothing. Every notification in the product went out in English,
+  // including to the members a parish had explicitly recorded as preferring
+  // Spanish. For a product whose first migration is about bilingualism, that
+  // is not a gap in a feature; it is the feature not being wired up.
+  //
+  // The same shape as the message-catalogue test that already guards
+  // i18n/messages.js, applied to the surface nobody had checked.
+  let TEMPLATES
+
+  beforeAll(async () => {
+    const mod = await import('../src/notifications/templates.js')
+    TEMPLATES = mod.TEMPLATES ?? mod.default
+  })
+
+  const placeholders = str =>
+    [...String(str ?? '').matchAll(/{{\s*([\w.]+)\s*}}/g)].map(m => m[1]).sort()
+
+  it('finds the templates, so this cannot pass on an empty set', () => {
+    expect(Object.keys(TEMPLATES).length).toBeGreaterThanOrEqual(16)
+  })
+
+  it('EVERY TEMPLATE HAS SPANISH, AND IT IS NOT THE ENGLISH', () => {
+    const missing = [], copied = []
+    for (const [key, t] of Object.entries(TEMPLATES)) {
+      if (!t.subject_es || !t.body_text_es) { missing.push(key); continue }
+      // "Has Spanish" by pasting the English is the same failure in a costume.
+      if (t.subject_es === t.subject || t.body_text_es === t.body_text) copied.push(key)
+    }
+    expect(missing, `templates with no Spanish: ${missing.join(', ')}`).toEqual([])
+    expect(copied, `templates whose Spanish is the English: ${copied.join(', ')}`).toEqual([])
+  })
+
+  it('THE PLACEHOLDERS MATCH, so no message renders a literal {{token}}', () => {
+    // A translator who writes {{cantidad}} where the code passes {{amount}}
+    // produces a message that reads correctly in review and renders the raw
+    // token to a parishioner. Nothing else in the pipeline would catch it.
+    const bad = []
+    for (const [key, t] of Object.entries(TEMPLATES)) {
+      const en = [...placeholders(t.subject), ...placeholders(t.body_text)].sort()
+      const es = [...placeholders(t.subject_es), ...placeholders(t.body_text_es)].sort()
+      if (JSON.stringify(en) !== JSON.stringify(es)) {
+        bad.push(`${key} (en: ${en.join(',') || 'none'} | es: ${es.join(',') || 'none'})`)
+      }
+    }
+    expect(bad, `placeholder mismatch:\n  ${bad.join('\n  ')}`).toEqual([])
+  })
+
+  it('renders Spanish when asked and English when not', async () => {
+    const { render } = await import('../src/notifications/templates.js')
+    const t = TEMPLATES.donation_receipt
+    const en = render(t, { donor_name: 'Ana', amount: '$40.00' }, 'en')
+    const es = render(t, { donor_name: 'Ana', amount: '$40.00' }, 'es')
+    expect(en.language).toBe('en')
+    expect(es.language).toBe('es')
+    expect(es.body_text).toContain('Gracias')
+    expect(es.body_text).toContain('$40.00')      // vars still interpolate
+    expect(es.body_text).not.toContain('{{')      // nothing left unrendered
+    expect(en.body_text).toContain('Thank you')
+  })
+
+  it("falls back to English rather than sending nothing", async () => {
+    const { render } = await import('../src/notifications/templates.js')
+    // A template that has not been translated yet must still send.
+    const partial = { subject: 'Hello {{name}}', body_text: 'Hi {{name}}' }
+    const out = render(partial, { name: 'Ana' }, 'es')
+    expect(out.subject).toBe('Hello Ana')
+    expect(out.language).toBe('en')
+  })
+})
+
+describe("a member's language preference decides what they receive (BIL.2)", () => {
+  let tok, orgId, slug
+  const esEmail = `bil_es_${RUN_ID}@example.com`
+  const enEmail = `bil_en_${RUN_ID}@example.com`
+
+  beforeAll(async () => {
+    process.env.PAYMENTS_PROVIDER = 'stub'
+    const r = await createOrg(server, { organizationName: `Bilingual Parish ${RUN_ID}`, name: 'Bea Admin',
+              email: `bil_admin_${RUN_ID}@example.com`, password: 'bilingual-pw-1' }, '10.75.1.1')
+    expect(r.status).toBe(201)
+    tok = r.body.token
+    orgId = r.body.user.organization.id
+    slug = r.body.user.organization.slug
+
+    for (const [name, email, lang] of [
+      [`Consuelo Ibáñez ${RUN_ID}`, esEmail, 'es'],
+      [`Mary Fields ${RUN_ID}`,     enEmail, 'en'],
+    ]) {
+      const m = await request(server).post('/api/clients').set('Authorization', `Bearer ${tok}`)
+        .send({ name, email, status: 'active' })
+      expect(m.status).toBe(201)
+      await pool.query(
+        `UPDATE ochr_clients SET preferred_language = $1 WHERE id = $2`, [lang, m.body.id])
+    }
+    await request(server).post('/api/funds').set('Authorization', `Bearer ${tok}`)
+      .send({ name: `Techo ${RUN_ID}` })
+  })
+
+  afterAll(() => { delete process.env.PAYMENTS_PROVIDER })
+
+  const receiptFor = async email => {
+    const funds = await request(server).get(`/api/public/${slug}/funds`)
+    const give = await request(server).post(`/api/public/${slug}/give`)
+      .set('X-Forwarded-For', '10.75.1.2')
+      .send({ fund_id: funds.body.funds[0].id, amount: 40,
+              donor_name: 'Giver', donor_email: email })
+    expect(give.status).toBe(201)
+    const { rows } = await pool.query(
+      `SELECT subject, body FROM ochr_notification_log
+        WHERE organization_id = $1 AND recipient_email = $2
+          AND notification_type = 'donation_receipt'
+        ORDER BY id DESC LIMIT 1`, [orgId, email])
+    expect(rows.length, `no receipt logged for ${email}`).toBe(1)
+    return rows[0]
+  }
+
+  it('A MEMBER WHO PREFERS SPANISH GETS SPANISH', async () => {
+    const r = await receiptFor(esEmail)
+    expect(r.subject).toContain('recibo')
+    expect(r.body).toContain('Gracias por su ofrenda')
+    expect(r.body).not.toContain('Thank you')
+  })
+
+  it('and a member who prefers English still gets English', async () => {
+    const r = await receiptFor(enEmail)
+    expect(r.subject).toContain('receipt')
+    expect(r.body).toContain('Thank you for your gift')
+  })
+
+  it('somebody with no member record gets English rather than an error', async () => {
+    const r = await receiptFor(`stranger_${RUN_ID}@example.com`)
+    expect(r.body).toContain('Thank you for your gift')
+  })
+})
+
+describe('CLASS: every admin surface refuses a stale role (INVARIANT)', () => {
+  // The first version of this test enumerated mounts by looking for
+  // requireRole('admin') in app.js — that is, it found the CORRECTLY gated
+  // routes and then checked they were correctly gated. A new admin router
+  // gated on req.user.role with an inline arrow was invisible to it and the
+  // suite stayed green. That is precisely the bug this is supposed to catch,
+  // so the enumeration had to stop being syntactic.
+  //
+  // Admin-ness is now discovered BEHAVIOURALLY: mount every /api path from
+  // app.js, ask as an admin and as a viewer, and treat "admin 200 / viewer
+  // 403" as the definition. That catches an admin gate however it is spelled
+  // — requireRole, an inline arrow, a check inside the router — because it
+  // never reads the guard at all, only what the guard does.
+  let adminTok, viewerTok, victimId, victimTok
+  let candidates = [], adminSurfaces = []
+
+  beforeAll(async () => {
+    const appSrc = await readFile(new URL('../src/app.js', import.meta.url), 'utf8')
+    candidates = [...new Set(
+      [...appSrc.matchAll(/app\.use\(\s*'(\/api\/[a-z0-9/-]+)'/gi)].map(m => m[1])
+    )].filter(p => !p.startsWith('/api/cron') && !p.startsWith('/api/public')
+                && !p.startsWith('/api/admin/') && p !== '/api/auth')
+
+    const r = await createOrg(server, { organizationName: `Invariant Parish ${RUN_ID}`, name: 'Ivy Admin',
+              email: `inv_admin_${RUN_ID}@example.com`, password: 'invariant-pw-1' }, '10.72.1.1')
+    expect(r.status).toBe(201)
+    adminTok = r.body.token
+
+    // A real viewer, to learn which surfaces are admin-only.
+    await request(server).post('/api/users').set('Authorization', `Bearer ${adminTok}`)
+      .send({ name: 'Vera Viewer', email: `invv_${RUN_ID}@example.com`,
+              password: 'inv-viewer-pw-1', role: 'viewer' })
+    viewerTok = (await request(server).post('/api/auth/login').set('X-Forwarded-For', '10.72.1.3')
+      .send({ email: `invv_${RUN_ID}@example.com`, password: 'inv-viewer-pw-1' })).body.token
+
+    // The user whose role will be changed underneath a valid token.
+    const made = await request(server).post('/api/users').set('Authorization', `Bearer ${adminTok}`)
+      .send({ name: 'Stale Role', email: `stale_${RUN_ID}@example.com`,
+              password: 'stale-pw-123456', role: 'admin' })
+    expect(made.status).toBe(201)
+    victimId = made.body.id
+    victimTok = (await request(server).post('/api/auth/login').set('X-Forwarded-For', '10.72.1.2')
+      .send({ email: `stale_${RUN_ID}@example.com`, password: 'stale-pw-123456' })).body.token
+    expect(victimTok).toBeTruthy()
+
+    for (const path of candidates) {
+      const asAdmin  = await request(server).get(path).set('Authorization', `Bearer ${adminTok}`)
+      if (asAdmin.status !== 200) continue
+      const asViewer = await request(server).get(path).set('Authorization', `Bearer ${viewerTok}`)
+      if (asViewer.status === 403) adminSurfaces.push(path)
+    }
+  })
+
+  it('discovers the admin surfaces, so this cannot pass on an empty set', () => {
+    expect(candidates.length, 'no /api mounts matched — the matcher is broken').toBeGreaterThan(20)
+    expect(adminSurfaces.length, 'no admin-only surface discovered').toBeGreaterThanOrEqual(4)
+    // Anchors. If one of these stops being admin-only, that should be a
+    // decision somebody makes on purpose, not a diff nobody noticed.
+    for (const must of ['/api/audit-log', '/api/insights', '/api/pledges']) {
+      expect(adminSurfaces, `${must} is no longer admin-only`).toContain(must)
+    }
+  })
+
+  it('EVERY ONE OF THEM REFUSES A ROLE CHANGED IN THE DATABASE ALONE', async () => {
+    // token_version is deliberately NOT bumped, so the token stays perfectly
+    // valid and the only thing that can refuse is a live read of the role.
+    // That is also the real case PATCH /api/users/:id/role does not cover:
+    // any other path that changes a role without remembering to revoke.
+    const before = await pool.query('SELECT token_version FROM ochr_users WHERE id = $1', [victimId])
+
+    const reachable = []
+    for (const m of adminSurfaces) {
+      const res = await request(server).get(m).set('Authorization', `Bearer ${victimTok}`)
+      if (res.status === 200) reachable.push(m)
+    }
+    expect(reachable.length, 'the admin-era token reached nothing — fixture is wrong')
+      .toBeGreaterThanOrEqual(3)
+
+    await pool.query(`UPDATE ochr_users SET role = 'viewer' WHERE id = $1`, [victimId])
+    const after = await pool.query('SELECT token_version FROM ochr_users WHERE id = $1', [victimId])
+    expect(after.rows[0].token_version,
+      'fixture: token_version must not change, or this proves nothing')
+      .toBe(before.rows[0].token_version)
+
+    const stillOpen = []
+    for (const m of reachable) {
+      const res = await request(server).get(m).set('Authorization', `Bearer ${victimTok}`)
+      if (![401, 403].includes(res.status)) stillOpen.push(`${m} → ${res.status}`)
+    }
+    expect(stillOpen, `admin surfaces still open to a demoted user: ${stillOpen.join(', ')}`)
+      .toEqual([])
+  })
+
+  it('and so does the support console, which self-gates inside the router', async () => {
+    // Discovered by the sweep on 23 Aug and the reason this whole describe
+    // exists. Named explicitly as well as covered by the sweep above.
+    const res = await request(server).get('/api/support-tickets')
+      .set('Authorization', `Bearer ${victimTok}`)
+    expect([401, 403]).toContain(res.status)
+  })
+})
+
+describe('CLASS: no donation aggregate counts refunded gifts (INVARIANT)', () => {
+  it('THE SCANNER PASSES ACROSS THE WHOLE TREE', async () => {
+    // The behavioural tests above prove the statement and the ledger are
+    // right today. This proves the CLASS: every aggregate over ochr_donations
+    // in the whole of server/src either excludes refunds or is listed as a
+    // deliberate exception with a written reason.
+    //
+    // Run as a child process so the test reports the scanner's own output,
+    // which names the file and line — the message somebody needs at 11pm.
+    const { execFile } = await import('node:child_process')
+    const { promisify } = await import('node:util')
+    const run = promisify(execFile)
+    const script = new URL('../../scripts/money-invariants.mjs', import.meta.url).pathname
+
+    let out = ''
+    try {
+      const r = await run(process.execPath, [script, '--list'],
+        { cwd: new URL('../../', import.meta.url).pathname })
+      out = r.stdout
+    } catch (err) {
+      throw new Error(`money-invariants failed:\n${err.stdout || ''}${err.stderr || ''}`)
+    }
+    expect(out).toMatch(/all exclude refunded gifts/)
+    // It must have actually looked at something.
+    const n = Number(out.match(/(\d+) donation aggregates/)?.[1] ?? 0)
+    expect(n, 'the scanner examined nothing').toBeGreaterThanOrEqual(10)
+  })
+})
+
+describe('the public giving surface cannot write for free (SWEEP2)', () => {
+  let slug, fundId, giveOrgToken
+
+  beforeAll(async () => {
+    const r = await createOrg(server, { organizationName: `Give Guard Parish ${RUN_ID}`, name: 'Gina Admin',
+              email: `gg_admin_${RUN_ID}@example.com`, password: 'give-guard-pw-1' }, '10.71.4.1')
+    expect(r.status).toBe(201)
+    giveOrgToken = r.body.token
+    slug = r.body.user.organization.slug
+    expect(slug, 'fixture: the parish needs a public slug').toBeTruthy()
+    const f = await request(server).post('/api/funds')
+      .set('Authorization', `Bearer ${giveOrgToken}`)
+      .send({ name: `Roof ${RUN_ID}` })
+    expect(f.status).toBe(201)
+    fundId = f.body.id
+  })
+
+  const give = body => request(server).post(`/api/public/${slug}/give`)
+    .set('X-Forwarded-For', '10.71.4.2')
+    .send({ fund_id: fundId, amount: 25, donor_name: 'Ana Ruiz', ...body })
+
+  it('REFUSES TO RECORD A GIFT WHEN NO PAYMENT PROVIDER IS CONFIGURED', async () => {
+    // The whole finding in one assertion. With the stub as provider — which
+    // is production's current state — an unauthenticated caller could write a
+    // donation row that reached the dashboard, the assessable base and the
+    // donor's year-end tax statement, having moved no money at all.
+    expect(process.env.PAYMENTS_PROVIDER).toBeUndefined()
+    expect(process.env.BILLING_PROVIDER_SECRET).toBeUndefined()
+
+    const before = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM ochr_donations d
+         JOIN ochr_organizations o ON o.id = d.organization_id WHERE o.slug = $1`, [slug])
+
+    const res = await give({ amount: 9999.99, donor_name: `Totally Not Real ${RUN_ID}` })
+    expect(res.status).toBe(503)
+    expect(res.body.error).toMatch(/not set up/i)
+
+    const after = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM ochr_donations d
+         JOIN ochr_organizations o ON o.id = d.organization_id WHERE o.slug = $1`, [slug])
+    expect(after.rows[0].n, 'no donation row may be written').toBe(before.rows[0].n)
+
+    // …and nothing reached the parish's own numbers.
+    const sum = await request(server).get('/api/donations/summary')
+      .set('Authorization', `Bearer ${giveOrgToken}`)
+    expect(Number(sum.body.largest ?? 0)).toBeLessThan(9999.99)
+  })
+
+  it('the public funds endpoint says giving is off, so the page never shows the form', async () => {
+    const res = await request(server).get(`/api/public/${slug}/funds`)
+    expect(res.status).toBe(200)
+    expect(res.body.giving_enabled).toBe(false)
+  })
+
+  it('bounds the donor name and the note', async () => {
+    expect((await give({ donor_name: 'A'.repeat(200000) })).status).toBe(400)
+    expect((await give({ message:    'M'.repeat(200000) })).status).toBe(400)
+  })
+
+  it('requires the donor email to be an address, not just a short string', async () => {
+    const bad = await give({ donor_email: 'not-an-email-at-all ; DROP' })
+    expect(bad.status).toBe(400)
+    expect(bad.body.error).toMatch(/email/i)
+    // Optional is still optional — a gift with no email is not rejected for
+    // the email's sake. (It is refused for the provider, which is 503.)
+    expect((await give({})).status).toBe(503)
+  })
+})
+
+describe('a refunded gift leaves every total it entered (SWEEP2)', () => {
+  // Nine aggregates excluded refunds and five did not, including both
+  // documents that leave the building: the donor's year-end tax statement and
+  // the diocesan assessable base. A parish was being assessed on money it had
+  // given back, and telling a donor they gave more than they did.
+  let tok, orgId, giftId
+  const donor = `Refund Case ${RUN_ID}`
+  const email = `refund_case_${RUN_ID}@example.com`
+
+  beforeAll(async () => {
+    const r = await createOrg(server, { organizationName: `Refund Parish ${RUN_ID}`, name: 'Rita Admin',
+              email: `rf2_admin_${RUN_ID}@example.com`, password: 'refund-pw-1' }, '10.71.5.1')
+    expect(r.status).toBe(201)
+    tok = r.body.token
+    orgId = r.body.user.organization.id
+
+    // Only online gifts are refundable, so write one the way the webhook
+    // would rather than through the public route (which now refuses).
+    const { rows } = await pool.query(
+      `INSERT INTO ochr_donations
+         (organization_id, donor_name, donor_email, amount, category, method,
+          date, source, payment_ref, payment_status)
+       VALUES ($1,$2,$3,5000,'tithe','online',CURRENT_DATE,'online',$4,'succeeded')
+       RETURNING id`,
+      [orgId, donor, email, `test_${RUN_ID}`])
+    giftId = rows[0].id
+  })
+
+  const statementTotal = async () => {
+    const res = await request(server).get('/api/giving-statements/preview?year=' + new Date().getFullYear())
+      .set('Authorization', `Bearer ${tok}`)
+    expect(res.status).toBe(200)
+    const row = (res.body.donors ?? []).find(d => d.donor_email === email)
+    return row ? Number(row.total) : 0
+  }
+  const assessable = async () => {
+    const y = new Date().getFullYear()
+    const res = await request(server).get(`/api/finance/summary?start=${y}-01-01&end=${y}-12-31`)
+      .set('Authorization', `Bearer ${tok}`)
+    expect(res.status).toBe(200)
+    return Number(res.body.totals?.revenue ?? 0)
+  }
+
+  it('counts before the refund', async () => {
+    expect(await statementTotal()).toBe(5000)
+    expect(await assessable()).toBeGreaterThanOrEqual(5000)
+  })
+
+  it('LEAVES THE YEAR-END TAX STATEMENT once refunded', async () => {
+    const r = await request(server).post(`/api/donations/${giftId}/refund`)
+      .set('Authorization', `Bearer ${tok}`).send({ reason: 'donor asked' })
+    expect(r.status).toBe(200)
+    const { rows } = await pool.query('SELECT payment_status FROM ochr_donations WHERE id = $1', [giftId])
+    expect(rows[0].payment_status).toBe('refunded')
+
+    expect(await statementTotal(), 'the letter a donor files with a tax return').toBe(0)
+  })
+
+  it('LEAVES THE ASSESSABLE BASE the diocese bills on', async () => {
+    const after = await assessable()
+    const { rows } = await pool.query(
+      `SELECT COALESCE(SUM(amount),0)::numeric(12,2) AS n FROM ochr_parish_ledger
+        WHERE organization_id = $1 AND source_type = 'donation' AND amount = 5000`, [orgId])
+    expect(Number(rows[0].n), 'the refunded gift must be gone from the ledger view').toBe(0)
+    expect(after).toBeLessThan(5000)
+  })
+
+  it('leaves the pledge line items and the finance mapping screen', async () => {
+    const fin = await request(server).get('/api/finance/mappings')
+      .set('Authorization', `Bearer ${tok}`)
+    expect(fin.status).toBe(200)
+    for (const f of fin.body.funds ?? []) {
+      expect(Number(f.gift_total), `fund ${f.name} counts a refunded gift`).toBeLessThan(5000)
+    }
+  })
+})
+
+describe('a demoted admin loses access on the next request (SWEEP2)', () => {
+  // Every admin surface re-reads the role from the database through
+  // requireRole. The support console checked the JWT claim instead, and a
+  // role change did not bump token_version — so a demotion was a promise
+  // about next week rather than a decision that took effect.
+  let adminTok, staleTok, victimId, ticketId, orgId
+
+  beforeAll(async () => {
+    const r = await createOrg(server, { organizationName: `Demote Parish ${RUN_ID}`, name: 'Dana Admin',
+              email: `dm_admin_${RUN_ID}@example.com`, password: 'demote-pw-1' }, '10.71.6.1')
+    expect(r.status).toBe(201)
+    adminTok = r.body.token
+    orgId = r.body.user.organization.id
+
+    const made = await request(server).post('/api/users').set('Authorization', `Bearer ${adminTok}`)
+      .send({ name: 'Vic Second', email: `vic_${RUN_ID}@example.com`, password: 'vic-pw-123456', role: 'admin' })
+    expect(made.status).toBe(201)
+    victimId = made.body.id
+
+    staleTok = (await request(server).post('/api/auth/login').set('X-Forwarded-For', '10.71.6.2')
+      .send({ email: `vic_${RUN_ID}@example.com`, password: 'vic-pw-123456' })).body.token
+    expect(staleTok).toBeTruthy()
+
+    const t = await request(server).post('/api/support-tickets').set('Authorization', `Bearer ${adminTok}`)
+      .send({ subject: 'Printer', description: 'The sacristy printer jams before every Sunday Mass.' })
+    expect(t.status).toBe(201)
+    ticketId = t.body.id
+  })
+
+  it('the token works while they are still an admin', async () => {
+    expect((await request(server).get('/api/support-tickets')
+      .set('Authorization', `Bearer ${staleTok}`)).status).toBe(200)
+  })
+
+  it('THE SUPPORT CONSOLE CLOSES TOO, not just the other admin surfaces', async () => {
+    const dem = await request(server).patch(`/api/users/${victimId}/role`)
+      .set('Authorization', `Bearer ${adminTok}`).send({ role: 'viewer' })
+    expect(dem.status).toBe(200)
+
+    // Every one of these must refuse the token minted while they were admin.
+    for (const path of [
+      '/api/support-tickets',
+      `/api/support-tickets/${ticketId}`,
+      '/api/audit-log',
+      '/api/insights',
+      '/api/pledges',
+      '/api/users',
+    ]) {
+      const res = await request(server).get(path).set('Authorization', `Bearer ${staleTok}`)
+      expect([401, 403], `${path} still answered ${res.status}`).toContain(res.status)
+    }
+
+    // And they cannot close somebody else's ticket.
+    const patch = await request(server).patch(`/api/support-tickets/${ticketId}`)
+      .set('Authorization', `Bearer ${staleTok}`)
+      .send({ status: 'closed', resolution_notes: 'closed by a non-admin' })
+    expect([401, 403]).toContain(patch.status)
+    const { rows } = await pool.query('SELECT status FROM ochr_support_tickets WHERE id = $1', [ticketId])
+    expect(rows[0].status).not.toBe('closed')
+  })
+
+  it('the role change bumped token_version, so it took effect immediately', async () => {
+    const { rows } = await pool.query('SELECT token_version FROM ochr_users WHERE id = $1', [victimId])
+    expect(rows[0].token_version).toBeGreaterThan(1)
+  })
+
+  it('THE SUPPORT CONSOLE STILL REFUSES WHEN THE TOKEN WAS NEVER REVOKED', async () => {
+    // Two independent fixes landed together and one hid the other. Bumping
+    // token_version revokes the old token, so the test above goes red whether
+    // or not the support console re-reads the role — and removing the role
+    // refresh left the whole suite green.
+    //
+    // This isolates the refresh: the role is changed in the DATABASE ONLY,
+    // with token_version untouched, so the token stays perfectly valid and the
+    // only thing that can refuse is a live read of the role. That is also the
+    // real-world case the refresh exists for — any path that changes a role
+    // without going through PATCH /api/users/:id/role.
+    const promoted = await request(server).post('/api/users').set('Authorization', `Bearer ${adminTok}`)
+      .send({ name: 'Quiet Demotion', email: `qd_${RUN_ID}@example.com`,
+              password: 'quiet-pw-123456', role: 'admin' })
+    expect(promoted.status).toBe(201)
+    const qTok = (await request(server).post('/api/auth/login').set('X-Forwarded-For', '10.71.6.3')
+      .send({ email: `qd_${RUN_ID}@example.com`, password: 'quiet-pw-123456' })).body.token
+    expect((await request(server).get('/api/support-tickets')
+      .set('Authorization', `Bearer ${qTok}`)).status).toBe(200)
+
+    const before = await pool.query(
+      'SELECT token_version FROM ochr_users WHERE id = $1', [promoted.body.id])
+    await pool.query(
+      `UPDATE ochr_users SET role = 'viewer' WHERE id = $1`, [promoted.body.id])
+    const after = await pool.query(
+      'SELECT token_version FROM ochr_users WHERE id = $1', [promoted.body.id])
+    expect(after.rows[0].token_version,
+      'fixture: token_version must NOT change, or this proves nothing')
+      .toBe(before.rows[0].token_version)
+
+    // The token is still valid. The role is not.
+    const res = await request(server).get('/api/support-tickets')
+      .set('Authorization', `Bearer ${qTok}`)
+    expect(res.status, 'support console trusted the JWT claim').toBe(403)
+
+    const patch = await request(server).patch(`/api/support-tickets/${ticketId}`)
+      .set('Authorization', `Bearer ${qTok}`)
+      .send({ status: 'closed', resolution_notes: 'should not land' })
+    expect(patch.status).toBe(403)
+  })
+})
+
+describe('public form submissions store only declared fields (SWEEP2)', () => {
+  let slug, formSlug, tok
+  beforeAll(async () => {
+    const r = await createOrg(server, { organizationName: `Form Guard Parish ${RUN_ID}`, name: 'Fay Admin',
+              email: `fg_admin_${RUN_ID}@example.com`, password: 'form-guard-pw-1' }, '10.71.7.1')
+    expect(r.status).toBe(201)
+    tok = r.body.token
+    slug = r.body.user.organization.slug
+    const f = await request(server).post('/api/forms').set('Authorization', `Bearer ${tok}`)
+      .send({ title: `Sign Up ${RUN_ID}`, is_public: true, status: 'open',
+              fields: [{ id: 'name', label: 'Name', type: 'short_text', required: true }] })
+    expect(f.status).toBe(201)
+    formSlug = f.body.slug
+  })
+
+  it('DROPS KEYS THE FORM NEVER DECLARED', async () => {
+    const res = await request(server).post(`/api/public/forms/${slug}/${formSlug}/submit`)
+      .set('X-Forwarded-For', '10.71.7.2')
+      .send({ answers: { name: 'Real Person', INJECTED_KEY: 'not in the schema', huge: 'Z'.repeat(50000) } })
+    expect(res.status).toBe(201)
+
+    const { rows } = await pool.query(
+      `SELECT answers FROM ochr_form_responses WHERE id = $1`, [res.body.id])
+    const keys = Object.keys(rows[0].answers)
+    expect(keys).toEqual(['name'])
+    expect(rows[0].answers.name).toBe('Real Person')
+    expect(JSON.stringify(rows[0].answers).length).toBeLessThan(2000)
+  })
+
+  it('bounds a declared field that arrives enormous', async () => {
+    const res = await request(server).post(`/api/public/forms/${slug}/${formSlug}/submit`)
+      .set('X-Forwarded-For', '10.71.7.3')
+      .send({ answers: { name: 'N'.repeat(50000) } })
+    expect(res.status).toBe(201)
+    const { rows } = await pool.query(
+      `SELECT answers FROM ochr_form_responses WHERE id = $1`, [res.body.id])
+    expect(rows[0].answers.name.length).toBeLessThanOrEqual(2000)
+  })
+})
+
+describe('every scheduled job actually has a schedule (SWEEP2)', () => {
+  it('EVERY CRON HANDLER IS REGISTERED IN vercel.json', async () => {
+    // charge-recurring existed, was smoke-tested, and was not scheduled. A
+    // donor set up a monthly gift, was charged once, received a receipt
+    // saying it would repeat, and was never charged again. Nothing surfaced
+    // the gap because the handler passed its own tests.
+    const cronSrc = await readFile(new URL('../src/routes/cron.js', import.meta.url), 'utf8')
+    // Routes are registered through a cronRoute() helper that wires GET and
+    // POST to one handler — NOT through router.get directly. My first version
+    // of this test matched router.get/post, found zero handlers, and passed
+    // with charge-recurring removed from the schedule. A test that can pass
+    // on an empty list is not a test, which is why the count is asserted
+    // before the comparison.
+    const handlers = [...new Set(
+      [...cronSrc.matchAll(/cronRoute\(\s*'\/([a-z-]+)'/g)].map(m => m[1])
+    )]
+    expect(handlers.length, 'found no cron handlers — the matcher is broken').toBeGreaterThanOrEqual(8)
+
+    const vercel = JSON.parse(await readFile(new URL('../../vercel.json', import.meta.url), 'utf8'))
+    const scheduled = new Set((vercel.crons ?? []).map(c => c.path.replace('/api/cron/', '')))
+    expect(scheduled.size, 'vercel.json declares no crons').toBeGreaterThanOrEqual(8)
+
+    const unscheduled = handlers.filter(h => !scheduled.has(h))
+    expect(unscheduled, `cron handlers with no schedule: ${unscheduled.join(', ')}`).toEqual([])
+  })
+})
+
+describe('list endpoints do not leak per-member credentials (LEAK.1)', () => {
+  const SECRET_CLIENT_FIELDS = ['calendar_token', 'swap_token', 'search_vec']
+  let leakViewerToken, memberId
+
+  beforeAll(async () => {
+    const viewer = {
+      name: 'Leak Viewer', email: `test_leak_${RUN_ID}@example.com`,
+      password: 'leak-viewer-pw-1', role: 'viewer',
+    }
+    const create = await request(server).post('/api/users')
+      .set('Authorization', `Bearer ${tokenA}`).send(viewer)
+    expect(create.status).toBe(201)
+    const login = await request(server).post('/api/auth/login')
+      .send({ email: viewer.email, password: viewer.password })
+    leakViewerToken = login.body.token
+    expect(leakViewerToken).toBeTruthy()
+
+    const m = await request(server).post('/api/clients')
+      .set('Authorization', `Bearer ${tokenA}`)
+      .send({ name: `Leak Member ${RUN_ID}`, email: `leak_m_${RUN_ID}@example.com`, status: 'active' })
+    expect(m.status).toBe(201)
+    memberId = m.body.id
+
+    // Give the member BOTH tokens, so a leak has something real to leak.
+    // If the columns were empty the assertions below would pass vacuously.
+    const cal = await request(server).get(`/api/calendar-sync/link/${memberId}`)
+      .set('Authorization', `Bearer ${tokenA}`)
+    expect(cal.status).toBe(200)
+    const swap = await request(server).post(`/api/swap-admin/clients/${memberId}/rotate-token`)
+      .set('Authorization', `Bearer ${tokenA}`).send({})
+    expect(swap.status).toBe(200)
+    const { rows } = await pool.query(
+      'SELECT calendar_token, swap_token FROM ochr_clients WHERE id = $1', [memberId])
+    expect(rows[0].calendar_token, 'fixture: member must actually hold a calendar_token').toBeTruthy()
+    expect(rows[0].swap_token, 'fixture: member must actually hold a swap_token').toBeTruthy()
+  })
+
+  it('GET /api/clients never returns calendar_token, swap_token or search_vec', async () => {
+    for (const [who, token] of [['admin', tokenA], ['viewer', leakViewerToken]]) {
+      const res = await request(server).get('/api/clients')
+        .set('Authorization', `Bearer ${token}`)
+      expect(res.status, who).toBe(200)
+      const rows = Array.isArray(res.body) ? res.body : res.body.clients
+      expect(rows.length).toBeGreaterThan(0)
+      const ours = rows.find(r => r.id === memberId)
+      expect(ours, `${who} should still see the member`).toBeTruthy()
+      for (const row of rows) {
+        for (const f of SECRET_CLIENT_FIELDS) {
+          expect(Object.prototype.hasOwnProperty.call(row, f),
+            `${who}: /api/clients leaked ${f}`).toBe(false)
+        }
+      }
+      // ...while still carrying what the roster screen actually renders.
+      expect(ours.name).toBeTruthy()
+      expect(ours).toHaveProperty('email')
+      expect(ours).toHaveProperty('status')
+    }
+  })
+
+  it('GET /api/clients/:id never returns calendar_token, swap_token or search_vec', async () => {
+    for (const [who, token] of [['admin', tokenA], ['viewer', leakViewerToken]]) {
+      const res = await request(server).get(`/api/clients/${memberId}`)
+        .set('Authorization', `Bearer ${token}`)
+      expect(res.status, who).toBe(200)
+      for (const f of SECRET_CLIENT_FIELDS) {
+        expect(Object.prototype.hasOwnProperty.call(res.body, f),
+          `${who}: /api/clients/:id leaked ${f}`).toBe(false)
+      }
+      expect(res.body.id).toBe(memberId)
+      expect(res.body).toHaveProperty('notes')
+    }
+  })
+
+  it('GET /api/donations does not ship the search tsvector', async () => {
+    const res = await request(server).get('/api/donations')
+      .set('Authorization', `Bearer ${tokenA}`)
+    expect(res.status).toBe(200)
+    const rows = Array.isArray(res.body) ? res.body : res.body.donations
+    expect(rows.length).toBeGreaterThan(0)
+    for (const row of rows) {
+      expect(Object.prototype.hasOwnProperty.call(row, 'search_vec'),
+        '/api/donations leaked search_vec').toBe(false)
+    }
+    // The ledger screen still gets its columns.
+    expect(rows[0]).toHaveProperty('amount')
+    expect(rows[0]).toHaveProperty('date')
+    expect(rows[0]).toHaveProperty('donor_name')
+    expect(rows[0]).toHaveProperty('payment_status')
   })
 })
 
@@ -10441,8 +12212,7 @@ describe('Parish Care (CARE.1) — status without verdicts', () => {
   const cleanupOrgIds = []
 
   beforeAll(async () => {
-    const res = await request(server).post('/api/auth/signup')
-      .set('X-Forwarded-For', '10.99.0.15').send(chancery)
+    const res = await createOrg(server, chancery, '10.99.0.15')
     expect(res.status).toBe(201)
     dio = res.body.token; dioOrg = res.body.user.organization.id
     cleanupOrgIds.push(dioOrg)
@@ -10458,8 +12228,7 @@ describe('Parish Care (CARE.1) — status without verdicts', () => {
       .send({ email: `carestaff_${RUN_ID}@example.com`, password: 'smoke-test-pw-62' })
     staffTok = li.body.token
 
-    const pr = await request(server).post('/api/auth/signup')
-      .set('X-Forwarded-For', '10.99.0.15').send(parish)
+    const pr = await createOrg(server, parish, '10.99.0.15')
     expect(pr.status).toBe(201)
     parishTok = pr.body.token
     parishId = pr.body.user.organization.id
@@ -10519,6 +12288,11 @@ describe('Parish Care (CARE.1) — status without verdicts', () => {
     expect(p.status.because).toMatch(/first conversation|check in/i)
   })
 
+  // RESTORED after 94bd3cb reverted this file's region to an older copy and
+  // took three privacy tests with it, reinstating the /asked for help/
+  // assertion that ed83eea deliberately removed. The production fixes
+  // survived; only their tests were lost, which is the worse half to lose —
+  // the code was right and nothing was left watching it.
   it('an open support request moves the parish to Offer support, without telling the diocese what it said', async () => {
     const secret = `Payroll crashes on Fr X stipend ${RUN_ID}`
     const t = await request(server).post('/api/support-tickets')
@@ -10684,11 +12458,9 @@ describe('Parish Care (CARE.1) — status without verdicts', () => {
   })
 
   it('is scoped to this diocese — another chancery sees nothing of this parish', async () => {
-    const other = await request(server).post('/api/auth/signup')
-      .set('X-Forwarded-For', '10.99.0.15')
-      .send({ organizationName: `Other Chancery ${RUN_ID}`, name: 'Canon',
+    const other = await createOrg(server, { organizationName: `Other Chancery ${RUN_ID}`, name: 'Canon',
               email: `care2_${RUN_ID}@example.com`, password: 'smoke-test-pw-63',
-              organizationType: 'diocese' })
+              organizationType: 'diocese' }, '10.99.0.15')
     cleanupOrgIds.push(other.body.user.organization.id)
     const body = await care(other.body.token)
     expect(body.parishes).toEqual([])
@@ -10705,11 +12477,9 @@ describe('the Parish Care Brief (CARE.2)', () => {
   const cleanupOrgIds = []
 
   beforeAll(async () => {
-    const res = await request(server).post('/api/auth/signup')
-      .set('X-Forwarded-For', '10.99.0.16')
-      .send({ organizationName: `Brief Chancery ${RUN_ID}`, name: 'Bishop',
+    const res = await createOrg(server, { organizationName: `Brief Chancery ${RUN_ID}`, name: 'Bishop',
               email: `brief_${RUN_ID}@example.com`, password: 'smoke-test-pw-64',
-              organizationType: 'diocese' })
+              organizationType: 'diocese' }, '10.99.0.16')
     dio = res.body.token; dioOrg = res.body.user.organization.id
     cleanupOrgIds.push(dioOrg)
 
@@ -10808,6 +12578,266 @@ describe('the Parish Care Brief (CARE.2)', () => {
     expect(detail.body.timeline.some(t => t.kind === 'brief' && /bishop/i.test(t.summary))).toBe(true)
   })
 })
+describe('migration studio (MIG.1)', () => {
+  let orgAId, orgBId, staffToken, viewerToken
+
+  const csvMembers = [
+    'Full Name,E-mail,Cell,Ministries,Envelope #',
+    `Ada Import ${RUN_ID},ada_imp_${RUN_ID}@example.com,555-0100,Choir,101`,
+    `Blaise Import ${RUN_ID},blaise_imp_${RUN_ID}@example.com,555-0101,Lectors,102`,
+    ',missing_name@example.com,555-0102,,103',                        // held: no name
+    `Carla Import ${RUN_ID},ada_imp_${RUN_ID}@example.com,,,104`,     // dup: email seen in file
+    `Duplicate Dora ${RUN_ID},dora_imp_${RUN_ID}@example.com,,,105`,  // dup vs existing (created below)
+  ].join('\n')
+
+  beforeAll(async () => {
+    const { rows } = await pool.query(
+      'SELECT id, name FROM ochr_organizations WHERE name = ANY($1)',
+      [[orgA.organizationName, orgB.organizationName]]
+    )
+    orgAId = rows.find(r => r.name === orgA.organizationName).id
+    orgBId = rows.find(r => r.name === orgB.organizationName).id
+
+    // Staff prepares; viewer must be shut out entirely (writeGate).
+    for (const [who, role] of [['stf', 'staff'], ['vwr', 'viewer']]) {
+      await request(app).post('/api/users')
+        .set('Authorization', `Bearer ${tokenA}`)
+        .send({ name: `Mig ${who}`, email: `mig_${who}_${RUN_ID}@example.com`, password: `mig-${who}-pw`, role })
+    }
+    staffToken = (await request(app).post('/api/auth/login')
+      .send({ email: `mig_stf_${RUN_ID}@example.com`, password: 'mig-stf-pw' })).body.token
+    viewerToken = (await request(app).post('/api/auth/login')
+      .send({ email: `mig_vwr_${RUN_ID}@example.com`, password: 'mig-vwr-pw' })).body.token
+
+    // The existing member Dora, so the name-match duplicate rule fires.
+    await request(app).post('/api/clients')
+      .set('Authorization', `Bearer ${tokenA}`)
+      .send({ name: `Duplicate Dora ${RUN_ID}` })
+  })
+
+  let batchId
+  it('staff stages a members CSV; nothing authoritative is written', async () => {
+    const before = (await pool.query(
+      'SELECT COUNT(*)::int AS n FROM ochr_clients WHERE organization_id = $1', [orgAId])).rows[0].n
+
+    const res = await request(app).post('/api/imports')
+      .set('Authorization', `Bearer ${staffToken}`)
+      .send({ kind: 'members', source_name: 'roster.csv', csv: csvMembers })
+    expect(res.status).toBe(201)
+    batchId = res.body.id
+    expect(res.body.row_count).toBe(5)
+    // Deterministic suggestions from messy headers; the unknown column
+    // gets none.
+    expect(res.body.suggested_mapping['Full Name']).toBe('name')
+    expect(res.body.suggested_mapping['E-mail']).toBe('email')
+    expect(res.body.suggested_mapping['Cell']).toBe('phone')
+    expect(res.body.suggested_mapping['Envelope #']).toBeNull()
+
+    const after = (await pool.query(
+      'SELECT COUNT(*)::int AS n FROM ochr_clients WHERE organization_id = $1', [orgAId])).rows[0].n
+    expect(after).toBe(before) // preview creates no authoritative data
+  })
+
+  it('a viewer cannot even start an import (writeGate)', async () => {
+    const res = await request(app).post('/api/imports')
+      .set('Authorization', `Bearer ${viewerToken}`)
+      .send({ kind: 'members', source_name: 'x.csv', csv: 'name\nA B' })
+    expect(res.status).toBe(403)
+  })
+
+  it('rejects an unusable file and an incomplete mapping, kindly', async () => {
+    const empty = await request(app).post('/api/imports')
+      .set('Authorization', `Bearer ${staffToken}`)
+      .send({ kind: 'members', csv: '   ' })
+    expect(empty.status).toBe(400)
+
+    const noName = await request(app).put(`/api/imports/${batchId}/mapping`)
+      .set('Authorization', `Bearer ${staffToken}`)
+      .send({ mapping: { 'E-mail': 'email' } })
+    expect(noName.status).toBe(400)
+    expect(noName.body.error).toMatch(/required field/i)
+  })
+
+  it('mapping validates every row with explainable reasons — still nothing written', async () => {
+    const before = (await pool.query(
+      'SELECT COUNT(*)::int AS n FROM ochr_clients WHERE organization_id = $1', [orgAId])).rows[0].n
+
+    const res = await request(app).put(`/api/imports/${batchId}/mapping`)
+      .set('Authorization', `Bearer ${staffToken}`)
+      .send({ mapping: { 'Full Name': 'name', 'E-mail': 'email', 'Cell': 'phone', 'Ministries': 'tags', 'Envelope #': null } })
+    expect(res.status).toBe(200)
+    expect(res.body.summary).toMatchObject({ total: 5, ready: 2, held: 1, possible_duplicate: 2 })
+    expect(res.body.summary.ignored_columns).toEqual(['Envelope #'])
+
+    const held = await request(app).get(`/api/imports/${batchId}/rows?status=held`)
+      .set('Authorization', `Bearer ${staffToken}`)
+    expect(held.body.rows[0].issue).toMatch(/does not include a name/)
+
+    const dups = await request(app).get(`/api/imports/${batchId}/rows?status=possible_duplicate`)
+      .set('Authorization', `Bearer ${staffToken}`)
+    const issues = dups.body.rows.map(r => r.issue).join(' | ')
+    expect(issues).toMatch(/Another row in this file uses the email/)
+    expect(issues).toMatch(/matches the name of an existing member/)
+
+    const after = (await pool.query(
+      'SELECT COUNT(*)::int AS n FROM ochr_clients WHERE organization_id = $1', [orgAId])).rows[0].n
+    expect(after).toBe(before)
+  })
+
+  it('cross-tenant: another parish cannot see, review, or commit this import', async () => {
+    expect((await request(app).get(`/api/imports/${batchId}`)
+      .set('Authorization', `Bearer ${tokenB}`)).status).toBe(404)
+    expect((await request(app).get(`/api/imports/${batchId}/rows`)
+      .set('Authorization', `Bearer ${tokenB}`)).status).toBe(404)
+    expect((await request(app).post(`/api/imports/${batchId}/commit`)
+      .set('Authorization', `Bearer ${tokenB}`)).status).toBe(404)
+    const bList = await request(app).get('/api/imports')
+      .set('Authorization', `Bearer ${tokenB}`)
+    expect(bList.body.batches.some(b => b.id === batchId)).toBe(false)
+  })
+
+  it('duplicate decisions are explicit; nothing merges', async () => {
+    const dups = (await request(app).get(`/api/imports/${batchId}/rows?status=possible_duplicate`)
+      .set('Authorization', `Bearer ${staffToken}`)).body.rows
+    // Import the in-file email duplicate anyway; leave the name-match for follow-up.
+    const emailDup = dups.find(r => /Another row in this file/.test(r.issue))
+    const ok = await request(app).patch(`/api/imports/${batchId}/rows/${emailDup.id}`)
+      .set('Authorization', `Bearer ${staffToken}`)
+      .send({ decision: 'import' })
+    expect(ok.status).toBe(200)
+
+    // "import anyway" is only meaningful on a duplicate.
+    const ready = (await request(app).get(`/api/imports/${batchId}/rows?status=ready`)
+      .set('Authorization', `Bearer ${staffToken}`)).body.rows
+    const bad = await request(app).patch(`/api/imports/${batchId}/rows/${ready[0].id}`)
+      .set('Authorization', `Bearer ${staffToken}`)
+      .send({ decision: 'import' })
+    expect(bad.status).toBe(400)
+  })
+
+  it('staff cannot commit; the admin approval imports exactly the reviewed rows', async () => {
+    const staffCommit = await request(app).post(`/api/imports/${batchId}/commit`)
+      .set('Authorization', `Bearer ${staffToken}`)
+    expect(staffCommit.status).toBe(403)
+
+    const before = (await pool.query(
+      'SELECT COUNT(*)::int AS n FROM ochr_clients WHERE organization_id = $1', [orgAId])).rows[0].n
+    const res = await request(app).post(`/api/imports/${batchId}/commit`)
+      .set('Authorization', `Bearer ${tokenA}`)
+    expect(res.status).toBe(200)
+    const r = res.body.receipt
+    expect(r.imported).toBe(3)                    // 2 ready + 1 dup imported by choice
+    expect(r.held_for_follow_up).toBe(1)          // the nameless row
+    expect(r.duplicates_left_for_review).toBe(1)  // Dora
+    expect(r.duplicates_imported_anyway).toBe(1)
+    expect(r.ignored_columns).toEqual(['Envelope #'])
+    expect(r.approved_by.email).toBe(orgA.email.toLowerCase())
+    expect(r.protection.source_file).toMatch(/original file was not stored/)
+
+    const after = (await pool.query(
+      'SELECT COUNT(*)::int AS n FROM ochr_clients WHERE organization_id = $1', [orgAId])).rows[0].n
+    expect(after).toBe(before + 3)
+
+    // Imported rows point at the records they created; held rows point at nothing.
+    const imported = (await request(app).get(`/api/imports/${batchId}/rows?status=imported`)
+      .set('Authorization', `Bearer ${staffToken}`)).body.rows
+    expect(imported).toHaveLength(3)
+    expect(imported.every(x => x.created_record_id)).toBe(true)
+
+    // A second approval of the same batch is refused.
+    const again = await request(app).post(`/api/imports/${batchId}/commit`)
+      .set('Authorization', `Bearer ${tokenA}`)
+    expect(again.status).toBe(409)
+
+    // The commit is audited with the batch id.
+    const audit = await waitForAuditRow(orgAId, x =>
+      x.entity_type === 'import_batch' && String(x.entity_id) === String(batchId))
+    expect(audit).toBeTruthy()
+  })
+
+  it('an imported member participates in vault recovery like any other', async () => {
+    const { rows: [m] } = await pool.query(
+      `SELECT id FROM ochr_clients WHERE organization_id = $1 AND name = $2`,
+      [orgAId, `Ada Import ${RUN_ID}`])
+    const del = await request(app).delete(`/api/clients/${m.id}`)
+      .set('Authorization', `Bearer ${tokenA}`)
+    expect(del.status).toBe(204)
+    const { rows: [cap] } = await pool.query(
+      `SELECT id FROM ochr_vault_entries
+        WHERE organization_id = $1 AND kind = 'member' AND entity_id = $2`,
+      [orgAId, String(m.id)])
+    expect(cap).toBeTruthy()
+  })
+
+  it('gifts: funds resolve by name, formats normalize, and a failed commit adds nothing', async () => {
+    // A fund to point at.
+    const fund = await request(app).post('/api/funds')
+      .set('Authorization', `Bearer ${tokenA}`)
+      .send({ name: `Imported Building ${RUN_ID}` })
+    expect(fund.status).toBe(201)
+
+    const csvGifts = [
+      'Donor,Gift Amount,Gift Date,Designation',
+      `Ada Import ${RUN_ID},"$1,200.50",3/9/2025,Imported Building ${RUN_ID}`,
+      `Blaise Import ${RUN_ID},50,2025-01-05,`,
+      `Carla Import ${RUN_ID},25,1/5/25,No Such Fund ${RUN_ID}`,   // held: unknown fund
+      `Dana Import ${RUN_ID},not-money,2025-01-05,`,               // held: bad amount
+    ].join('\n')
+
+    const up = await request(app).post('/api/imports')
+      .set('Authorization', `Bearer ${staffToken}`)
+      .send({ kind: 'gifts', source_name: 'giving.csv', csv: csvGifts })
+    const giftBatch = up.body.id
+    expect(up.body.suggested_mapping['Gift Amount']).toBe('amount')
+    expect(up.body.suggested_mapping['Designation']).toBe('fund')
+
+    const map = await request(app).put(`/api/imports/${giftBatch}/mapping`)
+      .set('Authorization', `Bearer ${staffToken}`)
+      .send({ mapping: { 'Donor': 'donor_name', 'Gift Amount': 'amount', 'Gift Date': 'date', 'Designation': 'fund' } })
+    expect(map.status).toBe(200)
+    expect(map.body.summary).toMatchObject({ ready: 2, held: 2 })
+
+    const held = (await request(app).get(`/api/imports/${giftBatch}/rows?status=held`)
+      .set('Authorization', `Bearer ${staffToken}`)).body.rows
+    const heldIssues = held.map(x => x.issue).join(' | ')
+    expect(heldIssues).toMatch(/is not in the parish's fund list yet/)
+    expect(heldIssues).toMatch(/is not an amount this row can use/)
+
+    // ATOMICITY: yank the fund out from under the reviewed batch, so the
+    // first insert violates its FK — the whole commit must roll back.
+    await pool.query('DELETE FROM ochr_funds WHERE id = $1', [fund.body.id])
+    const before = (await pool.query(
+      'SELECT COUNT(*)::int AS n FROM ochr_donations WHERE organization_id = $1', [orgAId])).rows[0].n
+    const fail = await request(app).post(`/api/imports/${giftBatch}/commit`)
+      .set('Authorization', `Bearer ${tokenA}`)
+    expect(fail.status).toBe(500)
+    expect(fail.body.error).toMatch(/Nothing was added/)
+    const after = (await pool.query(
+      'SELECT COUNT(*)::int AS n FROM ochr_donations WHERE organization_id = $1', [orgAId])).rows[0].n
+    expect(after).toBe(before) // no partial import
+    const batchState = (await request(app).get(`/api/imports/${giftBatch}`)
+      .set('Authorization', `Bearer ${staffToken}`)).body
+    expect(batchState.status).toBe('mapped') // still recoverable, not half-done
+
+    // Re-review against reality (the fund is gone now), then commit clean.
+    const remap = await request(app).put(`/api/imports/${giftBatch}/mapping`)
+      .set('Authorization', `Bearer ${staffToken}`)
+      .send({ mapping: { 'Donor': 'donor_name', 'Gift Amount': 'amount', 'Gift Date': 'date', 'Designation': 'fund' } })
+    expect(remap.body.summary.held).toBe(3) // the Building Fund row now holds too
+    const ok = await request(app).post(`/api/imports/${giftBatch}/commit`)
+      .set('Authorization', `Bearer ${tokenA}`)
+    expect(ok.status).toBe(200)
+    expect(ok.body.receipt.imported).toBe(1) // only Blaise's clean $50
+    const { rows: [gift] } = await pool.query(
+      `SELECT amount, to_char(date, 'YYYY-MM-DD') AS date, source FROM ochr_donations
+        WHERE organization_id = $1 AND donor_name = $2`,
+      [orgAId, `Blaise Import ${RUN_ID}`])
+    expect(gift.amount).toBe('50.00')
+    expect(gift.date).toBe('2025-01-05')
+    expect(gift.source).toBe('import')
+  })
+})
+
 describe('role enforcement', () => {
   it('admin can list users in their org', async () => {
     const res = await request(server)
@@ -10846,17 +12876,1382 @@ describe('role enforcement', () => {
       .send({ role: 'viewer' })
     expect(demote.status).toBe(200)
 
-    // Now any write should 403 — viewers can read but can't write.
+    // A role change now bumps token_version, so the old token is REVOKED
+    // rather than merely downgraded (SWEEP2, 23 Aug). This test used to
+    // assert 403 — still signed in, now forbidden. That was the behaviour
+    // that let a demoted admin keep the support console for up to seven days,
+    // because one router read the role off the token instead of the database.
+    //
+    // The honest new answer is 401: the token minted while they were an admin
+    // is no longer a token. They sign in again and get a viewer's session.
     const writeAttempt = await request(server)
       .post('/api/clients')
       .set('Authorization', `Bearer ${tokenA}`)
       .send({ name: 'Should Not Land' })
-    expect(writeAttempt.status).toBe(403)
+    expect(writeAttempt.status).toBe(401)
 
-    // GET still works — viewers retain read access.
     const readAttempt = await request(server)
       .get('/api/clients')
       .set('Authorization', `Bearer ${tokenA}`)
-    expect(readAttempt.status).toBe(200)
+    expect(readAttempt.status).toBe(401)
+
+    // Signing in again gives them the viewer session they now are, and a
+    // viewer can read but not write.
+    const again = await request(server).post('/api/auth/login')
+      .set('X-Forwarded-For', '10.99.14.77')
+      .send({ email: orgA.email, password: orgA.password })
+    expect(again.status).toBe(200)
+    const viewerTok = again.body.token
+    expect((await request(server).get('/api/clients')
+      .set('Authorization', `Bearer ${viewerTok}`)).status).toBe(200)
+    expect((await request(server).post('/api/clients')
+      .set('Authorization', `Bearer ${viewerTok}`)
+      .send({ name: 'Still Should Not Land' })).status).toBe(403)
+
+    // tokenA is dead from here on. Nothing below this test may use it.
+    tokenA = viewerTok
   })
 })
+
+
+
+
+
+
+describe('demonstration workspaces (PILOT.4)', () => {
+  // Demo orgs used to be marked by "(Demo)" in the name. That is a naming
+  // convention, not a flag: invisible in a cropped screenshot, and gone the
+  // moment somebody renames the org to a real parish for a demonstration —
+  // which the demo run-sheet explicitly instructs. The risk is not
+  // embarrassment; it is invented pastoral notes about invented parishes
+  // being taken for records about actual people.
+  const org = {
+    organizationName: `Demo Flag Parish ${RUN_ID}`, name: 'Admin',
+    email: `demoflag_${RUN_ID}@example.com`, password: 'smoke-test-pw-71a',
+  }
+  let tok
+
+  beforeAll(async () => {
+    const r = await createOrg(server, org, '10.99.14.81')
+    expect(r.status).toBe(201)
+    tok = r.body.token
+  })
+
+  it('a new workspace is real by default', async () => {
+    const r = await createOrg(server, { organizationName: `Real Parish ${RUN_ID}`, name: 'Admin',
+              email: `realp_${RUN_ID}@example.com`, password: 'smoke-test-pw-71b' }, '10.99.14.82')
+    expect(r.body.user.organization.is_demo).toBe(false)
+  })
+
+  it('a workspace can declare itself fictional, and every door reports it', async () => {
+    const set = await request(server).patch('/api/organization')
+      .set('Authorization', `Bearer ${tok}`).send({ is_demo: true })
+    expect(set.status).toBe(200)
+
+    // Login, /me and signup all build the org object separately, and the
+    // flag has to survive all three — the first cut of this only reached
+    // /me, so the banner never appeared for anyone who simply signed in.
+    const me = await request(server).get('/api/auth/me').set('Authorization', `Bearer ${tok}`)
+    expect(me.body.user.organization.is_demo).toBe(true)
+
+    const login = await request(server).post('/api/auth/login')
+      .set('X-Forwarded-For', '10.99.14.83')
+      .send({ email: org.email, password: org.password })
+    expect(login.body.user.organization.is_demo).toBe(true)
+  })
+
+  it('A FICTIONAL WORKSPACE CANNOT BE QUIETLY DECLARED REAL', async () => {
+    // The dangerous direction. Un-flagging would take demo parishes, demo
+    // clergy and invented notes and present them as records about actual
+    // people. Declaring a workspace fictional is a promise; withdrawing
+    // that promise is not a checkbox.
+    const res = await request(server).patch('/api/organization')
+      .set('Authorization', `Bearer ${tok}`).send({ is_demo: false })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toMatch(/cannot be marked as real/i)
+
+    const me = await request(server).get('/api/auth/me').set('Authorization', `Bearer ${tok}`)
+    expect(me.body.user.organization.is_demo).toBe(true)
+  })
+
+  it('renaming a demo workspace does not make it real', async () => {
+    // Exactly what the run-sheet tells a presenter to do: rename the org to
+    // the prospect's parish. Under the old naming convention that silently
+    // removed the only marker there was.
+    const res = await request(server).patch('/api/organization')
+      .set('Authorization', `Bearer ${tok}`).send({ name: "St. Somebody's Actual Parish" })
+    expect(res.status).toBe(200)
+    const me = await request(server).get('/api/auth/me').set('Authorization', `Bearer ${tok}`)
+    expect(me.body.user.organization.name).toBe("St. Somebody's Actual Parish")
+    expect(me.body.user.organization.is_demo).toBe(true)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────
+// The Continuity Vault (VAULT.1)
+//
+// The claim under test is not "delete writes a row somewhere". It is: the
+// thing comes back, WITH the rows Postgres would have cascaded away and
+// the references it would have set to NULL — and it refuses to come back
+// when coming back would overwrite something.
+//
+// Every guard below is falsified as well as asserted. A guard that has
+// never been seen to fail is a guard nobody has tested.
+// ─────────────────────────────────────────────────────────────────────────
+describe('Continuity Vault — recovery, not just retention', () => {
+  // Its own organisation. By this point in the file orgA's admin has been
+  // demoted to viewer by the role-enforcement tests, and a suite that
+  // borrows a token whose role somebody else changed is a suite that
+  // reports product failures it caused itself.
+  const vaultOrg = {
+    organizationName: `Vault Parish ${RUN_ID}`, name: 'Vera Admin',
+    email: `vault_admin_${RUN_ID}@example.com`, password: 'smoke-test-pw-vault-1',
+  }
+  const otherOrg = {
+    organizationName: `Vault Other Parish ${RUN_ID}`, name: 'Otto Admin',
+    email: `vault_other_${RUN_ID}@example.com`, password: 'smoke-test-pw-vault-2',
+  }
+  let tok, otherTok, viewerToken, staffToken
+  let vaultOrgId, memberId, groupId, eventId, formId, entryId, formSlug, orgSlug
+
+  beforeAll(async () => {
+    const mk = async (payload, ip) => {
+      const r = await createOrg(server, payload, ip)
+      expect(r.status).toBe(201)
+      return { token: r.body.token, orgId: r.body.user.organization.id }
+    }
+    const a = await mk(vaultOrg, '10.99.14.71')
+    tok = a.token; vaultOrgId = a.orgId
+    otherTok = (await mk(otherOrg, '10.99.14.72')).token
+
+    const m = await request(server).post('/api/clients').set('Authorization', `Bearer ${tok}`)
+      .send({ name: `Vault Member ${RUN_ID}`, email: `vaultm_${RUN_ID}@example.com`, status: 'active' })
+    expect(m.status).toBeLessThan(300)
+    memberId = m.body.id
+
+    const g = await request(server).post('/api/groups').set('Authorization', `Bearer ${tok}`)
+      .send({ name: `Vault Group ${RUN_ID}`, category: 'ministry' })
+    expect(g.status).toBeLessThan(300)
+    groupId = g.body.id ?? g.body.group?.id
+    const add = await request(server).post(`/api/groups/${groupId}/members`)
+      .set('Authorization', `Bearer ${tok}`).send({ client_id: memberId })
+    expect(add.status).toBeLessThan(300)
+    // …and make her its leader, so the delete leaves a NULL behind on a
+    // row that survives.
+    await pool.query('UPDATE ochr_groups SET leader_client_id = $1 WHERE id = $2', [memberId, groupId])
+
+    const e = await request(server).post('/api/calendar').set('Authorization', `Bearer ${tok}`)
+      .send({ title: `Vault Event ${RUN_ID}`, date: '2026-09-13', type: 'service' })
+    eventId = e.body.id ?? e.body.event?.id
+
+    const f = await request(server).post('/api/forms').set('Authorization', `Bearer ${tok}`)
+      .send({
+        title: `Vault Form ${RUN_ID}`, is_public: true, status: 'open',
+        fields: [{ id: 'name', type: 'short_text', label: 'Name', required: true }],
+      })
+    expect(f.status).toBeLessThan(300)
+    formId = f.body.id
+    formSlug = f.body.slug
+    const org = await pool.query('SELECT slug FROM ochr_organizations WHERE id = $1', [vaultOrgId])
+    orgSlug = org.rows[0].slug
+
+    // A viewer, for the role gate on restore.
+    const vEmail = `vault_viewer_${RUN_ID}@example.com`
+    const vu = await request(server).post('/api/users').set('Authorization', `Bearer ${tok}`)
+      .send({ name: 'Vault Viewer', email: vEmail, password: 'smoke-test-pw-vault-3', role: 'viewer' })
+    expect(vu.status).toBeLessThan(300)
+    const vl = await request(server).post('/api/auth/login').set('X-Forwarded-For', '10.99.14.73')
+      .send({ email: vEmail, password: 'smoke-test-pw-vault-3' })
+    expect(vl.status).toBe(200)
+    viewerToken = vl.body.token
+
+    // A staff user matters more than a viewer here. writeGate already
+    // stops a viewer from POSTing anything, so a viewer's 403 proves
+    // nothing about THIS route's gate — removing requireRole('admin')
+    // left that test green. Staff pass writeGate and must still be
+    // refused, which is the only thing that tests the gate itself.
+    const sEmail = `vault_staff_${RUN_ID}@example.com`
+    const su = await request(server).post('/api/users').set('Authorization', `Bearer ${tok}`)
+      .send({ name: 'Vault Staff', email: sEmail, password: 'smoke-test-pw-vault-4', role: 'staff' })
+    expect(su.status).toBeLessThan(300)
+    const sl = await request(server).post('/api/auth/login').set('X-Forwarded-For', '10.99.14.74')
+      .send({ email: sEmail, password: 'smoke-test-pw-vault-4' })
+    expect(sl.status).toBe(200)
+    staffToken = sl.body.token
+  })
+
+  it('a deleted member is captured with everything that went with her', async () => {
+    const { rows: before } = await pool.query(
+      'SELECT COUNT(*)::int AS n FROM ochr_group_members WHERE client_id = $1', [memberId])
+    expect(before[0].n).toBe(1)
+
+    const del = await request(server).delete(`/api/clients/${memberId}`)
+      .set('Authorization', `Bearer ${tok}`)
+    expect(del.status).toBe(204)
+
+    // Gone from the parish's records, exactly as before.
+    const gone = await pool.query('SELECT 1 FROM ochr_clients WHERE id = $1', [memberId])
+    expect(gone.rowCount).toBe(0)
+    const roster = await pool.query(
+      'SELECT COUNT(*)::int AS n FROM ochr_group_members WHERE client_id = $1', [memberId])
+    expect(roster.rows[0].n).toBe(0)
+    // …and the group she led now has no leader.
+    const leaderless = await pool.query('SELECT leader_client_id FROM ochr_groups WHERE id = $1', [groupId])
+    expect(leaderless.rows[0].leader_client_id).toBeNull()
+
+    const list = await request(server).get('/api/vault').set('Authorization', `Bearer ${tok}`)
+    expect(list.status).toBe(200)
+    const entry = list.body.entries.find(e => e.entity_id === String(memberId))
+    expect(entry).toBeTruthy()
+    expect(entry.label).toContain(`Vault Member ${RUN_ID}`)
+    expect(entry.summary.cascaded_rows).toBeGreaterThan(0)
+    expect(entry.summary.relinked_rows).toBeGreaterThan(0)
+    expect(entry.deleted_by_name).toBe('Vera Admin')
+    expect(list.body.retention_days).toBe(400)
+    entryId = entry.id
+  })
+
+  it('ONLY AN ADMIN CAN RESTORE — NOT A VIEWER, AND NOT STAFF', async () => {
+    const asViewer = await request(server).post(`/api/vault/${entryId}/restore`)
+      .set('Authorization', `Bearer ${viewerToken}`)
+    expect(asViewer.status).toBe(403)
+
+    // The one that actually tests this route's own gate: staff sail
+    // through writeGate and must still be turned away.
+    const asStaff = await request(server).post(`/api/vault/${entryId}/restore`)
+      .set('Authorization', `Bearer ${staffToken}`)
+    expect(asStaff.status).toBe(403)
+
+    // …but staff and viewers CAN both see that the mistake is
+    // recoverable and say so. The archive names records they could
+    // already read yesterday; it is the restoring that is privileged.
+    for (const t of [staffToken, viewerToken]) {
+      const canSee = await request(server).get('/api/vault').set('Authorization', `Bearer ${t}`)
+      expect(canSee.status).toBe(200)
+      expect(canSee.body.entries.some(e => e.id === entryId)).toBe(true)
+    }
+
+    // Falsification: still absent, so the 403s were the reason and not a
+    // restore that happened anyway.
+    const still = await pool.query('SELECT 1 FROM ochr_clients WHERE id = $1', [memberId])
+    expect(still.rowCount).toBe(0)
+  })
+
+  it('ANOTHER ORGANISATION CANNOT SEE OR RESTORE IT', async () => {
+    const list = await request(server).get('/api/vault').set('Authorization', `Bearer ${otherTok}`)
+    expect(list.body.entries.some(e => e.id === entryId)).toBe(false)
+    const get = await request(server).get(`/api/vault/${entryId}`).set('Authorization', `Bearer ${otherTok}`)
+    expect(get.status).toBe(404)
+    const res = await request(server).post(`/api/vault/${entryId}/restore`)
+      .set('Authorization', `Bearer ${otherTok}`)
+    expect(res.status).toBe(404)
+  })
+
+  it('the entry says what would come back before anyone commits to it', async () => {
+    const res = await request(server).get(`/api/vault/${entryId}`).set('Authorization', `Bearer ${tok}`)
+    expect(res.status).toBe(200)
+    expect(res.body.would_restore.record).toContain(`Vault Member ${RUN_ID}`)
+    expect(res.body.would_restore.related_rows).toBeGreaterThan(0)
+    expect(res.body.would_restore.reconnections).toBeGreaterThan(0)
+    // The preview is a shape, not a dump of the deleted record.
+    expect(res.body.entry.snapshot).toBeUndefined()
+  })
+
+  it('RESTORING BRINGS BACK THE RECORD, ITS ROWS, AND ITS CONNECTIONS', async () => {
+    const res = await request(server).post(`/api/vault/${entryId}/restore`)
+      .set('Authorization', `Bearer ${tok}`)
+    expect(res.status).toBe(200)
+    expect(res.body.restored.records).toBe(1)
+
+    const back = await pool.query('SELECT name FROM ochr_clients WHERE id = $1', [memberId])
+    expect(back.rowCount).toBe(1)
+    expect(back.rows[0].name).toBe(`Vault Member ${RUN_ID}`)
+
+    // The cascaded row: her place on the roster.
+    const roster = await pool.query(
+      'SELECT COUNT(*)::int AS n FROM ochr_group_members WHERE client_id = $1 AND group_id = $2',
+      [memberId, groupId])
+    expect(roster.rows[0].n).toBe(1)
+
+    // The relink: the group has its leader again. This is the half a
+    // plain recycle bin loses.
+    const leader = await pool.query('SELECT leader_client_id FROM ochr_groups WHERE id = $1', [groupId])
+    expect(leader.rows[0].leader_client_id).toBe(memberId)
+  })
+
+  it('an entry cannot be restored twice', async () => {
+    const res = await request(server).post(`/api/vault/${entryId}/restore`)
+      .set('Authorization', `Bearer ${tok}`)
+    expect(res.status).toBe(409)
+    expect(res.body.code).toBe('already_restored')
+  })
+
+  it('a restored entry leaves the recoverable list', async () => {
+    const list = await request(server).get('/api/vault').set('Authorization', `Bearer ${tok}`)
+    expect(list.body.entries.some(e => e.id === entryId)).toBe(false)
+    const all = await request(server).get('/api/vault?include_restored=true')
+      .set('Authorization', `Bearer ${tok}`)
+    const found = all.body.entries.find(e => e.id === entryId)
+    expect(found.restored_by_name).toBe('Vera Admin')
+  })
+
+  it('RESTORING NEVER OVERWRITES CURRENT INFORMATION', async () => {
+    const f = await request(server).post('/api/funds').set('Authorization', `Bearer ${tok}`)
+      .send({ name: `Vault Fund ${RUN_ID}` })
+    const fundId = f.body.fund?.id ?? f.body.id
+    await request(server).delete(`/api/funds/${fundId}`).set('Authorization', `Bearer ${tok}`)
+
+    const list = await request(server).get('/api/vault?kind=fund').set('Authorization', `Bearer ${tok}`)
+    const fundEntry = list.body.entries.find(e => e.entity_id === String(fundId))
+    expect(fundEntry).toBeTruthy()
+
+    // Somebody takes the address back before anyone restores.
+    await pool.query(
+      `INSERT INTO ochr_funds (id, organization_id, name) VALUES ($1, $2, $3)`,
+      [fundId, vaultOrgId, `Different Fund ${RUN_ID}`])
+
+    const res = await request(server).post(`/api/vault/${fundEntry.id}/restore`)
+      .set('Authorization', `Bearer ${tok}`)
+    expect(res.status).toBe(409)
+    expect(res.body.code).toBe('occupied')
+
+    // Falsification: the current information is untouched, and the entry
+    // is still recoverable rather than consumed by the failed attempt.
+    const now = await pool.query('SELECT name FROM ochr_funds WHERE id = $1', [fundId])
+    expect(now.rows[0].name).toBe(`Different Fund ${RUN_ID}`)
+    const after = await request(server).get('/api/vault?kind=fund').set('Authorization', `Bearer ${tok}`)
+    expect(after.body.entries.some(e => e.id === fundEntry.id)).toBe(true)
+    await pool.query('DELETE FROM ochr_funds WHERE id = $1', [fundId])
+  })
+
+  it('a form comes back with the answers people gave it', async () => {
+    const submitted = await request(server)
+      .post(`/api/public/forms/${orgSlug}/${formSlug}/submit`)
+      .send({ answers: { name: 'Someone' }, respondent_name: 'Someone' })
+    expect(submitted.status).toBeLessThan(300)
+    const seeded = await pool.query(
+      'SELECT COUNT(*)::int AS n FROM ochr_form_responses WHERE form_id = $1', [formId])
+    expect(seeded.rows[0].n).toBeGreaterThan(0)
+
+    const del = await request(server).delete(`/api/forms/${formId}`).set('Authorization', `Bearer ${tok}`)
+    expect(del.status).toBe(204)
+    const wiped = await pool.query(
+      'SELECT COUNT(*)::int AS n FROM ochr_form_responses WHERE form_id = $1', [formId])
+    expect(wiped.rows[0].n).toBe(0)
+
+    const list = await request(server).get('/api/vault?kind=form').set('Authorization', `Bearer ${tok}`)
+    const fe = list.body.entries.find(e => e.entity_id === String(formId))
+    const res = await request(server).post(`/api/vault/${fe.id}/restore`).set('Authorization', `Bearer ${tok}`)
+    expect(res.status).toBe(200)
+
+    const restored = await pool.query(
+      'SELECT COUNT(*)::int AS n FROM ochr_form_responses WHERE form_id = $1', [formId])
+    expect(restored.rows[0].n).toBe(seeded.rows[0].n)
+  })
+
+  it('THE REGISTER IS STILL NEVER DELETED, VAULT OR NO VAULT', async () => {
+    // The vault must not have quietly turned "never deleted" into
+    // "deleted, but recoverable". Those are different promises and the
+    // register keeps the stronger one.
+    const rec = await request(server).post('/api/sacraments').set('Authorization', `Bearer ${tok}`)
+      .send({ type: 'baptism', client_id: memberId, date: '2026-05-01', officiant: 'Fr. Test' })
+    const id = rec.body.id ?? rec.body.record?.id
+    const del = await request(server).delete(`/api/sacraments/${id}`).set('Authorization', `Bearer ${tok}`)
+    expect(del.status).toBe(405)
+    const still = await pool.query('SELECT 1 FROM ochr_sacramental_records WHERE id = $1', [id])
+    expect(still.rowCount).toBe(1)
+  })
+
+  it('the retention window is honoured, not just written down', async () => {
+    const b = await request(server).post('/api/bulletins').set('Authorization', `Bearer ${tok}`)
+      .send({ date: '2026-09-06', title: `Vault Bulletin ${RUN_ID}` })
+    const bulletinId = b.body.id ?? b.body.bulletin?.id
+    await request(server).delete(`/api/bulletins/${bulletinId}`).set('Authorization', `Bearer ${tok}`)
+
+    const { rows } = await pool.query(
+      `SELECT id, retention_until FROM ochr_vault_entries
+        WHERE organization_id = $1 AND entity_table = 'ochr_bulletins' AND entity_id = $2`,
+      [vaultOrgId, String(bulletinId)])
+    expect(rows.length).toBe(1)
+
+    // Not yet due — a prune today must leave it alone.
+    await pruneOldRecords()
+    let alive = await pool.query('SELECT 1 FROM ochr_vault_entries WHERE id = $1', [rows[0].id])
+    expect(alive.rowCount).toBe(1)
+
+    // Past the date it promised, it goes.
+    await pool.query(
+      `UPDATE ochr_vault_entries SET retention_until = CURRENT_DATE - 1 WHERE id = $1`, [rows[0].id])
+    const result = await pruneOldRecords()
+    expect(result.vault_entries_pruned).toBeGreaterThan(0)
+    alive = await pool.query('SELECT 1 FROM ochr_vault_entries WHERE id = $1', [rows[0].id])
+    expect(alive.rowCount).toBe(0)
+  })
+
+  it('every protected kind is actually wired to a protected route', async () => {
+    // A registry entry with no route behind it is a promise nothing
+    // keeps. This asserts the two lists agree by exercising each one.
+    const { PROTECTED } = await import('../src/vault/registry.js')
+    const list = await request(server).get('/api/vault').set('Authorization', `Bearer ${tok}`)
+    expect(list.body.protected_kinds.map(k => k.kind).sort())
+      .toEqual(Object.keys(PROTECTED).sort())
+    // Sacramental records stay out on purpose — the register is voided
+    // by dated amendment (073), never deleted, and a recycle bin for it
+    // would be a worse promise than the one already kept.
+    expect(Object.keys(PROTECTED)).not.toContain('sacrament')
+  })
+})
+
+describe('signing an S3 request', () => {
+  // Hand-rolled SigV4 is only defensible because it is falsifiable.
+  // Amazon publishes worked examples with the exact expected canonical
+  // request, string-to-sign and signature; a wrong byte anywhere in the
+  // chain changes the final hex and these go red. Without them, "I think
+  // the signing is right" would be the standard.
+  const EMPTY_SHA = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
+
+  it('MATCHES AMAZON\'S OWN get-vanilla VECTOR', async () => {
+    const { canonicalRequest, stringToSign, signingKey } = await import('../src/storage/sigv4.js')
+    const { createHmac } = await import('node:crypto')
+
+    const cr = canonicalRequest({
+      method: 'GET', path: '/', query: {},
+      headers: { Host: 'example.amazonaws.com', 'X-Amz-Date': '20150830T123600Z' },
+      payloadHash: EMPTY_SHA,
+    })
+    expect(cr.text).toBe(
+      `GET\n/\n\nhost:example.amazonaws.com\nx-amz-date:20150830T123600Z\n\nhost;x-amz-date\n${EMPTY_SHA}`)
+    expect(cr.signedHeaders).toBe('host;x-amz-date')
+
+    const sts = stringToSign({
+      amzDate: '20150830T123600Z',
+      scope: '20150830/us-east-1/service/aws4_request',
+      canonicalRequestText: cr.text,
+    })
+    const key = signingKey({
+      secretKey: 'wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY',
+      dateStamp: '20150830', region: 'us-east-1', service: 'service',
+    })
+    expect(createHmac('sha256', key).update(sts, 'utf8').digest('hex'))
+      .toBe('5fa00fa31553b73ebf1942676e86291e8372ff2a2260956d9b8aae1d763fbf31')
+  })
+
+  it("MATCHES AMAZON'S S3 GET-OBJECT VECTOR, THROUGH THE WHOLE SIGNER", async () => {
+    // The first vector exercises the pieces. This one goes through
+    // signRequest itself, including the x-amz-content-sha256 header it
+    // always adds — so it tests what the storage driver actually sends.
+    const { signRequest } = await import('../src/storage/sigv4.js')
+    const h = signRequest({
+      method: 'GET', host: 'examplebucket.s3.amazonaws.com', path: '/test.txt',
+      headers: { Range: 'bytes=0-9' }, payload: Buffer.alloc(0),
+      accessKeyId: 'AKIAIOSFODNN7EXAMPLE',
+      secretAccessKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+      region: 'us-east-1', service: 's3',
+      date: new Date('2013-05-24T00:00:00Z'),
+    })
+    expect(h._debug.signature).toBe('f0e8bdb87c964420e857bd35b5d6ed310bd44f0170aba48dd91039c6036bdb41')
+    expect(h.authorization).toContain('Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request')
+  })
+
+  it('encodes to RFC 3986, not encodeURIComponent', async () => {
+    const { uriEncode } = await import('../src/storage/sigv4.js')
+    // A tilde escaped is a signature that verifies locally and is
+    // rejected by the service — the most confusing available failure.
+    expect(uriEncode('a~b')).toBe('a~b')
+    expect(uriEncode('a b')).toBe('a%20b')
+    expect(uriEncode('a/b')).toBe('a%2Fb')
+    expect(uriEncode('a/b', false)).toBe('a/b')
+    // A parish name in a key must survive.
+    expect(uriEncode('Gómez')).toBe('G%C3%B3mez')
+  })
+})
+
+describe('somewhere for a backup to go', () => {
+  const VARS = ['BACKUP_STORAGE', 'BACKUP_DIR', 'BACKUP_S3_BUCKET', 'BACKUP_S3_KEY_ID',
+                'BACKUP_S3_SECRET', 'BACKUP_S3_ENDPOINT', 'BACKUP_S3_REGION', 'VERCEL']
+  let saved
+  beforeAll(() => { saved = Object.fromEntries(VARS.map(v => [v, process.env[v]])) })
+  const clear = () => { for (const v of VARS) delete process.env[v] }
+  afterAll(() => { for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v } })
+
+  it('IT REPORTS ITSELF ABSENT RATHER THAN PRETENDING', async () => {
+    const { describeStorage, storageIsLive, putObject } = await import('../src/storage/index.js')
+    clear()
+    expect(describeStorage()).toMatchObject({ driver: 'none', live: false })
+    expect(storageIsLive()).toBe(false)
+    // And it refuses rather than silently doing nothing, which is the
+    // failure mode this whole change exists to remove.
+    await expect(putObject({ key: 'x', body: Buffer.from('y') })).rejects.toThrow(/not available/)
+  })
+
+  it('THE FILE DRIVER REFUSES ON VERCEL', async () => {
+    const { describeStorage } = await import('../src/storage/index.js')
+    clear()
+    process.env.BACKUP_STORAGE = 'file'
+    process.env.BACKUP_DIR = '/tmp/whatever'
+    expect(describeStorage().live) .toBe(true)
+    // A serverless filesystem does not outlive the request, so writing a
+    // backup there is writing it to /dev/null with extra steps.
+    process.env.VERCEL = '1'
+    const v = describeStorage()
+    expect(v.live).toBe(false)
+    expect(v.detail).toMatch(/does not outlive the request/)
+  })
+
+  it('a file round-trips, and verification catches a short write', async () => {
+    const { putObject, getObject, listObjects, verifyObject } = await import('../src/storage/index.js')
+    const { mkdtemp } = await import('node:fs/promises')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+    clear()
+    process.env.BACKUP_STORAGE = 'file'
+    process.env.BACKUP_DIR = await mkdtemp(join(tmpdir(), 'ochr-store-'))
+
+    const body = Buffer.from('a gzipped parish, notionally')
+    await putObject({ key: '2026-08-22/st-annes.json.gz', body })
+    expect((await getObject('2026-08-22/st-annes.json.gz')).toString()).toBe(body.toString())
+    expect((await listObjects('2026-08-22/')).map(o => o.key)).toEqual(['2026-08-22/st-annes.json.gz'])
+
+    // A PUT that returns success and leaves the wrong thing behind is
+    // the exact failure the digest verifies against.
+    expect(await verifyObject('2026-08-22/st-annes.json.gz', body.length)).toMatchObject({ ok: true })
+    expect(await verifyObject('2026-08-22/st-annes.json.gz', 999)).toMatchObject({ ok: false })
+    expect(await verifyObject('2026-08-22/not-there.json.gz')).toMatchObject({ ok: false })
+  })
+
+  it('s3 needs all three credentials before it claims to be live', async () => {
+    const { describeStorage } = await import('../src/storage/index.js')
+    clear()
+    process.env.BACKUP_STORAGE = 's3'
+    process.env.BACKUP_S3_BUCKET = 'openchurch-backups'
+    expect(describeStorage().live).toBe(false)
+    process.env.BACKUP_S3_KEY_ID = 'AKIAIOSFODNN7EXAMPLE'
+    expect(describeStorage().live).toBe(false)
+    process.env.BACKUP_S3_SECRET = 'secret'
+    expect(describeStorage()).toMatchObject({ driver: 's3', live: true })
+  })
+})
+
+
+
+
+
+// ─────────────────────────────────────────────────────────────────────────
+// Notification drain fairness (RELIABILITY 1.2)
+//
+// The failure this exists to prevent is not "slow". It is "never". Strict
+// oldest-first claiming plus a reaper that returns stranded claims to the
+// queue is a starvation loop: if one row in the oldest batch reliably
+// kills the drainer, every tick reaps the same rows, re-claims the same
+// rows, dies in the same place, and a reminder queued afterwards never
+// sends — while the queue looks busy the entire time.
+//
+// The test reproduces that shape directly: a backlog larger than a batch
+// that keeps being stranded, and one new row behind it.
+// ─────────────────────────────────────────────────────────────────────────
+describe('notification drain — a new reminder is never starved by a backlog', () => {
+  let orgId, userId
+  const BACKLOG = 60          // deliberately larger than the batch below
+  const BATCH   = 20    // deliberately SMALLER than the backlog — that is the whole point
+  const NEW_RECIPIENT = `drain-fair-new-${RUN_ID}@example.com`
+
+  beforeAll(async () => {
+    const { rows } = await pool.query(
+      'SELECT id, organization_id FROM ochr_users WHERE email = $1', [orgA.email]
+    )
+    userId = rows[0].id
+    orgId  = rows[0].organization_id
+
+    // Empty the queue of everything the other suites left in it. The
+    // drain is global, so a starvation scenario built on top of other
+    // people's rows is a scenario whose outcome depends on how many
+    // tests ran before it. Drain to zero first, then the queue below is
+    // exactly the queue this test describes.
+    for (let i = 0; i < 30; i++) {
+      const r = await processDueNotifications({ batchSize: 500 })
+      if (r.processed === 0) break
+    }
+
+    for (let i = 0; i < BACKLOG; i++) {
+      await pool.query(
+        `INSERT INTO ochr_scheduled_notifications
+           (organization_id, user_id, recipient_email, notification_type, vars, send_at, status)
+         VALUES ($1,$2,$3,'assignment_reminder',$5::jsonb, NOW() - INTERVAL '10 days' + ($4 || ' seconds')::interval, 'pending')`,
+        [orgId, userId, `drain-fair-old-${i}-${RUN_ID}@example.com`, String(i), JSON.stringify({ recipient_name: 'Drain Fair', event_title: 'Drain Fairness',
+           event_date: 'Sunday', event_time: '9:00am', event_location_line: '' })]
+      )
+    }
+  })
+
+  // The state a repeatedly-dying drainer leaves behind, written directly.
+  //
+  // It cannot be produced by running the drain: processDueNotifications
+  // claims a row and then sends it in the same pass, and the stub
+  // transport succeeds, so by the time the call returns the rows are
+  // 'sent' and there is nothing left to strand. A first attempt at this
+  // test tried to strand them afterwards, produced a queue that had
+  // simply drained normally, and passed with the fix REMOVED — which is
+  // the only reason it was caught.
+  const leaveTheBacklogStuck = async (attempts) => {
+    await pool.query(
+      `UPDATE ochr_scheduled_notifications
+          SET status = 'processing', attempts = $2,
+              attempted_at = NOW() - INTERVAL '30 minutes'
+        WHERE recipient_email LIKE $1`,
+      [`drain-fair-old-%${RUN_ID}@example.com`, attempts]
+    )
+  }
+
+  it('A NEWLY QUEUED REMINDER SENDS EVEN WHEN THE BACKLOG KEEPS FAILING', async () => {
+    // Sixty rows that have each been claimed twice and never confirmed:
+    // a drainer that dies in the same place every tick. The reaper is
+    // about to return all of them to the queue, ahead of anything newer.
+    await leaveTheBacklogStuck(2)
+
+    const { rows: [fresh] } = await pool.query(
+      `INSERT INTO ochr_scheduled_notifications
+         (organization_id, user_id, recipient_email, notification_type, vars, send_at, status)
+       VALUES ($1,$2,$3,'assignment_reminder',$4::jsonb, NOW() - INTERVAL '1 minute', 'pending')
+       RETURNING id`,
+      [orgId, userId, NEW_RECIPIENT, JSON.stringify({ recipient_name: 'Drain Fair', event_title: 'Drain Fairness',
+           event_date: 'Sunday', event_time: '9:00am', event_location_line: '' })]
+    )
+
+    // One tick, with a batch far smaller than the backlog. Under strict
+    // oldest-first this claims twenty backlog rows and the new one is
+    // untouched — this tick, and every tick after it.
+    const result = await processDueNotifications({ batchSize: BATCH })
+
+    const { rows: [after] } = await pool.query(
+      'SELECT status, attempts FROM ochr_scheduled_notifications WHERE id = $1', [fresh.id]
+    )
+    expect(after.status).toBe('sent')
+    expect(after.attempts).toBe(1)
+    expect(result.processed).toBeGreaterThan(0)
+  })
+
+  it('a row that has had a turn goes behind a row that has not', async () => {
+    const { rows: untried } = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM ochr_scheduled_notifications
+        WHERE status = 'pending' AND attempts = 0 AND send_at <= NOW()`
+    )
+    const { rows } = await pool.query(
+      `SELECT attempts FROM ochr_scheduled_notifications
+        WHERE status = 'pending' AND send_at <= NOW()
+        ORDER BY attempts ASC, send_at ASC LIMIT 1`
+    )
+    if (untried[0].n > 0) expect(rows[0].attempts).toBe(0)
+  })
+
+  it('the backlog still drains oldest-first among rows with the same history', async () => {
+    const { rows } = await pool.query(
+      `SELECT send_at FROM ochr_scheduled_notifications
+        WHERE organization_id = $1 AND status = 'pending' AND attempts = (
+          SELECT MIN(attempts) FROM ochr_scheduled_notifications
+           WHERE organization_id = $1 AND status = 'pending')
+        ORDER BY attempts ASC, send_at ASC LIMIT 2`,
+      [orgId]
+    )
+    if (rows.length === 2) {
+      expect(new Date(rows[0].send_at).getTime()).toBeLessThanOrEqual(new Date(rows[1].send_at).getTime())
+    }
+  })
+
+  it('A POISONED ROW IS PARKED, NOT CYCLED FOREVER', async () => {
+    const { rows: [poison] } = await pool.query(
+      `INSERT INTO ochr_scheduled_notifications
+         (organization_id, user_id, recipient_email, notification_type, vars, send_at, status, attempts, attempted_at)
+       VALUES ($1,$2,$3,'assignment_reminder','{}'::jsonb, NOW() - INTERVAL '1 hour', 'processing', $4, NOW() - INTERVAL '30 minutes')
+       RETURNING id`,
+      [orgId, userId, `drain-poison-${RUN_ID}@example.com`, MAX_ATTEMPTS]
+    )
+    const result = await processDueNotifications({ batchSize: 1 })
+    expect(result.gaveUp).toBeGreaterThanOrEqual(1)
+
+    const { rows: [after] } = await pool.query(
+      'SELECT status, error FROM ochr_scheduled_notifications WHERE id = $1', [poison.id]
+    )
+    expect(after.status).toBe('failed')
+    expect(after.error).toMatch(/never confirmed after \d+ attempts/)
+  })
+
+  it('a stranded row that has NOT exhausted its attempts still comes back', async () => {
+    // Falsification of the guard above: the reaper must still rescue the
+    // ordinary case, or the fix has traded starvation for silent loss.
+    const { rows: [rescued] } = await pool.query(
+      `INSERT INTO ochr_scheduled_notifications
+         (organization_id, user_id, recipient_email, notification_type, vars, send_at, status, attempts, attempted_at)
+       VALUES ($1,$2,$3,'assignment_reminder','{}'::jsonb, NOW() - INTERVAL '1 hour', 'processing', 1, NOW() - INTERVAL '30 minutes')
+       RETURNING id`,
+      [orgId, userId, `drain-rescue-${RUN_ID}@example.com`]
+    )
+    await processDueNotifications({ batchSize: 0 })
+    const { rows: [after] } = await pool.query(
+      'SELECT status FROM ochr_scheduled_notifications WHERE id = $1', [rescued.id]
+    )
+    expect(after.status).toBe('pending')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────
+// Release truth (RELIABILITY 1.1)
+// ─────────────────────────────────────────────────────────────────────────
+describe('release truth — the running build can say what it is', () => {
+  it('health reports the commit, the environment and the applied migration', async () => {
+    const res = await request(server).get('/api/health')
+    expect(res.status).toBe(200)
+    expect(res.body.status).toBe('ok')
+    expect(typeof res.body.commit).toBe('string')
+    expect(typeof res.body.environment).toBe('string')
+    // The migration is read from the database, not from a constant, so a
+    // build whose schema is behind its code says so.
+    expect(res.body.migration).toMatch(/^\d{3}-/)
+  })
+
+  // Production carried a `999-race-sim` row for an unknown stretch. It is in
+  // no commit — `git log --all -S'race-sim'` is empty — so an ad-hoc script
+  // wrote it straight into the ledger. The old query sorted the WHOLE ledger
+  // by name, '999' outranked '092', and this field reported the sentinel
+  // instead of the truth for as long as it sat there. Nothing caught it:
+  // prod-health.yml reads only `status` and `db`, so a health check whose
+  // one job is reporting schema/code disagreement went quietly dead, and it
+  // surfaced on 2026-08-25 only because somebody read the payload by eye.
+  it('A LEDGER ROW THIS BUILD DOES NOT SHIP CANNOT MASK THE APPLIED MIGRATION', async () => {
+    await pool.query(
+      `INSERT INTO ochr_schema_migrations (name) VALUES ('999-race-sim')
+         ON CONFLICT (name) DO NOTHING`)
+    try {
+      const res = await request(server).get('/api/health')
+      expect(res.body.migration).not.toBe('999-race-sim')
+      expect(res.body.migration).toBe(res.body.migration_expected)
+    } finally {
+      await pool.query("DELETE FROM ochr_schema_migrations WHERE name = '999-race-sim'")
+    }
+  })
+
+  it('the bootstrap row cannot outrank the numbered chain', async () => {
+    // 'base' is a real, permanent ledger row, and 'b' > '0', so a lexical
+    // sort hands it the top spot over every numbered migration.
+    //
+    // TWO things independently stop that, and this asserts the OUTCOME
+    // rather than either mechanism: 'base' is not in the candidate list
+    // (NUMBERED_MIGRATION_NAMES excludes it), and array_position would rank
+    // it lowest anyway since it is first in the chain. Verified by removing
+    // them one at a time — each alone still passes — and together, which is
+    // the only combination that reports 'base'. Belt and braces on purpose:
+    // the filter is the one a future edit is likelier to drop.
+    const res = await request(server).get('/api/health')
+    expect(res.body.migration).not.toBe('base')
+    expect(res.body.migration).toMatch(/^\d{3}-/)
+  })
+
+  // THE SAME ROW, ASKED OF THE OTHER READER.
+  //
+  // The test above proves /api/health is immune. It was the only reader that
+  // got fixed. release/log.js asks the same question of the same table, and
+  // it is the one that DECIDES rather than reports: recordRelease() stamps
+  // every release row with this value, the (commit, environment, migration)
+  // conflict key is built from it, and scripts/release-rollback.mjs reads it
+  // to say what production is running before choosing a rollback target.
+  //
+  // Measured on 2026-08-25 against a real database with the sentinel present:
+  //   /api/health    → 092-recurring-retry-anchor
+  //   currentMigration() → 999-race-sim
+  //
+  // So the tool that exists to recover from a bad deploy was reading a row no
+  // commit contains as production's schema. Both now go through
+  // migrations/applied.js, which is the point — a second bounded COPY would
+  // have left the same gap open for a third reader.
+  it('THE DECIDING READER IGNORES THE SENTINEL TOO, NOT JUST THE REPORTING ONE', async () => {
+    await pool.query(
+      `INSERT INTO ochr_schema_migrations (name) VALUES ('999-race-sim')
+         ON CONFLICT (name) DO NOTHING`)
+    try {
+      const applied = await currentMigration()
+      expect(applied).not.toBe('999-race-sim')
+      expect(applied).toBe(EXPECTED_MIGRATION)
+
+      // And the value that actually lands in the release log, which is the
+      // thing rollback reads back.
+      _resetForTests()
+      const rec = await recordRelease(releaseInfo(), { force: true })
+      expect(rec.recorded?.migration).not.toBe('999-race-sim')
+      expect(rec.recorded?.migration).toBe(EXPECTED_MIGRATION)
+    } finally {
+      await pool.query("DELETE FROM ochr_schema_migrations WHERE name = '999-race-sim'")
+    }
+  })
+
+  // The class, not the instance. Two readers drifted because there were two
+  // implementations; this fails the moment a third one appears, whether it
+  // sorts the ledger by name or reaches past the candidate list.
+  it('NOTHING OUTSIDE migrations/applied.js READS THE LEDGER FOR A VERSION', async () => {
+    const { readdirSync, statSync, readFileSync } = await import('node:fs')
+    const { join } = await import('node:path')
+    const walk = (dir, out = []) => {
+      for (const n of readdirSync(dir)) {
+        const f = join(dir, n)
+        if (statSync(f).isDirectory()) walk(f, out)
+        else if (f.endsWith('.js') || f.endsWith('.mjs')) out.push(f)
+      }
+      return out
+    }
+    const roots = [
+      new URL('../src', import.meta.url).pathname,
+      new URL('../../scripts', import.meta.url).pathname,
+    ]
+    // index.js legitimately reads the whole ledger — it is the RUNNER, and it
+    // must see rows this build does not ship in order to skip them. applied.js
+    // is the one bounded reader. Everything else asks applied.js.
+    const ALLOWED = ['migrations/applied.js', 'migrations/index.js']
+    const offenders = []
+    for (const root of roots) {
+      for (const file of walk(root)) {
+        if (ALLOWED.some(a => file.replaceAll('\\', '/').endsWith(a))) continue
+        const src = readFileSync(file, 'utf8')
+        if (!/FROM\s+ochr_schema_migrations/i.test(src)) continue
+        offenders.push(file.split('/src/').pop() ?? file)
+      }
+    }
+    expect(offenders).toEqual([])
+  })
+
+  it('reports what the build EXPECTS, so a schema behind its code is visible', async () => {
+    const res = await request(server).get('/api/health')
+    expect(res.body.migration_expected).toMatch(/^\d{3}-/)
+    // A fully migrated database agrees with itself; the value of the field is
+    // that a half-applied deploy does not.
+    expect(res.body.migration).toBe(res.body.migration_expected)
+  })
+
+  it('A BUILD THAT DOES NOT KNOW ITS COMMIT SAYS SO RATHER THAN GUESSING', async () => {
+    const prev = process.env.VERCEL_GIT_COMMIT_SHA
+    delete process.env.VERCEL_GIT_COMMIT_SHA
+    try {
+      const res = await request(server).get('/api/health')
+      expect(res.body.commit).toBe('unknown')
+      expect(res.body.commit_short).toBe('unknown')
+    } finally {
+      if (prev !== undefined) process.env.VERCEL_GIT_COMMIT_SHA = prev
+    }
+  })
+
+  it('reports the commit when the platform provides one', async () => {
+    const prev = process.env.VERCEL_GIT_COMMIT_SHA
+    process.env.VERCEL_GIT_COMMIT_SHA = '0123456789abcdef0123456789abcdef01234567'
+    try {
+      const res = await request(server).get('/api/health')
+      expect(res.body.commit).toBe('0123456789abcdef0123456789abcdef01234567')
+      expect(res.body.commit_short).toBe('0123456')
+    } finally {
+      if (prev === undefined) delete process.env.VERCEL_GIT_COMMIT_SHA
+      else process.env.VERCEL_GIT_COMMIT_SHA = prev
+    }
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────
+// The off-site artifact is restorable (RELIABILITY 1.3)
+//
+// Both of these were found by actually restoring a backup
+// (scripts/offsite-restore-drill.mjs) rather than by reading the code,
+// after months of producing one every Saturday and never opening one.
+// ─────────────────────────────────────────────────────────────────────────
+describe('off-site backup — the artifact can be put back', () => {
+  let orgId
+
+  beforeAll(async () => {
+    const { rows } = await pool.query(
+      'SELECT organization_id FROM ochr_users WHERE email = $1', [orgA.email])
+    orgId = rows[0].organization_id
+  })
+
+  it('CARRIES NO COLUMN POSTGRES COMPUTES FOR ITSELF', async () => {
+    // A generated column cannot be inserted on the way back. Shipping one
+    // meant every member row and every giving row in the weekly backup
+    // failed to restore — the two tables a parish would most want.
+    const dump = await buildOrgExport(orgId)
+    const { rows: generated } = await pool.query(`
+      SELECT table_name, column_name FROM information_schema.columns
+       WHERE table_schema = 'public'
+         AND (is_generated <> 'NEVER' OR is_identity <> 'NO')`)
+    const offenders = []
+    for (const { table_name, column_name } of generated) {
+      for (const row of dump.tables[table_name] ?? []) {
+        if (column_name in row) offenders.push(`${table_name}.${column_name}`)
+      }
+    }
+    expect([...new Set(offenders)]).toEqual([])
+  })
+
+  it('EXPORTS RECORDS, NOT VIEWS OF RECORDS', async () => {
+    // Three ochr_* views carry organization_id. Exporting one ships the
+    // same rows twice and makes the restore try to INSERT into a view.
+    const dump = await buildOrgExport(orgId)
+    const { rows: views } = await pool.query(`
+      SELECT table_name FROM information_schema.tables
+       WHERE table_schema = 'public' AND table_type <> 'BASE TABLE'
+         AND table_name LIKE 'ochr\\_%' ESCAPE '\\'`)
+    const exported = views.map(v => v.table_name).filter(v => v in dump.tables)
+    expect(exported).toEqual([])
+  })
+
+  it('still carries the records a parish would actually want back', async () => {
+    // Falsification of the two guards above: an export that satisfies
+    // them by being empty would satisfy them perfectly.
+    const dump = await buildOrgExport(orgId)
+    expect(Object.keys(dump.tables).length).toBeGreaterThan(20)
+    expect(dump.tables.ochr_clients).toBeDefined()
+    expect(dump.tables.ochr_donations).toBeDefined()
+    expect(dump.tables.ochr_sacramental_records).toBeDefined()
+    // …and still refuses to carry credentials.
+    expect(JSON.stringify(dump.tables.ochr_users ?? [])).not.toMatch(/password_hash/)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────
+// Migration Studio pilot safeguards (MIG.1.1)
+//
+// Three questions before a real parish's file goes in:
+//   · does the second copy of their roster expire, and does the record of
+//     what happened survive that expiry?
+//   · can a parish read every message in their own language, especially
+//     the ones that appear when something is wrong?
+//   · are the boundaries the Studio claims actually held?
+// ─────────────────────────────────────────────────────────────────────────
+describe('Migration Studio — staged-row retention (MIG.1.1)', () => {
+  let orgAId, orgBId, adminTok, staffTok, otherTok
+  let committedBatch, abandonedBatch, freshBatch, otherOrgBatch
+
+  const csv = (tag) => [
+    'Name,Email',
+    `Retention One ${tag},ret1_${tag}@example.com`,
+    `Retention Two ${tag},ret2_${tag}@example.com`,
+  ].join('\n')
+
+  const age = async (batchId, days) => {
+    // Push the batch's clock back without touching its rows: exactly what
+    // thirty days of nobody opening it looks like.
+    await pool.query(
+      `UPDATE ochr_import_batches
+          SET created_at = created_at - ($2 || ' days')::interval,
+              updated_at = updated_at - ($2 || ' days')::interval,
+              committed_at = committed_at - ($2 || ' days')::interval
+        WHERE id = $1`, [batchId, String(days)])
+  }
+
+  const stage = async (tok, tag) => {
+    const up = await request(app).post('/api/imports').set('Authorization', `Bearer ${tok}`)
+      .send({ kind: 'members', source_name: `${tag}.csv`, csv: csv(tag) })
+    expect(up.status).toBe(201)
+    const map = await request(app).put(`/api/imports/${up.body.id}/mapping`)
+      .set('Authorization', `Bearer ${tok}`).send({ mapping: { Name: 'name', Email: 'email' } })
+    expect(map.status).toBe(200)
+    return up.body.id
+  }
+
+  beforeAll(async () => {
+    const { rows } = await pool.query(
+      'SELECT id, name FROM ochr_organizations WHERE name = ANY($1)',
+      [[orgA.organizationName, orgB.organizationName]])
+    orgAId = rows.find(r => r.name === orgA.organizationName).id
+    orgBId = rows.find(r => r.name === orgB.organizationName).id
+
+    const mk = async (payload, ip) => {
+      const r = await request(app).post('/api/auth/signup').set('X-Forwarded-For', ip).send(payload)
+      expect(r.status).toBe(201)
+      return r.body.token
+    }
+    adminTok = await mk({
+      organizationName: `Retention Parish ${RUN_ID}`, name: 'Rita Admin',
+      email: `ret_admin_${RUN_ID}@example.com`, password: 'mig-ret-pw-1' }, '10.55.21.1')
+    otherTok = await mk({
+      organizationName: `Neighbour Parish ${RUN_ID}`, name: 'Nora Admin',
+      email: `ret_other_${RUN_ID}@example.com`, password: 'mig-ret-pw-2' }, '10.55.21.2')
+
+    const sEmail = `ret_staff_${RUN_ID}@example.com`
+    await request(app).post('/api/users').set('Authorization', `Bearer ${adminTok}`)
+      .send({ name: 'Sam Staff', email: sEmail, password: 'mig-ret-pw-3', role: 'staff' })
+    staffTok = (await request(app).post('/api/auth/login').set('X-Forwarded-For', '10.55.21.3')
+      .send({ email: sEmail, password: 'mig-ret-pw-3' })).body.token
+
+    committedBatch = await stage(adminTok, `cm${RUN_ID}`)
+    const done = await request(app).post(`/api/imports/${committedBatch}/commit`)
+      .set('Authorization', `Bearer ${adminTok}`)
+    expect(done.status).toBe(200)
+
+    abandonedBatch = await stage(adminTok, `ab${RUN_ID}`)
+    await request(app).post(`/api/imports/${abandonedBatch}/abandon`).set('Authorization', `Bearer ${adminTok}`)
+
+    freshBatch = await stage(adminTok, `fr${RUN_ID}`)
+    otherOrgBatch = await stage(otherTok, `ot${RUN_ID}`)
+  })
+
+  it('a batch says whether its rows are still here, and until when', async () => {
+    const res = await request(app).get(`/api/imports/${freshBatch}`).set('Authorization', `Bearer ${adminTok}`)
+    expect(res.status).toBe(200)
+    expect(res.body.rows_available).toBe(true)
+    expect(res.body.rows_purged_at).toBeNull()
+    expect(res.body.rows_available_until).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+    expect(res.body.retention_days).toBe(30)
+    // The policy sentence, in both languages, from the server.
+    expect(res.body.retention.en).toMatch(/kept for 30 days/)
+    expect(res.body.retention.es).toMatch(/30 días/)
+  })
+
+  it('nothing is purged before the window is up', async () => {
+    await age(freshBatch, 29)
+    const r = await pruneOldRecords()
+    const { rows } = await pool.query(
+      'SELECT rows_purged_at FROM ochr_import_batches WHERE id = $1', [freshBatch])
+    expect(rows[0].rows_purged_at).toBeNull()
+    const { rows: still } = await pool.query(
+      'SELECT COUNT(*)::int AS n FROM ochr_import_rows WHERE batch_id = $1', [freshBatch])
+    expect(still[0].n).toBe(2)
+    expect(r).toHaveProperty('import_rows_purged')
+  })
+
+  it('THE RAW ROWS GO AFTER 30 DAYS — COMMITTED, ABANDONED, OR NEITHER', async () => {
+    await age(committedBatch, 40)
+    await age(abandonedBatch, 40)
+    await age(freshBatch, 40)           // uncommitted, never finished
+
+    const result = await pruneOldRecords()
+    expect(result.import_batches_purged).toBeGreaterThanOrEqual(3)
+    expect(result.import_rows_purged).toBeGreaterThanOrEqual(6)
+
+    for (const id of [committedBatch, abandonedBatch, freshBatch]) {
+      const { rows: left } = await pool.query(
+        'SELECT COUNT(*)::int AS n FROM ochr_import_rows WHERE batch_id = $1', [id])
+      expect(left[0].n).toBe(0)
+      const { rows: [b] } = await pool.query(
+        'SELECT rows_purged_at, rows_purged_count, status FROM ochr_import_batches WHERE id = $1', [id])
+      expect(b.rows_purged_at).not.toBeNull()
+      expect(b.rows_purged_count).toBe(2)
+      // NOT relabelled. A committed import is still committed.
+      expect(['committed', 'abandoned', 'mapped']).toContain(b.status)
+      expect(b.status).not.toBe('archived')
+    }
+  })
+
+  it('THE RECEIPT AND ITS COUNTS SURVIVE THE PURGE', async () => {
+    const res = await request(app).get(`/api/imports/${committedBatch}`).set('Authorization', `Bearer ${adminTok}`)
+    expect(res.status).toBe(200)
+    expect(res.body.status).toBe('committed')
+    expect(res.body.receipt.imported).toBe(2)
+    expect(res.body.receipt.row_count).toBe(2)
+    expect(res.body.receipt.prepared_by.name).toBe('Rita Admin')
+    expect(res.body.receipt.approved_by.name).toBe('Rita Admin')
+    expect(res.body.receipt.source_name).toContain('.csv')
+    expect(res.body.summary.total).toBe(2)
+    // …and it says, on the artifact, what happened to the rows.
+    expect(res.body.receipt.protection.staged_rows).toMatch(/30 days/)
+    expect(res.body.rows_available).toBe(false)
+    expect(res.body.rows_purged_count).toBe(2)
+  })
+
+  it('PURGING DOES NOT TOUCH THE RECORDS THE IMPORT CREATED', async () => {
+    const { rows } = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM ochr_clients
+        WHERE organization_id = (SELECT organization_id FROM ochr_import_batches WHERE id = $1)
+          AND name LIKE $2`,
+      [committedBatch, `Retention%cm${RUN_ID}`])
+    expect(rows[0].n).toBe(2)
+  })
+
+  it('asking for the rows explains where they went — it does not show an empty file', async () => {
+    const res = await request(app).get(`/api/imports/${committedBatch}/rows`)
+      .set('Authorization', `Bearer ${adminTok}`)
+    expect(res.status).toBe(410)
+    expect(res.body.code).toBe('import.rows_purged')
+    expect(res.body.rows_available).toBe(false)
+    expect(res.body.message.en).toMatch(/no longer kept/)
+    expect(res.body.message.es).toMatch(/Ya no se conservan/)
+    expect(res.body.message.en).toMatch(/receipt for this import is still here/)
+  })
+
+  it('AN IMPORT WHOSE ROWS EXPIRED CANNOT BE APPROVED, AND SAYS WHY', async () => {
+    // freshBatch was mapped and never committed; its rows have now gone.
+    const res = await request(app).post(`/api/imports/${freshBatch}/commit`)
+      .set('Authorization', `Bearer ${adminTok}`)
+    expect(res.status).toBe(409)
+    expect(res.body.code).toBe('import.rows_purged_cannot_commit')
+    expect(res.body.message.es).toMatch(/ya no se puede aprobar/i)
+    // Falsification: no records appeared from the attempt.
+    const { rows } = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM ochr_clients WHERE name LIKE $1`, [`Retention%fr${RUN_ID}`])
+    expect(rows[0].n).toBe(0)
+  })
+
+  it('A FAILED COMMIT IS STILL RECOVERABLE INSIDE THE WINDOW', async () => {
+    // The other half of the rule above: before the window closes, a batch
+    // that was prepared and not approved is still there to approve.
+    const id = await stage(adminTok, `rc${RUN_ID}`)
+    await age(id, 20)
+    await pruneOldRecords()
+    const rows = await request(app).get(`/api/imports/${id}/rows`).set('Authorization', `Bearer ${adminTok}`)
+    expect(rows.status).toBe(200)
+    expect(rows.body.rows.length).toBe(2)
+    const done = await request(app).post(`/api/imports/${id}/commit`).set('Authorization', `Bearer ${adminTok}`)
+    expect(done.status).toBe(200)
+    expect(done.body.receipt.imported).toBe(2)
+  })
+
+  it('THE PURGE CANNOT REACH ANOTHER PARISH', async () => {
+    // The neighbour's batch is young. A sweep that ran across every
+    // parish must have left it entirely alone.
+    const { rows } = await pool.query(
+      'SELECT COUNT(*)::int AS n FROM ochr_import_rows WHERE batch_id = $1', [otherOrgBatch])
+    expect(rows[0].n).toBe(2)
+    const { rows: [b] } = await pool.query(
+      'SELECT rows_purged_at FROM ochr_import_batches WHERE id = $1', [otherOrgBatch])
+    expect(b.rows_purged_at).toBeNull()
+  })
+
+  it('running the prune again does nothing', async () => {
+    const before = await pool.query(
+      'SELECT rows_purged_at, rows_purged_count FROM ochr_import_batches WHERE id = $1', [committedBatch])
+    const result = await pruneOldRecords()
+    const after = await pool.query(
+      'SELECT rows_purged_at, rows_purged_count FROM ochr_import_batches WHERE id = $1', [committedBatch])
+    expect(after.rows[0].rows_purged_at.toISOString()).toBe(before.rows[0].rows_purged_at.toISOString())
+    expect(after.rows[0].rows_purged_count).toBe(before.rows[0].rows_purged_count)
+    expect(result.import_batches_purged).toBe(0)
+  })
+
+  it('the purge is in the parish’s audit history', async () => {
+    const { rows } = await pool.query(
+      `SELECT summary, user_name, metadata FROM ochr_audit_log
+        WHERE entity_type = 'import_batch' AND entity_id = $1 AND action = 'delete'
+          AND user_id IS NULL
+        ORDER BY created_at DESC LIMIT 1`,
+      [String(committedBatch)])
+    expect(rows.length).toBe(1)
+    expect(rows[0].user_name).toMatch(/retention policy/i)
+    expect(rows[0].summary).toMatch(/Removed 2 staged row/)
+    expect(rows[0].metadata.retention_days).toBe(30)
+  })
+})
+
+describe('Migration Studio — the boundaries it claims (MIG.1.1)', () => {
+  let tok, orgId
+
+  beforeAll(async () => {
+    const r = await request(app).post('/api/auth/signup').set('X-Forwarded-For', '10.55.23.1')
+      .send({ organizationName: `Boundary Parish ${RUN_ID}`, name: 'Bo Admin',
+              email: `bnd_admin_${RUN_ID}@example.com`, password: 'mig-bnd-pw-1' })
+    expect(r.status).toBe(201)
+    tok = r.body.token
+    orgId = r.body.user.organization.id
+  })
+
+  it('PREVIEW WRITES NOTHING AUTHORITATIVE', async () => {
+    const before = await pool.query(
+      `SELECT (SELECT COUNT(*)::int FROM ochr_clients   WHERE organization_id = $1) AS c,
+              (SELECT COUNT(*)::int FROM ochr_funds     WHERE organization_id = $1) AS f,
+              (SELECT COUNT(*)::int FROM ochr_donations WHERE organization_id = $1) AS d`, [orgId])
+    const up = await request(app).post('/api/imports').set('Authorization', `Bearer ${tok}`)
+      .send({ kind: 'members', source_name: 'p.csv',
+              csv: ['Name,Email', `Preview Person ${RUN_ID},pv_${RUN_ID}@example.com`].join('\n') })
+    await request(app).put(`/api/imports/${up.body.id}/mapping`)
+      .set('Authorization', `Bearer ${tok}`).send({ mapping: { Name: 'name', Email: 'email' } })
+    await request(app).get(`/api/imports/${up.body.id}/rows`).set('Authorization', `Bearer ${tok}`)
+    const after = await pool.query(
+      `SELECT (SELECT COUNT(*)::int FROM ochr_clients   WHERE organization_id = $1) AS c,
+              (SELECT COUNT(*)::int FROM ochr_funds     WHERE organization_id = $1) AS f,
+              (SELECT COUNT(*)::int FROM ochr_donations WHERE organization_id = $1) AS d`, [orgId])
+    expect(after.rows[0]).toEqual(before.rows[0])
+  })
+
+  it('NO IMPORT CONTENT REACHES AN AI SERVICE', async () => {
+    // Two checks, because either alone is weak. The static one is the
+    // durable guarantee: the route cannot call what it does not import.
+    const src = await readFile(new URL('../src/routes/imports.js', import.meta.url), 'utf8')
+    expect(src).not.toMatch(/from '\.\.\/ai\//)
+    expect(src).not.toMatch(/anthropic|openai|generateText|callModel/i)
+
+    const before = await pool.query(
+      'SELECT COUNT(*)::int AS n FROM ochr_ai_usage WHERE organization_id = $1', [orgId])
+    const up = await request(app).post('/api/imports').set('Authorization', `Bearer ${tok}`)
+      .send({ kind: 'members', source_name: 'ai.csv',
+              csv: ['Name,Notes', `Private Person ${RUN_ID},a pastoral note nobody should send anywhere`].join('\n') })
+    await request(app).put(`/api/imports/${up.body.id}/mapping`)
+      .set('Authorization', `Bearer ${tok}`).send({ mapping: { Name: 'name', Notes: null } })
+    await request(app).post(`/api/imports/${up.body.id}/commit`).set('Authorization', `Bearer ${tok}`)
+    const after = await pool.query(
+      'SELECT COUNT(*)::int AS n FROM ochr_ai_usage WHERE organization_id = $1', [orgId])
+    expect(after.rows[0].n).toBe(before.rows[0].n)
+  })
+
+  it('IMPORTED RECORDS KEEP THEIR ARCHIVE & RECOVERY PROTECTION', async () => {
+    const up = await request(app).post('/api/imports').set('Authorization', `Bearer ${tok}`)
+      .send({ kind: 'members', source_name: 'v.csv', csv: ['Name', `Vault Import ${RUN_ID}`].join('\n') })
+    await request(app).put(`/api/imports/${up.body.id}/mapping`)
+      .set('Authorization', `Bearer ${tok}`).send({ mapping: { Name: 'name' } })
+    const done = await request(app).post(`/api/imports/${up.body.id}/commit`).set('Authorization', `Bearer ${tok}`)
+    expect(done.status).toBe(200)
+
+    const { rows: [member] } = await pool.query(
+      'SELECT id FROM ochr_clients WHERE organization_id = $1 AND name = $2', [orgId, `Vault Import ${RUN_ID}`])
+    const del = await request(app).delete(`/api/clients/${member.id}`).set('Authorization', `Bearer ${tok}`)
+    expect(del.status).toBe(204)
+
+    const vault = await request(app).get('/api/vault').set('Authorization', `Bearer ${tok}`)
+    const entry = vault.body.entries.find(e => e.entity_id === String(member.id))
+    expect(entry).toBeTruthy()
+    const back = await request(app).post(`/api/vault/${entry.id}/restore`).set('Authorization', `Bearer ${tok}`)
+    expect(back.status).toBe(200)
+    const { rows } = await pool.query('SELECT name FROM ochr_clients WHERE id = $1', [member.id])
+    expect(rows[0].name).toBe(`Vault Import ${RUN_ID}`)
+  })
+
+  it('ANOTHER PARISH’S STAFF CANNOT SEE, PREPARE, OR APPROVE THIS IMPORT', async () => {
+    // The standing rule the assisted-onboarding note is written against:
+    // there is no vendor or support path into a parish's import today.
+    const other = await request(app).post('/api/auth/signup').set('X-Forwarded-For', '10.55.23.2')
+      .send({ organizationName: `Vendor-ish Org ${RUN_ID}`, name: 'Support Person',
+              email: `bnd_vendor_${RUN_ID}@example.com`, password: 'mig-bnd-pw-2' })
+    const outsider = other.body.token
+
+    const up = await request(app).post('/api/imports').set('Authorization', `Bearer ${tok}`)
+      .send({ kind: 'members', source_name: 'iso.csv', csv: ['Name', `Isolated ${RUN_ID}`].join('\n') })
+    const id = up.body.id
+
+    const list = await request(app).get('/api/imports').set('Authorization', `Bearer ${outsider}`)
+    expect(list.body.batches.some(b => b.id === id)).toBe(false)
+    for (const [method, path] of [['get', `/api/imports/${id}`], ['get', `/api/imports/${id}/rows`]]) {
+      const r = await request(app)[method](path).set('Authorization', `Bearer ${outsider}`)
+      expect(r.status).toBe(404)
+    }
+    const map = await request(app).put(`/api/imports/${id}/mapping`)
+      .set('Authorization', `Bearer ${outsider}`).send({ mapping: { Name: 'name' } })
+    expect(map.status).toBe(404)
+    const commit = await request(app).post(`/api/imports/${id}/commit`).set('Authorization', `Bearer ${outsider}`)
+    expect(commit.status).toBe(404)
+  })
+})
+
+describe('the fund a gift belongs to decides its account (FIN.086)', () => {
+  let tok, orgId, roofFund, plateFund
+  const P = { start: '2026-02-01', end: '2026-02-28' }
+
+  const money = async () => {
+    const res = await request(app).get(`/api/finance/summary?start=${P.start}&end=${P.end}`)
+      .set('Authorization', `Bearer ${tok}`)
+    return res.body
+  }
+
+  beforeAll(async () => {
+    const r = await request(app).post('/api/auth/signup').set('X-Forwarded-For', '10.55.31.1')
+      .send({ organizationName: `Fund Map Parish ${RUN_ID}`, name: 'Fina Admin',
+              email: `fm_admin_${RUN_ID}@example.com`, password: 'fin-map-pw-1' })
+    expect(r.status).toBe(201)
+    tok = r.body.token
+    orgId = r.body.user.organization.id
+
+    const mk = async (name) => {
+      const f = await request(app).post('/api/funds').set('Authorization', `Bearer ${tok}`).send({ name })
+      return f.body.fund?.id ?? f.body.id
+    }
+    roofFund  = await mk(`Roof Repair ${RUN_ID}`)
+    plateFund = await mk(`Sunday Plate ${RUN_ID}`)
+
+    // Two gifts to each fund, same period, no categories typed at all —
+    // which is what a parish that uses funds properly actually looks like.
+    for (const [fund, amount] of [[roofFund, 5000], [roofFund, 2500], [plateFund, 400], [plateFund, 600]]) {
+      const d = await request(app).post('/api/donations').set('Authorization', `Bearer ${tok}`)
+        .send({ donor_name: 'A Giver', amount, date: '2026-02-08', fund_id: fund })
+      expect(d.status).toBeLessThan(300)
+    }
+  })
+
+  it('4450 restricted gifts exists in the standard chart, and is NOT assessable', async () => {
+    const res = await request(app).get('/api/finance/coa').set('Authorization', `Bearer ${tok}`)
+    const a = (res.body.accounts ?? res.body.coa ?? []).find(x => x.code === '4450')
+    expect(a).toBeTruthy()
+    expect(a.acct_type).toBe('revenue')
+    expect(a.assessable).toBe(false)
+  })
+
+  it('before mapping, EVERY gift lands in assessable revenue', async () => {
+    // The state of the world this migration exists to fix, asserted so
+    // the fix has something to be different from.
+    const before = await money()
+    expect(Number(before.totals.assessable_base)).toBe(8500)
+  })
+
+  it('the mappings screen offers the funds, with what is at stake', async () => {
+    const res = await request(app).get('/api/finance/mappings').set('Authorization', `Bearer ${tok}`)
+    expect(res.status).toBe(200)
+    const roof = res.body.funds.find(f => f.id === roofFund)
+    expect(roof.name).toBe(`Roof Repair ${RUN_ID}`)
+    expect(roof.gift_count).toBe(2)
+    expect(Number(roof.gift_total)).toBe(7500)
+  })
+
+  it('MAPPING THE FUND TAKES ITS GIFTS OUT OF THE ASSESSABLE BASE', async () => {
+    const put = await request(app).put('/api/finance/mappings').set('Authorization', `Bearer ${tok}`)
+      .send({ mappings: [{ source_type: 'fund', source_key: String(roofFund), account_code: '4450' }] })
+    expect(put.status).toBeLessThan(300)
+
+    const after = await money()
+    // The restricted roof money is still revenue…
+    expect(Number(after.totals.revenue)).toBe(8500)
+    // …but only the plate is assessable.
+    expect(Number(after.totals.assessable_base)).toBe(1000)
+  })
+
+  it('THE FUND BEATS A TYPED CATEGORY, because a fund is a record and a category is a string', async () => {
+    // Somebody also maps the category these gifts happen to carry to an
+    // assessable account. The designation must win.
+    await request(app).post('/api/donations').set('Authorization', `Bearer ${tok}`)
+      .send({ donor_name: 'B Giver', amount: 1000, date: '2026-02-10',
+              fund_id: roofFund, category: `Building ${RUN_ID}` })
+    await request(app).put('/api/finance/mappings').set('Authorization', `Bearer ${tok}`)
+      .send({ mappings: [{ source_type: 'donation_category', source_key: `Building ${RUN_ID}`, account_code: '4410' }] })
+
+    const after = await money()
+    expect(Number(after.totals.revenue)).toBe(9500)
+    expect(Number(after.totals.assessable_base)).toBe(1000)   // the new gift did NOT join it
+  })
+
+  it('a gift with no fund still follows its category, exactly as before', async () => {
+    await request(app).post('/api/donations').set('Authorization', `Bearer ${tok}`)
+      .send({ donor_name: 'C Giver', amount: 200, date: '2026-02-11', category: `Building ${RUN_ID}` })
+    const after = await money()
+    expect(Number(after.totals.assessable_base)).toBe(1200)   // 4410 is assessable
+  })
+
+  it('unmapping the fund puts the money back', async () => {
+    await request(app).put('/api/finance/mappings').set('Authorization', `Bearer ${tok}`)
+      .send({ mappings: [{ source_type: 'fund', source_key: String(roofFund), account_code: '' }] })
+    const after = await money()
+    expect(Number(after.totals.assessable_base)).toBe(9700)
+    // …and put it back where it was, so the rest of the suite is unaffected.
+    await request(app).put('/api/finance/mappings').set('Authorization', `Bearer ${tok}`)
+      .send({ mappings: [{ source_type: 'fund', source_key: String(roofFund), account_code: '4450' }] })
+  })
+
+  it('A PARISH STILL CANNOT DECIDE WHAT IS ASSESSABLE', async () => {
+    // The invariant finance/effectiveCoa.js exists to protect. The parish
+    // chooses the BUCKET; whether the bucket counts is the diocese's, and
+    // this migration must not have handed that over. A parish row saying
+    // 4410 is not assessable must be ignored while a diocese is attached.
+    const src = await readFile(new URL('../src/migrations/086-fund-account-mapping.js', import.meta.url), 'utf8')
+    expect(src).not.toMatch(/ALTER TABLE ochr_funds/)
+    expect(src).not.toMatch(/assessable\s+BOOLEAN/)
+
+    // And no route lets a parish write assessability onto a fund.
+    const fundsSrc = await readFile(new URL('../src/routes/funds.js', import.meta.url), 'utf8')
+    expect(fundsSrc).not.toMatch(/assessable/)
+  })
+
+  it('the mapping is keyed on the fund id, so renaming a fund moves no money', async () => {
+    const before = await money()
+    await request(app).patch(`/api/funds/${roofFund}`).set('Authorization', `Bearer ${tok}`)
+      .send({ name: `Roof & Tower ${RUN_ID}` })
+    const after = await money()
+    expect(Number(after.totals.assessable_base)).toBe(Number(before.totals.assessable_base))
+  })
+})
+

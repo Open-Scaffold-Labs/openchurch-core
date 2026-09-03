@@ -13,6 +13,7 @@
 // ledger.
 
 import pool from '../db.js'
+import { MIGRATION_NAMES } from './names.js'
 import { migrate as baseMigrate, DEMO_ORG_SLUG } from '../migrate.js'
 import { seedSampleData } from '../onboarding/sampleSeed.js'
 import { up as bilingual }      from './001-bilingual.js'
@@ -89,6 +90,30 @@ import { up as tenantFkComposites } from './071-tenant-fk-composites.js'
 import { up as orgTradition } from './072-org-tradition.js'
 import { up as registerAmendments } from './073-register-amendments.js'
 import { up as parishCare } from './074-parish-care.js'
+import { up as tenantFkRepair } from './075-tenant-fk-repair.js'
+import { up as pastoralLead } from './076-pastoral-lead.js'
+import { up as staffInvitations } from './077-staff-invitations.js'
+import { up as demoWorkspace } from './078-demo-workspace.js'
+import { up as continuityVault } from './079-continuity-vault.js'
+import { up as rlsSweep }        from './080-rls-sweep.js'
+import { up as notificationFairness } from './081-notification-fairness.js'
+import { up as migrationStudio } from './082-migration-studio.js'
+import { up as importBatchTenantFk } from './083-import-batch-tenant-fk.js'
+import { up as importRetention } from './084-import-retention.js'
+import { up as importUndo } from './085-import-undo.js'
+import { up as fundAccountMapping } from './086-fund-account-mapping.js'
+import { up as assessmentBands } from './087-assessment-bands.js'
+import { up as parishSetup } from './088-parish-setup.js'
+import { up as releaseLog } from './089-release-log.js'
+import { up as ledgerExcludesRefunds } from './090-ledger-excludes-refunds.js'
+import { up as recurringGiftFailures } from './091-recurring-gift-failures.js'
+import { up as recurringRetryAnchor } from './092-recurring-retry-anchor.js'
+import { up as orgLocale } from './093-org-locale.js'
+import { up as affiliationReinvite } from './094-affiliation-reinvite.js'
+import { up as languageLookupIndex } from './095-language-lookup-index.js'
+import { up as emailSuppressions } from './096-email-suppressions.js'
+import { up as donorEmailLowerIndex } from './097-donor-email-lower-index.js'
+import { up as submissionNoOverlap } from './098-submission-no-overlap.js'
 
 // The ordered chain, each with a stable ledger name. baseMigrate runs
 // FIRST because it creates the core tables (organizations, users, and the
@@ -170,7 +195,49 @@ const MIGRATIONS = [
   ['072-org-tradition',        orgTradition],
   ['073-register-amendments',  registerAmendments],
   ['074-parish-care',          parishCare],
+  ['075-tenant-fk-repair',     tenantFkRepair],
+  ['076-pastoral-lead',        pastoralLead],
+  ['077-staff-invitations',    staffInvitations],
+  ['078-demo-workspace',       demoWorkspace],
+  ['079-continuity-vault',     continuityVault],
+  ['080-rls-sweep',            rlsSweep],
+  ['081-notification-fairness', notificationFairness],
+  ['082-migration-studio',     migrationStudio],
+  ['083-import-batch-tenant-fk', importBatchTenantFk],
+  ['084-import-retention',     importRetention],
+  ['085-import-undo',          importUndo],
+  ['086-fund-account-mapping', fundAccountMapping],
+  ['087-assessment-bands',     assessmentBands],
+  ['088-parish-setup',         parishSetup],
+  ['089-release-log',          releaseLog],
+  ['090-ledger-excludes-refunds', ledgerExcludesRefunds],
+  ['091-recurring-gift-failures', recurringGiftFailures],
+  ['092-recurring-retry-anchor', recurringRetryAnchor],
+  ['093-org-locale', orgLocale],
+  ['094-affiliation-reinvite', affiliationReinvite],
+  ['095-language-lookup-index', languageLookupIndex],
+  ['096-email-suppressions', emailSuppressions],
+  ['097-donor-email-lower-index', donorEmailLowerIndex],
+  ['098-submission-no-overlap', submissionNoOverlap],
 ]
+
+// names.js carries this same chain for /api/health, which needs the names
+// without paying to import ninety-odd migration modules on a cold start.
+// Two lists is two things to forget, so the drift is caught here rather
+// than discovered as a health check quietly reporting the wrong head.
+{
+  const here = MIGRATIONS.map(([name]) => name)
+  const drift = here.length !== MIGRATION_NAMES.length ||
+                here.some((name, i) => name !== MIGRATION_NAMES[i])
+  if (drift) {
+    throw new Error(
+      'migrations/names.js is out of step with the MIGRATIONS chain. ' +
+      `index.js has ${here.length} entries ending '${here.at(-1)}'; ` +
+      `names.js has ${MIGRATION_NAMES.length} ending '${MIGRATION_NAMES.at(-1)}'. ` +
+      'Add the migration to BOTH.'
+    )
+  }
+}
 
 // Fixed key for the session advisory lock. Any constant works as long as
 // it's the same across every process that runs migrations.
@@ -185,6 +252,51 @@ const MIGRATION_LOCK_KEY = 727274
 // being silently marked done without ever executing. Update this only when a
 // new baseline is intentionally established.
 const BASELINE_THROUGH = '042-service-plans'
+
+// Postgres error codes that mean "another runner created this object between
+// our IF NOT EXISTS check and our CREATE". They are not schema errors — they
+// are the signature of two migration runs overlapping.
+//
+// Overlap is possible despite the advisory lock: through Supabase's
+// transaction-mode pooler the session lock is best-effort (see the note in
+// runAllMigrations), and `node --watch` restarts can leave the outgoing
+// process still migrating while the incoming one starts. That is exactly what
+// happened to 084 on 2026-08-20 — CREATE INDEX IF NOT EXISTS is a check and a
+// create, not one atomic step, so both runs passed the check and the loser
+// raised 23505 on pg_class_relname_nsp_index.
+const CONCURRENT_DDL_CODES = new Set([
+  '23505', // unique_violation — typically pg_class_relname_nsp_index
+  '42P07', // duplicate_table (indexes live in pg_class too)
+  '42710', // duplicate_object
+  '42701', // duplicate_column
+])
+
+// Run one migration, tolerating a loss to a concurrent runner but never
+// tolerating a genuine failure.
+//
+// On a collision we do NOT assume the other runner finished the job. We
+// re-read the ledger: if the other run recorded the migration, it completed
+// and we can move on. If it did not, we retry the up() once — by then the
+// objects it raced us over exist, so the IF NOT EXISTS clauses no-op and the
+// remainder applies. A second failure is real and propagates.
+async function applyMigration(client, name, up, ctx) {
+  try {
+    await up(ctx)
+    return
+  } catch (err) {
+    if (!CONCURRENT_DDL_CODES.has(err?.code)) throw err
+
+    const { rows } = await client.query(
+      'SELECT 1 FROM ochr_schema_migrations WHERE name = $1', [name])
+    if (rows.length > 0) {
+      console.log(`  ${name}: applied concurrently by another runner — continuing.`)
+      return
+    }
+
+    console.warn(`  ${name}: lost a DDL race (${err.code}); retrying once.`)
+    await up(ctx)
+  }
+}
 
 export async function runAllMigrations() {
   // Run the whole thing on ONE dedicated connection. pg_advisory_lock is
@@ -259,11 +371,21 @@ export async function runAllMigrations() {
 
     for (const [name, up] of MIGRATIONS) {
       if (done.has(name)) continue
-      await up(ctx)
+      await applyMigration(client, name, up, ctx)
       await client.query(
         'INSERT INTO ochr_schema_migrations (name) VALUES ($1) ON CONFLICT (name) DO NOTHING',
         [name]
       )
+    }
+
+    // The ledger is only honest if every migration we were asked to run is in
+    // it. A gap here means one was skipped without raising — the failure mode
+    // that leaves a database serving traffic on a schema nobody verified.
+    const { rows: ledgerNow } = await client.query('SELECT name FROM ochr_schema_migrations')
+    const recorded = new Set(ledgerNow.map(r => r.name))
+    const missing = MIGRATIONS.map(([n]) => n).filter(n => !recorded.has(n))
+    if (missing.length > 0) {
+      throw new Error(`Migrations finished but are absent from the ledger: ${missing.join(', ')}`)
     }
 
     // Demo-org sample seed runs LAST so every column referenced by the

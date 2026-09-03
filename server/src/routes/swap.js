@@ -1,4 +1,5 @@
 import { Router } from 'express'
+import rateLimit from 'express-rate-limit'
 import crypto from 'crypto'
 import pool from '../db.js'
 import { monitor } from '../monitoring/index.js'
@@ -45,9 +46,11 @@ function generateToken() {
 async function resolveToken(client, token) {
   if (!TOKEN_RX.test(token ?? '')) return null
   const { rows } = await client.query(
-    `SELECT id, organization_id, name, email, reminders_opt_out
-       FROM ochr_clients
-      WHERE swap_token = $1`,
+    `SELECT c.id, c.organization_id, c.name, c.email, c.reminders_opt_out,
+            o.locale AS organization_locale
+       FROM ochr_clients c
+       JOIN ochr_organizations o ON o.id = c.organization_id
+      WHERE c.swap_token = $1`,
     [token]
   )
   return rows[0] ?? null
@@ -70,7 +73,65 @@ export const swapPublicRouter = Router()
 // GET /api/swap/by-token/:token
 //   Returns: { me, upcoming_assignments, swap_requests, roster }.
 //   Drives the public parishioner page in one round-trip.
-swapPublicRouter.get('/by-token/:token', async (req, res) => {
+// Swap links live in text messages and email, so they get forwarded. The
+// token itself is strong — 24 random bytes, 192 bits, not guessable — but
+// nothing bounded what a valid one could be used FOR. These two limiters and
+// the typeahead below are the difference between "a link somebody can use"
+// and "a link somebody can mine".
+const swapLinkLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests from this device. Please wait a moment.' },
+})
+
+const swapSearchLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000,
+  max: 40,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many lookups from this device. Please wait a moment.' },
+})
+
+// GET /api/swap/by-token/:token/members?q=<name>
+// Typeahead for "who do you want to swap with". Two characters minimum, ten
+// results, active members only, id and name only — the same shape the kiosk
+// uses. A member types the name of the person they already have in mind;
+// nobody needs to read the whole parish to arrange a swap.
+swapPublicRouter.get('/by-token/:token/members', swapSearchLimiter, async (req, res) => {
+  const c = await pool.connect()
+  try {
+    const me = await resolveToken(c, req.params.token)
+    if (!me) return res.status(404).json({ error: 'Unknown link' })
+
+    const q = typeof req.query.q === 'string' ? req.query.q.trim() : ''
+    if (q.length < 2) return res.json({ members: [] })
+
+    // Escape LIKE metacharacters so somebody typing '%' cannot turn their
+    // query into a wildcard that matches the directory after all.
+    const escaped = q.replace(/\\/g, '\\\\').replace(/[%_]/g, ch => `\\${ch}`)
+    const { rows } = await c.query(
+      `SELECT id, name
+         FROM ochr_clients
+        WHERE organization_id = $1
+          AND status = 'active'
+          AND id <> $2
+          AND name ILIKE $3
+        ORDER BY name ASC
+        LIMIT 10`,
+      [me.organization_id, me.id, `%${escaped}%`]
+    )
+    res.json({ members: rows })
+  } catch (err) {
+    monitor.error('swap.byToken.members', err)
+    res.status(500).json({ error: 'Failed to search members' })
+  } finally {
+    c.release()
+  }
+})
+
+swapPublicRouter.get('/by-token/:token', swapLinkLimiter, async (req, res) => {
   const c = await pool.connect()
   try {
     const me = await resolveToken(c, req.params.token)
@@ -106,24 +167,32 @@ swapPublicRouter.get('/by-token/:token', async (req, res) => {
       [me.organization_id, me.id]
     )
 
-    const { rows: roster } = await c.query(
-      `SELECT id, name, role
-         FROM ochr_clients
-        WHERE organization_id = $1
-          AND status = 'active'
-          AND id <> $2
-        ORDER BY name ASC`,
-      [me.organization_id, me.id]
-    )
-
+    // NO ROSTER. This used to return every active member — id, name and role
+    // — with no LIMIT and no rate limit, to anyone holding one member's link.
+    // Swap links are designed to be texted and forwarded, which is their
+    // whole point, so one shared link handed over the parish directory
+    // repeatedly and forever, until an admin thought to rotate that specific
+    // member's token. Forty rapid requests returned forty complete copies.
+    //
+    // The kiosk router had already solved exactly this and said why: members
+    // come from a query-gated typeahead so a token holder cannot slurp the
+    // directory in one request. Two routers, same threat, opposite answers.
+    // This one now matches the kiosk.
+    //
+    // `roster: []` stays in the shape so an older cached page degrades to an
+    // empty picker rather than throwing on undefined.
     res.json({
       me: {
         id: me.id, name: me.name, organization_id: me.organization_id,
         reminders_opt_out: me.reminders_opt_out === true,
       },
+      // The parish's language. A volunteer following a swap link is not
+      // signed in, so nothing else on this page can tell the client which
+      // language to speak.
+      org: { locale: me.organization_locale ?? 'en' },
       upcoming_assignments: assignments,
       swap_requests:        requests,
-      roster,
+      roster: [],
     })
   } catch (err) {
     monitor.error('swap.byToken.get', err)
@@ -138,7 +207,7 @@ swapPublicRouter.get('/by-token/:token', async (req, res) => {
 //   Lets a member turn their serving reminders off/on from their own
 //   token page — no login required (RM.2). The reminder sync skips any
 //   member with reminders_opt_out set.
-swapPublicRouter.patch('/by-token/:token/reminders', async (req, res) => {
+swapPublicRouter.patch('/by-token/:token/reminders', swapLinkLimiter, async (req, res) => {
   const optOut = req.body?.opt_out
   if (typeof optOut !== 'boolean') {
     return res.status(400).json({ error: 'opt_out must be a boolean' })
@@ -159,7 +228,7 @@ swapPublicRouter.patch('/by-token/:token/reminders', async (req, res) => {
 
 // POST /api/swap/by-token/:token/request
 //   Body: { calendar_event_id, target_client_id, note? }
-swapPublicRouter.post('/by-token/:token/request', async (req, res) => {
+swapPublicRouter.post('/by-token/:token/request', swapLinkLimiter, async (req, res) => {
   const c = await pool.connect()
   try {
     const me = await resolveToken(c, req.params.token)
@@ -243,7 +312,7 @@ swapPublicRouter.post('/by-token/:token/request', async (req, res) => {
 // POST /api/swap/by-token/:token/accept
 //   Body: { request_id }. Token must be the TARGET's. Atomically
 //   rewrites assigned_to and marks the request 'accepted'.
-swapPublicRouter.post('/by-token/:token/accept', async (req, res) => {
+swapPublicRouter.post('/by-token/:token/accept', swapLinkLimiter, async (req, res) => {
   const c = await pool.connect()
   let inTransaction = false
   try {
@@ -303,13 +372,16 @@ swapPublicRouter.post('/by-token/:token/accept', async (req, res) => {
     await c.query(
       `UPDATE ochr_swap_requests
           SET status = 'accepted', decided_at = NOW()
-        WHERE id = $1`,
+        WHERE id = $1
+        -- tenancy: r.id came from a row fetched and org-scoped earlier in this same transaction.`,
       [r.id]
     )
     await c.query('COMMIT'); inTransaction = false
 
     const { rows: req2 } = await c.query(
-      `SELECT email FROM ochr_clients WHERE id = $1`,
+      `SELECT email FROM ochr_clients WHERE id = $1
+       -- tenancy: the client id comes from a swap row this handler already
+       -- scoped to the caller's organization; used only to address a notification.`,
       [r.requester_client_id]
     )
     notify({
@@ -330,7 +402,7 @@ swapPublicRouter.post('/by-token/:token/accept', async (req, res) => {
 })
 
 // POST /api/swap/by-token/:token/decline
-swapPublicRouter.post('/by-token/:token/decline', async (req, res) => {
+swapPublicRouter.post('/by-token/:token/decline', swapLinkLimiter, async (req, res) => {
   const c = await pool.connect()
   try {
     const me = await resolveToken(c, req.params.token)
@@ -351,7 +423,9 @@ swapPublicRouter.post('/by-token/:token/decline', async (req, res) => {
       return res.status(404).json({ error: 'No pending request for you with that id' })
 
     const { rows: req2 } = await c.query(
-      `SELECT email FROM ochr_clients WHERE id = $1`,
+      `SELECT email FROM ochr_clients WHERE id = $1
+       -- tenancy: the client id comes from a swap row this handler already
+       -- scoped to the caller's organization; used only to address a notification.`,
       [rrows[0].requester_client_id]
     )
     notify({
@@ -371,7 +445,7 @@ swapPublicRouter.post('/by-token/:token/decline', async (req, res) => {
 })
 
 // POST /api/swap/by-token/:token/cancel
-swapPublicRouter.post('/by-token/:token/cancel', async (req, res) => {
+swapPublicRouter.post('/by-token/:token/cancel', swapLinkLimiter, async (req, res) => {
   const c = await pool.connect()
   try {
     const me = await resolveToken(c, req.params.token)
@@ -392,7 +466,9 @@ swapPublicRouter.post('/by-token/:token/cancel', async (req, res) => {
       return res.status(404).json({ error: 'No pending request from you with that id' })
 
     const { rows: tgt } = await c.query(
-      `SELECT email FROM ochr_clients WHERE id = $1`,
+      `SELECT email FROM ochr_clients WHERE id = $1
+       -- tenancy: the client id comes from a swap row this handler already
+       -- scoped to the caller's organization; used only to address a notification.`,
       [rrows[0].target_client_id]
     )
     notify({

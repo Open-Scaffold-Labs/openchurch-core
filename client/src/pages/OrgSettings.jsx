@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { motion } from 'framer-motion'
-import { Building2, AlertTriangle, Loader2, Globe, ExternalLink, Copy, Check, Bell, Cross, Plus, Trash2, Feather } from 'lucide-react'
+import { Building2, AlertTriangle, Loader2, Globe, ExternalLink, Copy, Check, Bell, Cross, Plus, Trash2, Feather, Languages } from 'lucide-react'
 import PageWrapper from '../components/PageWrapper'
 import EmptyState from '../components/EmptyState'
 import TextField from '../components/TextField'
@@ -10,6 +10,32 @@ import { useAuth } from '../context/AuthContext'
 import { apiUrl } from '../api'
 import { LIT_COLOR_DOT, LIT_COLORS, LIT_COLOR_DOT_NONE } from '../utils/liturgicalColors'
 import { useConfirm } from '../components/ConfirmProvider'
+import { useLocale } from '../i18n'
+
+// The parish's clock (C4). ochr_organizations.timezone has driven the
+// kiosk's "today" since CHK.7 and defaulted to UTC, and until this field no
+// screen could set it — the help text sent admins to a control that did not
+// exist, and an evening Mass in California was checked in against tomorrow.
+//
+// The list is the runtime's own IANA table. V8's supportedValuesOf omits
+// 'UTC' (it is not a region), so it is added by hand — it is also the
+// column's default, so it must always be selectable. The short list is the
+// fallback for a runtime without supportedValuesOf, and the "Common" group
+// everywhere else.
+const COMMON_TIMEZONES = [
+  'UTC',
+  'America/New_York', 'America/Chicago', 'America/Denver', 'America/Phoenix',
+  'America/Los_Angeles', 'America/Anchorage', 'Pacific/Honolulu', 'America/Puerto_Rico',
+]
+function allTimezones() {
+  try {
+    if (typeof Intl.supportedValuesOf === 'function') {
+      return Array.from(new Set(['UTC', ...Intl.supportedValuesOf('timeZone')]))
+    }
+  } catch { /* fall through to the short list */ }
+  return COMMON_TIMEZONES
+}
+const TIMEZONES = allTimezones()
 
 // Diocese affiliation (DIO.1) — the parish's half of the covenant.
 // Deliberately a small Settings card, not a tab: for a parish the
@@ -493,7 +519,8 @@ const FIELDS = [
 ]
 
 export default function OrgSettings() {
-  const { user } = useAuth()
+  const { user, updateUser } = useAuth()
+  const { t } = useLocale()
   const isAdmin = user?.role === 'admin'
   const toast = useToast()
 
@@ -544,6 +571,12 @@ export default function OrgSettings() {
           page_published:       d.page_published       ?? false,
           // Reminders (RM.3).
           reminder_lead_hours:  d.reminder_lead_hours  ?? 24,
+          // The parish's clock (C4). NOT NULL DEFAULT 'UTC' server-side.
+          timezone:             d.timezone             ?? 'UTC',
+          // The parish's language (migration 093). NOT NULL with an 'en'
+          // default server-side, so the ?? is only for a response that
+          // predates the column.
+          locale:               d.locale               ?? 'en',
         })
       })
       .catch(e => { if (!cancelled) setErr(e.message) })
@@ -565,7 +598,16 @@ export default function OrgSettings() {
     }
     return res.json()
   }, {
-    onSuccess: () => {
+    onSuccess: (saved) => {
+      // The language the whole app resolves from lives on the in-memory
+      // user, and a PATCH does not re-issue the session — so without this
+      // an admin sets the parish to Español, the save succeeds, and
+      // absolutely nothing on screen changes until they happen to reload.
+      // A save that reports success and visibly does nothing is the same
+      // lie as a failure that reports nothing at all.
+      if (saved?.locale && saved.locale !== user?.organization?.locale) {
+        updateUser({ organization: { ...user.organization, locale: saved.locale } })
+      }
       // Subtle confirmation — SaveButton's checkmark covers the
       // primary signal; the toast is for the rare case a screen
       // reader doesn't catch the inline state change.
@@ -813,6 +855,37 @@ export default function OrgSettings() {
             </h2>
           </div>
 
+          {/* Timezone first: the lead time below is counted on this clock,
+              and so is the kiosk's "today". A zone the org already has that
+              the runtime does not list (an alias, an older table) is kept as
+              its own option rather than silently swapped for the first one. */}
+          <div>
+            <label htmlFor="org_timezone" className="block text-xs font-semibold text-ink-600 dark:text-parchment-200 mb-1.5">
+              {t('org.tz.label')}
+            </label>
+            <select
+              id="org_timezone"
+              value={form.timezone ?? 'UTC'}
+              onChange={field('timezone')}
+              className="w-full px-3 py-2.5 text-sm rounded-lg bg-parchment-50 dark:bg-ink-800 border border-parchment-300/70 dark:border-brass-900/40 text-ink-900 dark:text-parchment-50 focus:outline-none focus:ring-2 focus:ring-brass-400"
+            >
+              {form.timezone && !TIMEZONES.includes(form.timezone) && (
+                <option value={form.timezone}>{form.timezone}</option>
+              )}
+              <optgroup label={t('org.tz.common')}>
+                {COMMON_TIMEZONES.map(z => <option key={z} value={z}>{z}</option>)}
+              </optgroup>
+              {TIMEZONES.length > COMMON_TIMEZONES.length && (
+                <optgroup label={t('org.tz.other')}>
+                  {TIMEZONES.filter(z => !COMMON_TIMEZONES.includes(z)).map(z => <option key={z} value={z}>{z}</option>)}
+                </optgroup>
+              )}
+            </select>
+            <p className="mt-1.5 text-[11px] text-ink-500 dark:text-parchment-300/70">
+              {t('org.tz.help')}
+            </p>
+          </div>
+
           <div>
             <label htmlFor="reminder_lead_hours" className="block text-xs font-semibold text-ink-600 dark:text-parchment-200 mb-1.5">
               Serving reminder lead time
@@ -835,6 +908,51 @@ export default function OrgSettings() {
 
           <div className="pt-3 flex items-center justify-end gap-3 border-t border-parchment-300/60 dark:border-brass-900/25">
             <SaveButton status={status}>Save reminders</SaveButton>
+          </div>
+        </motion.form>
+
+        {/* Language. The parish's own, not a per-device preference.
+            Everything needed to serve a Spanish parish was already
+            translated — 1031 interface strings, every notification
+            template, all eight certificate types — and none of it could be
+            switched on, because until migration 093 an organization had no
+            language to set. */}
+        <motion.form
+          initial={{ opacity: 0, y: 8 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.25, delay: 0.12 }}
+          onSubmit={onSubmit}
+          className="bg-parchment-50 dark:bg-ink-900 rounded-2xl border border-parchment-300/60 dark:border-brass-900/30 shadow-warm p-6 space-y-5"
+        >
+          <div className="flex items-center gap-2 pb-3 border-b border-parchment-300/60 dark:border-brass-900/25">
+            <Languages size={14} className="text-brass-600 dark:text-brass-300" />
+            <h2 className="text-sm font-semibold text-ink-800 dark:text-parchment-100">
+              Language
+            </h2>
+          </div>
+
+          <div>
+            <label htmlFor="org_locale" className="block text-xs font-semibold text-ink-600 dark:text-parchment-200 mb-1.5">
+              Parish language
+            </label>
+            <select
+              id="org_locale"
+              value={form.locale ?? 'en'}
+              onChange={e => setForm(f => ({ ...f, locale: e.target.value }))}
+              className="w-full px-3 py-2.5 text-sm rounded-lg bg-parchment-50 dark:bg-ink-800 border border-parchment-300/70 dark:border-brass-900/40 text-ink-900 dark:text-parchment-50 focus:outline-none focus:ring-2 focus:ring-brass-400"
+            >
+              <option value="en">English</option>
+              <option value="es">Español</option>
+            </select>
+            <p className="mt-1.5 text-[11px] text-ink-500 dark:text-parchment-300/70">
+              The language everyone here sees unless they choose otherwise on their
+              own device. Individual members can still be recorded as preferring a
+              different language on the roster.
+            </p>
+          </div>
+
+          <div className="pt-3 flex items-center justify-end gap-3 border-t border-parchment-300/60 dark:border-brass-900/25">
+            <SaveButton status={status}>Save language</SaveButton>
           </div>
         </motion.form>
 

@@ -6,6 +6,9 @@ import EmptyState from '../components/EmptyState'
 import { useToast } from '../components/ToastProvider'
 import { useAuth } from '../context/AuthContext'
 import { apiUrl } from '../api'
+import LoadFailure from '../components/LoadFailure'
+import { useLoad } from '../hooks/useLoad'
+import { useLocale } from '../i18n'
 import { LIT_COLOR_TEXT, LIT_COLOR_DOT, LIT_COLOR_DOT_NONE } from '../utils/liturgicalColors'
 import { useConfirm } from '../components/ConfirmProvider'
 
@@ -123,15 +126,12 @@ function printBulletin({ orgName, date, lit, services, form }) {
 const EMPTY = { announcements: '', readings: '', intentions: '', pastor_note: '', published: false }
 
 export default function Bulletin() {
+  const { t } = useLocale()
   const toast = useToast()
   const ask = useConfirm()
   const { user } = useAuth()
   const isAdmin = user?.role === 'admin'
 
-  const [bulletins, setBulletins] = useState([])
-  const [loading, setLoading]     = useState(true)
-  const [orgName, setOrgName]     = useState('')
-  const [orgSlug, setOrgSlug]     = useState('')
 
   const [date, setDate]   = useState(() => upcomingSundayISO())
   const [form, setForm]   = useState(EMPTY)
@@ -144,18 +144,26 @@ export default function Bulletin() {
   const [svcErr, setSvcErr]     = useState(false) // services fetch failed
   const [loadedDate, setLoadedDate] = useState(null) // date the form was hydrated for
 
-  // Initial load: the bulletin list + parish name.
-  useEffect(() => {
-    if (!isAdmin) { setLoading(false); return }
-    Promise.all([
-      fetch(apiUrl('/api/bulletins')).then(r => (r.ok ? r.json() : { bulletins: [] })),
-      fetch(apiUrl('/api/organization')).then(r => (r.ok ? r.json() : {})),
-    ]).then(([b, org]) => {
-      setBulletins(b.bulletins ?? [])
-      setOrgName(org?.name ?? '')
-      setOrgSlug(org?.slug ?? '')
-    }).catch(() => {}).finally(() => setLoading(false))
-  }, [isAdmin])
+  // Two reads that answer different questions, so they answer separately.
+  // `r.ok ? r.json() : { bulletins: [] }` turned a 500 into "No bulletins
+  // yet." — a parish told it has never published one — and the .catch was
+  // empty, so nothing was said either way.
+  const bulletinsLoad = useLoad(async () => {
+    const res = await fetch(apiUrl('/api/bulletins'))
+    if (!res.ok) throw new Error(`Failed (${res.status})`)
+    return (await res.json()).bulletins ?? []
+  }, [], { enabled: isAdmin, initial: [] })
+
+  const orgLoad = useLoad(async () => {
+    const res = await fetch(apiUrl('/api/organization'))
+    if (!res.ok) throw new Error(`Failed (${res.status})`)
+    return res.json()
+  }, [], { enabled: isAdmin, isEmpty: () => false })
+
+  const bulletins = bulletinsLoad.data ?? []
+  const orgName = orgLoad.data?.name ?? ''
+  const orgSlug = orgLoad.data?.slug ?? ''
+  const loading = bulletinsLoad.state === 'loading'
 
   // Hydrate the form from the existing bulletin for the selected date — but
   // only when the date actually changes (or once the list first arrives for
@@ -243,7 +251,7 @@ export default function Bulletin() {
       const d = await res.json().catch(() => ({}))
       if (!res.ok) throw new Error(d.error || "That didn't save — nothing was lost. Please try again.")
       if (!d?.id || !d?.date) throw new Error('Saved, but the response was malformed — refresh to confirm')
-      setBulletins(list => [d, ...list.filter(b => b.date !== d.date)].sort((a, b) => b.date.localeCompare(a.date)))
+      await bulletinsLoad.reload()
       setEditingId(d.id)
       setLoadedDate(d.date)
       toast.success('Bulletin saved')
@@ -255,11 +263,16 @@ export default function Bulletin() {
   }
 
   async function remove(id) {
-    if (!(await ask({ title: 'Delete this bulletin?', confirmLabel: 'Delete bulletin' }))) return
+    if (!(await ask({
+      title: 'Remove this bulletin?',
+      body: 'It comes out of the bulletin list for that Sunday.',
+      confirmLabel: 'Remove bulletin',
+      recoverable: true,
+    }))) return
     try {
       const res = await fetch(apiUrl(`/api/bulletins/${id}`), { method: 'DELETE' })
       if (!res.ok && res.status !== 204) throw new Error("That didn't delete — nothing was changed. Please try again.")
-      setBulletins(list => list.filter(b => b.id !== id))
+      await bulletinsLoad.reload()
       if (editingId === id) { setEditingId(null); setForm(EMPTY) }
     } catch (err) {
       toast.error(err.message)
@@ -461,7 +474,10 @@ export default function Bulletin() {
                   <Plus size={12} /> This Sunday
                 </button>
               </div>
-              {bulletins.length === 0 ? (
+              {bulletinsLoad.state === 'failed' ? (
+                <LoadFailure variant="strip" body={t('bul.listFailedBody')} cause={bulletinsLoad.error}
+                  onRetry={bulletinsLoad.reload} retrying={bulletinsLoad.retrying} />
+              ) : bulletins.length === 0 ? (
                 <p className="text-xs text-ink-500 dark:text-parchment-300/70 py-2">No bulletins yet.</p>
               ) : (
                 <ul className="space-y-1 max-h-80 overflow-y-auto">
@@ -479,7 +495,7 @@ export default function Bulletin() {
                           {fmtShort(b.date)}
                           {b.published
                             ? <span className="text-[10px] font-semibold uppercase tracking-wide text-brass-600 dark:text-brass-400">Live</span>
-                            : <span className="text-[10px] uppercase tracking-wide text-ink-400 dark:text-parchment-300/50">Draft</span>}
+                            : <span className="text-[10px] uppercase tracking-wide text-ink-400 dark:text-parchment-300/70">Draft</span>}
                         </span>
                       </button>
                     </li>

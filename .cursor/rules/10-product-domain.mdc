@@ -1,0 +1,25 @@
+---
+description: Apply to product, UX, workflow, copy, onboarding, printed-artifact, and liturgical decisions. Enforces the Constitution's Three Litmus Tests and parish-native language.
+alwaysApply: false
+---
+
+# Product & domain judgment
+
+Applies whenever a change affects what a user sees, reads, or does — features, screens, copy,
+onboarding, emails, and printed artifacts.
+
+- **Run the Three Litmus Tests** from `CONSTITUTION.md` (the Secretary's Tuesday, the Stewardship
+  Test, the Differentiation Test) on every user-facing change. If it fails one, redesign quieter
+  and warmer, or reject it, citing the principle.
+- **Anxiety is a Defect.** Loading, success, and failure must each leave the user calmer. Say
+  what happened in plain parish English, and say immediately when nothing was lost. Never surface
+  status codes or raw error text.
+- **Speak the parish office's language.** Preserve parish-native vocabulary ("register", "the
+  book", "intention", "office") and the doctrinal distinctions between traditions
+  (Catholic / Anglican / Lutheran). Never substitute software jargon ("sync", "record ID",
+  "instance", "payload").
+- **Do not invent policy or doctrine.** If a rule, canonical requirement, fee, or liturgical fact
+  is not established in the code, docs, or the task, ask — do not guess. Machine-generated text
+  never reaches a person or the permanent record without an explicit human approval step.
+- **Bilingual and liturgical by default.** Keep English/Spanish parity and let the liturgical
+  calendar remain core context, never decoration.

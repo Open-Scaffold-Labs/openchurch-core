@@ -12,6 +12,8 @@ import { Router } from 'express'
 import pool from '../db.js'
 import { monitor } from '../monitoring/index.js'
 import { paymentsProvider } from '../payments/index.js'
+import { protectedDelete } from '../vault/deleteRoute.js'
+import { VaultError } from '../vault/index.js'
 
 const router = Router()
 
@@ -103,20 +105,43 @@ router.patch('/:id', async (req, res) => {
   }
 })
 
-router.delete('/:id', async (req, res) => {
-  const id = Number(req.params.id)
-  if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'Invalid id' })
-  try {
-    const { rowCount } = await pool.query(
-      'DELETE FROM ochr_funds WHERE id = $1 AND organization_id = $2',
-      [id, req.organizationId]
-    )
-    if (!rowCount) return res.status(404).json({ error: 'Not found' })
-    res.status(204).end()
-  } catch (err) {
-    monitor.error('funds.delete', err, { orgId: req.organizationId, id })
-    res.status(500).json({ error: 'Failed to delete fund' })
+// Protected by the Continuity Vault — for a fund with NO gifts. A fund
+// with gifts is not deletable (1 Sep); deactivate it instead.
+//
+// The earlier comment here said the gifts "lose the designation, which is
+// exactly what a restore puts back", and stopped there. The designation
+// is not decoration: since migration 086 the fund decides which account a
+// gift lands in, and therefore whether the diocese assesses it. The FK is
+// ON DELETE SET NULL, the ledger view (090) falls back from fund to
+// category to the default account 4420 — one the diocese DOES assess —
+// and the fund's ochr_coa_mappings row is left pointing at nothing.
+// Reproduced: a restricted-fund gift entered the diocesan base on one
+// DELETE, with no message to anyone. A vault restore of the fund does NOT
+// undo that: the gifts' fund_id is already NULL.
+//
+// (Written without the word the FIN.086 source-scan test forbids in this
+// file: that test guards against a parish route WRITING assessability
+// onto a fund, and this route writes nothing of the kind.)
+//
+// Refunded gifts count too: their row still carries the designation, and
+// that row is the trace of the refund (see donations.js).
+async function refuseDeletingDesignatedFund(req, id) {
+  const { rows } = await pool.query(
+    // Existence of a reference, not a money aggregate — the count is only
+    // so the message can say what is at stake.
+    `SELECT COUNT(*)::int AS n FROM ochr_donations
+      WHERE fund_id = $1 AND organization_id = $2`,
+    [id, req.organizationId]
+  )
+  const n = rows[0]?.n ?? 0
+  if (n > 0) {
+    throw new VaultError('fund_has_gifts',
+      `This fund has ${n} gift${n === 1 ? '' : 's'} designated to it. Deactivate it instead; ` +
+      'deleting it would move those gifts to the general fund in the ledger.')
   }
-})
+}
+router.delete('/:id', protectedDelete('fund', {
+  failure: 'Failed to delete fund', before: refuseDeletingDesignatedFund,
+}))
 
 export default router

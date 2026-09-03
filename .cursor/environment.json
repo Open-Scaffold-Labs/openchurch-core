@@ -1,0 +1,19 @@
+{
+  "name": "OpenChurch",
+  "ports": [
+    { "name": "client", "port": 5202 },
+    { "name": "api", "port": 3034 }
+  ],
+  "install": "command -v /usr/lib/postgresql/16/bin/postgres >/dev/null || { sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql-16; }\ncd /agent/repos/OpenChurch && npm run install:all",
+  "start": "cd /agent/repos/OpenChurch && sudo env \"PATH=$PATH\" node scripts/local-db.mjs up",
+  "terminals": [
+    {
+      "name": "api",
+      "command": "cd /agent/repos/OpenChurch && sudo env \"PATH=$PATH\" node scripts/local-db.mjs up && cd server && DATABASE_URL='postgresql://postgres@localhost:5433/openchurch_local' JWT_SECRET='local-dev-jwt-secret-change-me-please' CHECKIN_CODE_PEPPER='local-dev-checkin-pepper' PORT=3034 npm run dev"
+    },
+    {
+      "name": "client",
+      "command": "cd /agent/repos/OpenChurch/client && npm run dev"
+    }
+  ]
+}

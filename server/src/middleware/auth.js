@@ -58,9 +58,14 @@ export async function requireAuth(req, res, next) {
     return res.status(401).json({ error: 'Invalid token' })
   }
 
+  let pastoralLead = false
   try {
     const { rows } = await pool.query(
-      'SELECT token_version FROM ochr_users WHERE id = $1 AND organization_id = $2',
+      // pastoral_lead is read HERE, not taken from the token. A permission
+      // baked into a JWT survives its own revocation until the token
+      // expires, and "we removed her access an hour ago" has to be true the
+      // moment it is said. This query already runs on every request.
+      'SELECT token_version, pastoral_lead FROM ochr_users WHERE id = $1 AND organization_id = $2',
       [payload.userId, payload.organizationId]
     )
     if (!rows.length) {
@@ -69,12 +74,16 @@ export async function requireAuth(req, res, next) {
     if ((payload.tv ?? 1) !== (rows[0].token_version ?? 1)) {
       return res.status(401).json({ error: 'Session expired — please sign in again' })
     }
+    pastoralLead = rows[0].pastoral_lead === true
   } catch (err) {
     monitor.error('auth.requireAuth', err, { userId: payload.userId, orgId: payload.organizationId })
     return res.status(500).json({ error: 'Authentication check failed' })
   }
 
-  req.user = { id: payload.userId, email: payload.email, name: payload.name, role: payload.role }
+  req.user = {
+    id: payload.userId, email: payload.email, name: payload.name, role: payload.role,
+    pastoral_lead: pastoralLead,
+  }
   req.organizationId = payload.organizationId
   next()
 }

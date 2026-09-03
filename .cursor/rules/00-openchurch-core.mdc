@@ -1,0 +1,26 @@
+---
+description: OpenChurch core guardrails — authority order, inspect before editing, narrow scope, privacy, verification, and no unauthorized production actions. Always in effect.
+alwaysApply: true
+---
+
+# OpenChurch core guardrails
+
+Read `CONSTITUTION.md`, then `OPERATOR.md`, then `AGENTS.md` before you design or edit anything.
+They outrank these rules; if a rule here conflicts with either document, **stop and report the
+conflict** rather than complying. Do not restate them — this file adds only what they omit.
+
+- **Inspect before you edit.** Read the current code, tests, and neighbouring files first. The
+  tree in front of you and CI are authoritative; a remembered architecture or an old handoff is
+  not.
+- **Keep scope narrow.** Change only what the task asks for. Do not refactor, rename, or reformat
+  adjacent code. Preserve unrelated human and agent work.
+- **Protect people's data.** Never expose secrets or any real parish, member, donor, child,
+  sacramental, or financial data — not in code, tests, fixtures, logs, or messages. Use the
+  seeded demo/local data only.
+- **No unauthorized production actions.** Never deploy, mutate production, run production
+  migrations, rotate credentials, or trigger live jobs without exact human authorization. Never
+  bypass authorization, tenant isolation, audit logging, CI, integrity constraints, or branch
+  protection. Never commit to `main`.
+- **Verify, then claim.** Back every claim with code you read, a test that ran, or command
+  output, and say what you did not verify. Never report a suite as passing unless that exact
+  suite ran and passed.

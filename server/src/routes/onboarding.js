@@ -23,9 +23,13 @@ router.get('/status', async (req, res) => {
     const orgId = req.organizationId
 
     // Single trip — gather sample counts + real-data signals + team
-    // size + letterhead state. The Dashboard's OnboardingChecklist
-    // (Sprint O) reads all of these in one call. Each query is
-    // independent so Promise.all parallelizes them.
+    // size + letterhead state. The Dashboard's checklist card (Sprint O)
+    // read all of these in one call; that card is gone — it filled a bar
+    // to doneCount/totalCount, which is the pressure the First Parish
+    // Setup sprint removed. What survives here is `hasSamples`, which is
+    // still the "clear the sample rows" banner's signal and is a fact
+    // rather than a score. Each query is independent so Promise.all
+    // parallelizes them.
     //
     // 'Real' here means NOT (name/title LIKE '[Sample]%'). Donations
     // use the notes column for sample marking — see the seed file.
@@ -114,8 +118,25 @@ router.post('/clear-samples', async (req, res) => {
         `DELETE FROM ochr_tasks WHERE organization_id = $1 AND title LIKE $2`,
         [orgId, SAMPLE_PREFIX]
       ),
+      // A CHARGED GIFT IS NOT SAMPLE DATA, WHATEVER ITS NOTES SAY.
+      //
+      // Every other line here matches a column the seed writes and nobody
+      // else does. This one does not: ochr_donations.notes is where the
+      // PUBLIC give page stores the donor's own message
+      // (publicEvents.js:374 — `message || null`, and the Stripe webhook
+      // does the same with session metadata). So the predicate is a text
+      // match on donor-controlled text, and a gift whose message happened to
+      // begin "[Sample]" was hard-deleted here — with a real payment_ref,
+      // past the refuseDeletingChargedGift guard that owns DELETE
+      // /api/donations/:id, and without a vault capture, so not recoverable
+      // either.
+      //
+      // payment_ref IS NULL is the whole fix: the sample seed never sets one
+      // (onboarding/sampleSeed.js:384 has no payment column), and a gift that
+      // has one is a record of money that moved. Refund it or keep it.
       pool.query(
-        `DELETE FROM ochr_donations WHERE organization_id = $1 AND notes LIKE $2`,
+        `DELETE FROM ochr_donations
+          WHERE organization_id = $1 AND notes LIKE $2 AND payment_ref IS NULL`,
         [orgId, SAMPLE_PREFIX]
       ),
       pool.query(

@@ -10,7 +10,7 @@ import OrderedMemberPicker from '../components/OrderedMemberPicker'
 import PageWrapper from '../components/PageWrapper'
 import { sheetOverlayCls, sheetPanelCls, MobileSheetGrip } from '../components/MobileSheet'
 import { LIT_COLOR_DOT, LIT_COLOR_TEXT, LIT_COLOR_STRIPE } from '../utils/liturgicalColors'
-import { initials } from '../utils/format'
+import { initials, loadList } from '../utils/format'
 import { toLocalISO } from '../utils/dates'
 import { useConfirm } from '../components/ConfirmProvider'
 
@@ -242,7 +242,7 @@ function MobileEventCard({ event, onClick, members, litColor, intentions = [] })
 }
 
 // ── Add/Edit Modal ───────────────────────────────────────────
-function EventModal({ event, onClose, onSave, onDelete, members, groups = [], intentions = [] }) {
+function EventModal({ event, onClose, onSave, onDelete, members, membersFailed = false, groups = [], intentions = [] }) {
   const { isAdmin } = useAuth()
   const [form, setForm] = useState(() => {
     if (!event) return EMPTY_FORM
@@ -260,6 +260,19 @@ function EventModal({ event, onClose, onSave, onDelete, members, groups = [], in
   // object too, but should still render as New (Repeat option on,
   // no Delete, "Add Event" button).
   const isEdit = !!event?.id
+
+  // Offerings & fees linked to this event (BILL.2) — fetched once per
+  // open; the block below renders only when something is linked.
+  const [eventInvoices, setEventInvoices] = useState([])
+  useEffect(() => {
+    if (!isEdit) { setEventInvoices([]); return }
+    let cancelled = false
+    fetch(apiUrl(`/api/invoices?event=${event.id}&limit=20`))
+      .then(r => (r.ok ? r.json() : []))
+      .then(d => { if (!cancelled) setEventInvoices(Array.isArray(d) ? d.filter(i => i.status !== 'cancelled') : []) })
+      .catch(() => { if (!cancelled) setEventInvoices([]) })
+    return () => { cancelled = true }
+  }, [isEdit, event?.id]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Liturgical context for the event's date. Fetched whenever the
   // date field changes — the /api/liturgical endpoint is private-
@@ -449,7 +462,7 @@ function EventModal({ event, onClose, onSave, onDelete, members, groups = [], in
               and the Groups page can deep-link "create event". */}
           <div>
             <label className="flex items-center gap-1.5 text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1.5">
-              <Users2 size={12} /> Group <span className="font-normal text-ink-400 dark:text-parchment-300/50">(optional)</span>
+              <Users2 size={12} /> Group <span className="font-normal text-ink-400 dark:text-parchment-300/70">(optional)</span>
             </label>
             <select
               value={form.group_id ?? ''}
@@ -487,12 +500,44 @@ function EventModal({ event, onClose, onSave, onDelete, members, groups = [], in
             </div>
           )}
 
+          {/* Offerings & fees linked to this event (BILL.2) — read-only
+              here; the workbench stays the single place money is handled.
+              A wedding's deposit, balance, and date read from one drawer. */}
+          {isEdit && eventInvoices.length > 0 && (
+            <div className="px-2.5 py-2 rounded-md border border-brass-200/70 dark:border-brass-800/40 bg-brass-50 dark:bg-brass-900/20">
+              <p className="text-[11px] font-semibold uppercase tracking-widest text-brass-700 dark:text-brass-300 mb-1">
+                Offerings &amp; fees
+              </p>
+              <ul className="space-y-0.5">
+                {eventInvoices.map(inv => {
+                  const bal = Math.max(Number(inv.total) - Number(inv.amount_paid), 0)
+                  return (
+                    <li key={inv.id} className="text-xs text-ink-800 dark:text-parchment-100">
+                      {inv.invoice_no ? `${inv.invoice_no} · ` : ''}{inv.title}
+                      <span className="text-ink-500 dark:text-parchment-300/70">
+                        {' — '}
+                        {inv.status === 'paid' ? 'settled'
+                          : inv.status === 'waived' ? 'waived'
+                          : inv.status === 'draft' ? 'draft'
+                          : `$${bal.toFixed(2)} remaining`}
+                      </span>
+                    </li>
+                  )
+                })}
+              </ul>
+              <Link to="/offerings" className="mt-1 inline-block text-[11px] font-semibold text-brass-700 dark:text-brass-300 hover:underline">
+                Open the offerings workbench →
+              </Link>
+            </div>
+          )}
+
           {/* Assigned members — drives the personal calendar feed */}
           <div>
             <label className="flex items-center gap-1.5 text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1.5">
               <Users size={12} /> Assigned Members
             </label>
             <MemberPicker
+              failed={membersFailed}
               members={members}
               value={form.assigned_to}
               onChange={(ids) => setForm(f => ({ ...f, assigned_to: ids }))}
@@ -713,6 +758,7 @@ export default function Schedule() {
   const [weekStart, setWeekStart] = useState(() => getMondayOf(new Date()))
   const [events, setEvents]       = useState([])
   const [members, setMembers]     = useState([])
+  const [membersFailed, setMembersFailed] = useState(false)
   const [groups, setGroups]       = useState([])
   const [groupFilter, setGroupFilter] = useState('')   // '' = all groups
   const [modal, setModal]         = useState(null)   // null | 'new' | event object
@@ -810,10 +856,10 @@ export default function Schedule() {
   // A bounded sample is enough here, so ask for the max (200) rather than
   // relying on the /api/clients endpoint's invisible safety cap.
   useEffect(() => {
-    fetch(apiUrl('/api/clients?limit=200'))
-      .then(r => (r.ok ? r.json() : []))
-      .then(setMembers)
-      .catch(err => console.error('Failed to load members for picker:', err))
+    loadList(apiUrl('/api/clients?limit=200')).then(({ ok, data }) => {
+      setMembers(data)
+      setMembersFailed(!ok)
+    })
   }, [])
 
   // Load groups once for the toolbar filter + the modal's group picker.
@@ -885,9 +931,12 @@ export default function Schedule() {
   // Scope is undefined for a single-occurrence delete and 'series'
   // when the user chose "Delete entire series" from the modal footer.
   const handleDelete = async (id, scope) => {
+    // `recoverable` is what every other protected delete says, and events
+    // are protected now — a series goes to the Archive as one entry, so
+    // "removed" was true and is no longer the whole truth.
     const prompt = scope === 'series'
-      ? { title: 'Delete the whole recurring series?', body: 'Every linked occurrence is removed, not just this one.', confirmLabel: 'Delete series' }
-      : { title: 'Delete this scheduled event?', confirmLabel: 'Delete event' }
+      ? { title: 'Delete the whole recurring series?', body: 'Every linked occurrence is removed, not just this one.', confirmLabel: 'Delete series', recoverable: true }
+      : { title: 'Delete this scheduled event?', confirmLabel: 'Delete event', recoverable: true }
     if (!(await ask(prompt))) return
     const url = scope === 'series'
       ? apiUrl(`/api/calendar/${id}?scope=series`)
@@ -967,13 +1016,13 @@ export default function Schedule() {
           )}
           {/* Week nav */}
           <div className="flex items-center gap-1 bg-parchment-50 dark:bg-ink-900 border border-parchment-300/60 dark:border-brass-900/30 rounded-xl p-1">
-            <button onClick={prevWeek} aria-label="Previous week" className="p-1.5 rounded-lg text-ink-400 hover:text-ink-700 dark:hover:text-parchment-50 hover:bg-parchment-200 dark:hover:bg-ink-800 transition-colors">
+            <button onClick={prevWeek} aria-label="Previous week" className="tap-reach p-1.5 rounded-lg text-ink-400 hover:text-ink-700 dark:hover:text-parchment-50 hover:bg-parchment-200 dark:hover:bg-ink-800 transition-colors">
               <ChevronLeft size={16} />
             </button>
             <button onClick={goToday} className="px-3 py-1 text-xs font-semibold text-ink-600 dark:text-parchment-200 hover:text-ink-900 dark:hover:text-parchment-50 hover:bg-parchment-200 dark:hover:bg-ink-800 rounded-lg transition-colors">
               Today
             </button>
-            <button onClick={nextWeek} aria-label="Next week" className="p-1.5 rounded-lg text-ink-400 hover:text-ink-700 dark:hover:text-parchment-50 hover:bg-parchment-200 dark:hover:bg-ink-800 transition-colors">
+            <button onClick={nextWeek} aria-label="Next week" className="tap-reach p-1.5 rounded-lg text-ink-400 hover:text-ink-700 dark:hover:text-parchment-50 hover:bg-parchment-200 dark:hover:bg-ink-800 transition-colors">
               <ChevronRight size={16} />
             </button>
           </div>
@@ -1217,6 +1266,7 @@ export default function Schedule() {
               ? (prefillDate || prefillGroup ? { ...EMPTY_FORM, date: prefillDate, group_id: prefillGroup } : null)
               : modal}
             members={members}
+            membersFailed={membersFailed}
             groups={groups}
             intentions={modal !== 'new' && modal ? intentionsForEvent(modal) : []}
             onClose={() => setModal(null)}

@@ -14,6 +14,7 @@ import { useAuth } from '../context/AuthContext'
 import { apiUrl } from '../api'
 import { todayLocalISO } from '../utils/dates'
 import { useConfirm } from '../components/ConfirmProvider'
+import { loadList } from '../utils/format'
 
 // Pledges admin page (Sprint D / D.2). Lists every pledge with
 // computed fulfillment, supports create/edit/cancel via modal.
@@ -70,7 +71,7 @@ function FulfillmentBar({ fulfillment }) {
   )
 }
 
-function PledgeModal({ pledge, members, onClose, onSaved }) {
+function PledgeModal({ pledge, members, membersFailed, onClose, onSaved }) {
   const isEdit = !!pledge
   const toast = useToast()
   const ask = useConfirm()
@@ -157,6 +158,14 @@ function PledgeModal({ pledge, members, onClose, onSaved }) {
                 <option key={m.id} value={m.id}>{m.name}{m.email ? ` · ${m.email}` : ''}</option>
               ))}
             </select>
+            {/* An empty picker reads as "you have no members" to somebody
+                halfway through recording a pledge. Name the difference. */}
+            {membersFailed && (
+              <p className="mt-1.5 text-[11px] text-amber-700 dark:text-amber-400 leading-snug">
+                The member list didn’t load — this isn’t an empty roster. You can still
+                record the donor by email below.
+              </p>
+            )}
             <p className="mt-1.5 text-[11px] text-ink-500 dark:text-parchment-300/70">
               Pledges match donations by the member's email. Pick the donor here for the cleanest tracking.
             </p>
@@ -255,9 +264,14 @@ export default function Pledges() {
   const { user } = useAuth()
   const isAdmin = user?.role === 'admin'
   const toast   = useToast()
+  // Same defect as Forms.jsx: removePledge() referenced an `ask` that only
+  // existed inside PledgeModal. Deleting a pledge threw instead of confirming.
+  const ask = useConfirm()
 
   const [pledges, setPledges] = useState(null)
   const [members, setMembers] = useState([])
+  // Distinguishes an empty roster from a roster we could not load.
+  const [membersFailed, setMembersFailed] = useState(false)
   const [loading, setLoad]    = useState(true)
   const [err, setErr]         = useState('')
   const [modal, setModal]     = useState(null)   // null | 'new' | pledge object
@@ -278,10 +292,13 @@ export default function Pledges() {
   // Members list for the pledge-modal dropdown.
   useEffect(() => {
     if (!isAdmin) return
-    fetch(apiUrl('/api/clients'))
-      .then(r => r.ok ? r.json() : [])
-      .then(d => setMembers(Array.isArray(d) ? d : []))
-      .catch(() => setMembers([]))
+    // An empty picker reads as "you have no members", not as "this did not
+    // load" — and the person seeing it is midway through recording somebody's
+    // giving. Track the difference so the control can say which it is.
+    loadList(apiUrl('/api/clients')).then(({ ok, data }) => {
+      setMembers(data)
+      setMembersFailed(!ok)
+    })
   }, [isAdmin])
 
   async function removePledge(p) {
@@ -471,6 +488,7 @@ export default function Pledges() {
           <PledgeModal
             pledge={modal === 'new' ? null : modal}
             members={members}
+            membersFailed={membersFailed}
             onClose={() => setModal(null)}
             onSaved={load}
           />

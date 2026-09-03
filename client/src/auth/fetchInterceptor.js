@@ -54,6 +54,12 @@ export function installFetchInterceptor() {
       // Don't fire for /api/auth/* — those endpoints return 401 on bad
       // credentials and we want the login page to handle that locally
       // rather than bouncing itself.
+      //
+      // /api/auth/password is deliberately NOT on this list. A wrong current
+      // password used to come back as 401 and sign the user out for a typo;
+      // the fix was on the server (it answers 403 now — the caller is
+      // authenticated, they just typed the wrong word), not another
+      // exemption here. Every exemption weakens the one rule this enforces.
       const isAuthEndpoint =
         url.includes('/api/auth/login') ||
         url.includes('/api/auth/signup')

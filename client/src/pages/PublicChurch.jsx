@@ -3,6 +3,7 @@ import { useParams, Link } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import { Clock, MapPin, Loader2, AlertTriangle, Calendar, ArrowRight, Users, Send, Check, Heart } from 'lucide-react'
 import { apiUrl } from '../api'
+import { useLocale } from '../i18n'
 
 // Public church homepage (Anchor 5 / A5.2). Unauthenticated — anyone
 // with the URL sees the church's published homepage. Like the public
@@ -32,6 +33,7 @@ function splitLines(text) {
 // so a double-submit isn't tempting.
 function ConnectCard({ slug }) {
   const [groups, setGroups] = useState([])
+  const [groupsFailed, setGroupsFailed] = useState(false)
   const [form, setForm] = useState({ group_id: '', name: '', email: '', phone: '', message: '' })
   const [status, setStatus] = useState('idle') // idle | submitting | done
   const [error, setError] = useState('')
@@ -39,10 +41,18 @@ function ConnectCard({ slug }) {
   useEffect(() => {
     if (!slug) return
     let cancelled = false
+    // A 404 means this church has no public page, and an empty picker is the
+    // truth. Anything else means we could not read the groups, and the form
+    // says so rather than implying the parish has none — it still submits,
+    // because a visitor reaching out should never be blocked by our outage.
     fetch(apiUrl(`/api/public/${slug}/groups`))
-      .then(r => (r.ok ? r.json() : { groups: [] }))
-      .then(d => { if (!cancelled) setGroups(d.groups ?? []) })
-      .catch(() => { if (!cancelled) setGroups([]) })
+      .then(async r => {
+        if (r.status === 404) return { groups: [] }
+        if (!r.ok) throw new Error(`Failed (${r.status})`)
+        return r.json()
+      })
+      .then(d => { if (!cancelled) { setGroups(d.groups ?? []); setGroupsFailed(false) } })
+      .catch(() => { if (!cancelled) setGroupsFailed(true) })
     return () => { cancelled = true }
   }, [slug])
 
@@ -104,6 +114,13 @@ function ConnectCard({ slug }) {
             New here or want to join a ministry? Leave your details and we&apos;ll reach out.
           </p>
           <form onSubmit={onSubmit} className="space-y-3">
+            {groupsFailed && (
+              <p role="status" className="text-xs text-amber-700 dark:text-amber-400">
+                We couldn&apos;t load this church&apos;s ministries just now — that&apos;s a
+                connection problem, not a church without them. Send your note anyway and
+                someone will be in touch.
+              </p>
+            )}
             {groups.length > 0 && (
               <div>
                 <label className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">
@@ -153,23 +170,51 @@ function ConnectCard({ slug }) {
 }
 
 export default function PublicChurch() {
+  // Not for t() — these pages are still English (the string pass is
+  // separate work). This is the switch that lets the parish's language
+  // reach a page nobody signs in to.
+  const { setPublicLocale } = useLocale()
   const { slug } = useParams()
   const [data, setData]    = useState(null)
   const [loading, setLoad] = useState(true)
   const [err, setErr]      = useState('')
-  // Whether the church has active giving funds — gates the Give button
-  // so we don't advertise giving before it's set up (GIV.2).
-  const [hasGiving, setHasGiving] = useState(false)
+  // Whether the church has active giving funds — gates the Give button so we
+  // don't advertise giving before it's set up (GIV.2).
+  //
+  // THREE states, not two. `r.ok ? r.json() : { funds: [] }` with a catch
+  // that also set false meant a 500 on this endpoint removed the Give button
+  // from a public page — telling a parishioner who came to give that this
+  // church has no way to receive it. That is the worst version of
+  // FAILURE IS NOT EMPTY, because the visitor has no session, no error
+  // message and no reason to doubt what they see.
+  //
+  // On 'unknown' the button is SHOWN. The two risks are not symmetric: a
+  // visitor who follows it to a giving page that is not set up sees that
+  // page's own "not set up yet" state, which is recoverable and honest; a
+  // visitor who is silently told there is no way to give simply leaves. The
+  // endpoint's own giving_enabled flag is used where it is present rather
+  // than inferring configuration from the number of funds.
+  const [giving, setGiving] = useState('unknown')   // 'yes' | 'no' | 'unknown'
 
   useEffect(() => {
     if (!slug) return
     let cancelled = false
     fetch(apiUrl(`/api/public/${slug}/funds`))
-      .then(r => (r.ok ? r.json() : { funds: [] }))
-      .then(d => { if (!cancelled) setHasGiving((d.funds ?? []).length > 0) })
-      .catch(() => { if (!cancelled) setHasGiving(false) })
+      .then(async r => {
+        if (r.status === 404) return { funds: [], giving_enabled: false }   // no such church page
+        if (!r.ok) throw new Error(`Failed (${r.status})`)
+        return r.json()
+      })
+      .then(d => {
+        if (cancelled) return
+        const enabled = d.giving_enabled !== false && (d.funds ?? []).length > 0
+        setGiving(enabled ? 'yes' : 'no')
+      })
+      .catch(() => { if (!cancelled) setGiving('unknown') })
     return () => { cancelled = true }
   }, [slug])
+
+  const hasGiving = giving !== 'no'
 
   useEffect(() => {
     if (!slug) return
@@ -180,7 +225,13 @@ export default function PublicChurch() {
         if (!r.ok) throw new Error(`Failed (${r.status})`)
         return r.json()
       })
-      .then(d => { if (!cancelled) setData(d) })
+      .then(d => {
+        if (cancelled) return
+      // The parish's language, from the endpoint. Nobody is signed in
+      // here, so this is the only thing that can make the page speak it.
+        setPublicLocale(d.church?.locale)
+        setData(d)
+      })
       .catch(e => { if (!cancelled) setErr(e.message) })
       .finally(() => { if (!cancelled) setLoad(false) })
     return () => { cancelled = true }
@@ -234,7 +285,33 @@ export default function PublicChurch() {
     )
   }
 
-  const { church, page } = data
+  // A 200 is not a page. Observed at runtime on 27 Aug: an unexpected body
+  // came back 200 without a `page` object and this destructure threw
+  // "Cannot read properties of undefined (reading 'service_times')" — which
+  // the boundary rendered, on a PUBLIC page, as "Something went wrong. We've
+  // logged it on our end." to a parishioner who only wanted the service
+  // times. A visitor gets no error console and no way to retry but the URL.
+  //
+  // Missing sections are absent, not fatal: the church's name and whatever
+  // else did arrive still render.
+  const { church, page: rawPage } = data
+  if (!church) {
+    return (
+      <div className="min-h-screen flex items-center justify-center px-6 bg-parchment-50 dark:bg-ink-950">
+        <div className="max-w-md text-center">
+          <AlertTriangle size={28} className="mx-auto text-amber-700 dark:text-amber-400 mb-3" />
+          <h1 className="font-display text-2xl font-semibold text-ink-900 dark:text-parchment-50">
+            Couldn&apos;t load page
+          </h1>
+          <p className="mt-2 text-sm text-ink-500 dark:text-parchment-300/70">
+            This church&apos;s page didn&apos;t come back in a form we could read. That&apos;s a
+            problem on our side, not a church that isn&apos;t here — please try again shortly.
+          </p>
+        </div>
+      </div>
+    )
+  }
+  const page = rawPage ?? {}
   const services = splitLines(page.service_times)
   const aboutParas = splitLines(page.about)
   const mapsUrl = page.address
@@ -351,7 +428,7 @@ export default function PublicChurch() {
         </div>
 
         {/* Footer attribution — quiet */}
-        <p className="mt-12 text-center text-[11px] text-ink-500 dark:text-parchment-300/50">
+        <p className="mt-12 text-center text-[11px] text-ink-500 dark:text-parchment-300/70">
           Powered by OpenChurch
         </p>
       </motion.div>

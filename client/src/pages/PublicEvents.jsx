@@ -4,6 +4,7 @@ import { motion } from 'framer-motion'
 import { Calendar, MapPin, Clock, Loader2, AlertTriangle, ExternalLink } from 'lucide-react'
 import { apiUrl } from '../api'
 import { LIT_COLOR_DOT, LIT_COLOR_TEXT, LIT_COLOR_DOT_NONE } from '../utils/liturgicalColors'
+import { useLocale } from '../i18n'
 
 // Parishioner-facing public events page (Sprint P / P.2). Unauthenticated —
 // anyone with the URL sees the church's public events. The route is
@@ -53,6 +54,7 @@ function groupByDate(events) {
 }
 
 export default function PublicEvents() {
+  const { setPublicLocale } = useLocale()
   const { slug } = useParams()
   const [data, setData]     = useState(null)
   const [loading, setLoad]  = useState(true)
@@ -67,7 +69,12 @@ export default function PublicEvents() {
         if (!r.ok) throw new Error(`Failed (${r.status})`)
         return r.json()
       })
-      .then(d => { if (!cancelled) setData(d) })
+      .then(d => {
+        if (cancelled) return
+        // The parish's language, from the endpoint — nobody is signed in here.
+        setPublicLocale(d.church?.locale)
+        setData(d)
+      })
       .catch(e => { if (!cancelled) setErr(e.message) })
       .finally(() => { if (!cancelled) setLoad(false) })
     return () => { cancelled = true }
@@ -183,7 +190,7 @@ export default function PublicEvents() {
             <p className="text-sm text-ink-500 dark:text-parchment-300/70">
               No upcoming public events scheduled.
             </p>
-            <p className="text-xs text-ink-500/80 dark:text-parchment-300/60 mt-1">
+            <p className="text-xs text-ink-500 dark:text-parchment-300/70 mt-1">
               Check back soon, or contact the church for the latest schedule.
             </p>
           </div>
@@ -241,7 +248,7 @@ export default function PublicEvents() {
         )}
 
         {/* Footer attribution — quiet */}
-        <p className="mt-12 text-center text-[11px] text-ink-500 dark:text-parchment-300/50">
+        <p className="mt-12 text-center text-[11px] text-ink-500 dark:text-parchment-300/70">
           Powered by OpenChurch
         </p>
       </motion.div>

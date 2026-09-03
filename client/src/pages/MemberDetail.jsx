@@ -6,8 +6,11 @@ import {
   Activity, Heart, AlertTriangle, Loader2, Target, Plus, X, UserCheck, History, Church, Pencil,
 } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
+import { useLoad } from '../hooks/useLoad'
+import { useLocale } from '../i18n'
 import PageWrapper from '../components/PageWrapper'
 import EmptyState from '../components/EmptyState'
+import LoadFailure from '../components/LoadFailure'
 import CalendarSync from '../components/CalendarSync'
 import { apiUrl } from '../api'
 import { formatLocalDate } from '../utils/dates'
@@ -333,7 +336,7 @@ function AvailabilitySection({ clientId, clientName }) {
           </div>
           <div>
             <label className="block text-[11px] font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">
-              To <span className="font-normal text-ink-400 dark:text-parchment-300/50">(optional)</span>
+              To <span className="font-normal text-ink-400 dark:text-parchment-300/70">(optional)</span>
             </label>
             <input
               type="date"
@@ -386,28 +389,40 @@ function SacramentsSection({ clientId, clientName }) {
   const { user } = useAuth()
   const canWrite = user?.role === 'admin' || user?.role === 'staff'
 
-  const [list,    setList]    = useState([])
-  const [loading, setLoading] = useState(true)
   const [adding,  setAdding]  = useState(false)
   const [busy,    setBusy]    = useState(false)
   const [error,   setError]   = useState(null)
   const emptyForm = { type: 'baptism', date: '', minister: '', place: '', certificate_no: '', notes: '' }
   const [form, setForm] = useState(emptyForm)
   const [editingId, setEditingId] = useState(null) // null = adding a new record
+  // REG.1 (migration 073): the server will not amend a register entry without
+  // a reason, and this form never had a field for one — so every edit made
+  // from a member profile came back "A reason is required to change the
+  // register" and no correction was possible from here at all.
+  const [reason, setReason] = useState('')
 
-  const load = async () => {
-    try {
-      const res = await fetch(apiUrl(`/api/sacraments?client_id=${clientId}`))
-      const d = res.ok ? await res.json() : { records: [] }
-      setList(d.records ?? [])
-    } catch { /* leave list as-is on a transient error */ }
-    finally { setLoading(false) }
-  }
-  useEffect(() => { load() }, [clientId])
+  // Pass 6 wrote this load by hand: keep the last known list on failure,
+  // report a failed post-write refresh, and never let a failed read reach
+  // "No sacraments recorded yet." Pass 7 replaces it with the shared
+  // primitive, and the nine tests written against the hand-written version
+  // are the acceptance criteria — the correct behaviour does not bend to fit
+  // the abstraction.
+  //
+  // `reload()` returns true/false, which is what the save path branches on.
+  const sacraments = useLoad(async () => {
+    const res = await fetch(apiUrl(`/api/sacraments?client_id=${clientId}`))
+    if (!res.ok) throw new Error(`Failed (${res.status})`)
+    return (await res.json()).records ?? []
+  }, [clientId])
 
-  const closeForm = () => { setAdding(false); setEditingId(null); setForm(emptyForm); setError(null) }
+  const list      = sacraments.data ?? []
+  const loading   = sacraments.state === 'loading'
+  const loadError = sacraments.error
+  const load      = sacraments.reload
 
-  const startAdd = () => { setEditingId(null); setForm(emptyForm); setAdding(true); setError(null) }
+  const closeForm = () => { setAdding(false); setEditingId(null); setForm(emptyForm); setReason(''); setError(null) }
+
+  const startAdd = () => { setEditingId(null); setForm(emptyForm); setReason(''); setAdding(true); setError(null) }
 
   const startEdit = (r) => {
     setEditingId(r.id)
@@ -419,6 +434,7 @@ function SacramentsSection({ clientId, clientName }) {
       certificate_no: r.certificate_no || '',
       notes: r.notes || '',
     })
+    setReason('')
     setAdding(true)
     setError(null)
   }
@@ -438,6 +454,7 @@ function SacramentsSection({ clientId, clientName }) {
           place: form.place || null,
           certificate_no: form.certificate_no || null,
           notes: form.notes || null,
+          reason: reason.trim(),
         }
       : {
           client_id: clientId,
@@ -458,8 +475,15 @@ function SacramentsSection({ clientId, clientName }) {
         const data = await res.json().catch(() => ({}))
         throw new Error(data.error || `Failed (${res.status})`)
       }
+      const saved = editing ? 'correction' : 'record'
       closeForm()
-      await load()
+      // The write landed. If the reload does not, say so — the list on
+      // screen is now older than the truth, and silence here is what made a
+      // saved baptism look like it was never entered.
+      const refreshed = await load()
+      if (!refreshed) {
+        setError(`The ${saved} was saved, but this list could not be refreshed — it may not show it yet.`)
+      }
     } catch (err) {
       setError(err.message)
     } finally {
@@ -467,12 +491,25 @@ function SacramentsSection({ clientId, clientName }) {
     }
   }
 
+  // REG.1: DELETE /api/sacraments/:id answers 405 for everyone, on purpose —
+  // a register entry is retired by VOIDING, never erased. This button called
+  // it anyway and reported the refusal as "Failed (405)", throwing away the
+  // server's own instruction. There is no void UI yet (see the Pass 6
+  // report), so the honest thing is to say what the register's rule is
+  // rather than offer an erasure that cannot happen.
   const onRemove = async (recId) => {
     setError(null)
     try {
       const res = await fetch(apiUrl(`/api/sacraments/${recId}`), { method: 'DELETE' })
-      if (!res.ok && res.status !== 204) throw new Error(`Failed (${res.status})`)
-      setList(l => l.filter(r => r.id !== recId))
+      if (!res.ok && res.status !== 204) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.error || `Failed (${res.status})`)
+      }
+      // The list is the hook's now, so a successful removal re-reads rather
+      // than editing a local copy. This path is unreachable today — the
+      // server answers 405 for everyone — but leaving it to mutate state the
+      // hook owns would be a landmine for whoever wires up voiding.
+      await sacraments.reload()
     } catch (err) {
       setError(err.message)
     }
@@ -496,6 +533,13 @@ function SacramentsSection({ clientId, clientName }) {
         <div className="flex justify-center py-3">
           <Loader2 size={16} className="animate-spin text-brass-600" />
         </div>
+      ) : sacraments.state === 'failed' ? (
+        /* UNREAD, not empty. */
+        <p className="text-[11px] text-amber-700 dark:text-amber-400">
+          This member&apos;s sacramental record could not be read
+          <span className="text-ink-500 dark:text-parchment-300/70"> ({loadError})</span>.
+          This is a connection problem, not a member without sacraments — nothing has been removed.
+        </p>
       ) : list.length === 0 ? (
         <p className="text-[11px] text-ink-500 dark:text-parchment-300/70">
           No sacraments recorded yet.
@@ -561,8 +605,14 @@ function SacramentsSection({ clientId, clientName }) {
         </ul>
       )}
 
+      {sacraments.isStale && (
+        <p role="status" className="text-[11px] text-amber-700 dark:text-amber-400">
+          This list could not be refreshed ({loadError}) — it may be out of date.
+        </p>
+      )}
+
       {error && (
-        <p className="text-[12px] text-rose-700 dark:text-rose-300">{error}</p>
+        <p role="status" className="text-[12px] text-rose-700 dark:text-rose-300">{error}</p>
       )}
 
       {canWrite && !adding && (
@@ -618,9 +668,29 @@ function SacramentsSection({ clientId, clientName }) {
               <input type="text" value={form.notes} placeholder="Sponsor, godparents, etc."
                 onChange={e => setForm(f => ({ ...f, notes: e.target.value }))} className={inputCls} />
             </div>
+
+            {/* REG.1 — a register entry is corrected by amendment, and an
+                amendment without a reason is just an overwrite. The server
+                has required this since migration 073; this form did not ask
+                for it, so every correction attempted from a member profile
+                failed with "A reason is required to change the register".
+                Only on edit: a first entry is not a correction of anything. */}
+            {editingId != null && (
+              <div className="col-span-2">
+                <label className="block text-[11px] font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">
+                  Reason for this correction
+                </label>
+                <input type="text" value={reason} required minLength={3}
+                  placeholder="e.g. minister's name was misspelled in the original entry"
+                  onChange={e => setReason(e.target.value)} className={inputCls} />
+                <p className="mt-1 text-[10px] text-ink-500 dark:text-parchment-300/70">
+                  Kept with the entry, dated and attributed, so the register shows what changed and why.
+                </p>
+              </div>
+            )}
           </div>
           <div className="flex items-center gap-2">
-            <button type="submit" disabled={busy}
+            <button type="submit" disabled={busy || (editingId != null && reason.trim().length < 3)}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[12px] font-semibold rounded-lg bg-church-800 text-parchment-50 hover:bg-church-900 disabled:opacity-60">
               {busy ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />} {editingId ? 'Save changes' : 'Save'}
             </button>
@@ -635,9 +705,24 @@ function SacramentsSection({ clientId, clientName }) {
   )
 }
 
+// The donations read, on its own so the panel can retry it alone. A failure
+// resolves to a marked value rather than an empty one: `{ lines: [] }` is
+// the shape of a parishioner who has never given, and a dropped connection
+// must not be allowed to wear it. (C5)
+async function readDonations(id) {
+  try {
+    const r = await fetch(apiUrl(`/api/clients/${id}/donations`))
+    if (!r.ok) return { failed: true, error: `Failed (${r.status})` }
+    return await r.json()
+  } catch (e) {
+    return { failed: true, error: e?.message || 'Failed to load' }
+  }
+}
+
 export default function MemberDetail() {
   const { id } = useParams()
   const { user } = useAuth()
+  const { t } = useLocale()
   const isAdmin = user?.role === 'admin'
   const [member, setMember] = useState(null)
   const [donations, setDonations] = useState(null)
@@ -645,6 +730,14 @@ export default function MemberDetail() {
   const [pledges, setPledges] = useState(null) // null until fetched (admin-only)
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState('')
+  // Bumped by "Try again" so the effect below re-runs for the same id.
+  const [attempt, setAttempt] = useState(0)
+  const retry = () => { setErr(''); setAttempt(a => a + 1) }
+  const [giftsRetrying, setGiftsRetrying] = useState(false)
+  const retryGifts = async () => {
+    setGiftsRetrying(true)
+    try { setDonations(await readDonations(id)) } finally { setGiftsRetrying(false) }
+  }
 
   useEffect(() => {
     if (!id) return
@@ -661,11 +754,10 @@ export default function MemberDetail() {
         if (cancelled) return
         setMember(m)
 
-        // Fan out — donations + feast lookup. Both are tolerant of
-        // failure (we render what we have).
-        const dPromise = fetch(apiUrl(`/api/clients/${id}/donations`))
-          .then(r => r.ok ? r.json() : { lines: [], total: 0, gift_count: 0 })
-          .catch(() => ({ lines: [], total: 0, gift_count: 0 }))
+        // Fan out — donations + feast lookup. Neither may cost the reader
+        // the profile itself; the donations panel says so for itself when
+        // its read fails, the feast simply goes unshown.
+        const dPromise = readDonations(id)
 
         const fPromise = m.birth_date
           ? fetch(apiUrl(`/api/liturgical?date=${m.birth_date}`))
@@ -694,7 +786,7 @@ export default function MemberDetail() {
       .finally(() => { if (!cancelled) setLoading(false) })
 
     return () => { cancelled = true }
-  }, [id])
+  }, [id, attempt])
 
   if (loading) {
     return (
@@ -706,7 +798,12 @@ export default function MemberDetail() {
     )
   }
 
-  if (err === 'not-found' || !member) {
+  // Not-found is the server's answer, and only the server's. Every other
+  // way of arriving here without a member — a 500, a dropped connection —
+  // is the ABSENCE of an answer, and used to be shown as this same screen:
+  // "This member doesn't exist or belongs to another organization," said of
+  // a member who was there the whole time. (C5)
+  if (err === 'not-found') {
     return (
       <PageWrapper>
         <div className="max-w-2xl mx-auto py-16">
@@ -716,6 +813,18 @@ export default function MemberDetail() {
             body="This member doesn't exist or belongs to another organization."
             action={{ label: 'Back to Members', onClick: () => window.history.back() }}
           />
+        </div>
+      </PageWrapper>
+    )
+  }
+  if (err || !member) {
+    return (
+      <PageWrapper>
+        <div className="max-w-2xl mx-auto py-10 space-y-4">
+          <LoadFailure body={t('member.loadFailedBody')} cause={err || undefined} onRetry={retry} />
+          <Link to="/clients" className="tap inline-flex items-center gap-1 text-sm text-church-700 dark:text-brass-300 hover:underline">
+            <ChevronLeft size={16} /> Back to Members
+          </Link>
         </div>
       </PageWrapper>
     )
@@ -878,7 +987,14 @@ export default function MemberDetail() {
                   </p>
                 )}
               </div>
-              {!donations || donations.gift_count === 0 ? (
+              {/* Three answers, not two. Unread (null, or a failed read) is
+                  its own branch — "No gifts recorded" is a claim about a
+                  parishioner's giving and is reachable only from a
+                  successful read. (C5) */}
+              {!donations || donations.failed ? (
+                <LoadFailure variant="strip" body={t('member.giftsFailedBody')} cause={donations?.error}
+                  onRetry={retryGifts} retrying={giftsRetrying} />
+              ) : donations.gift_count === 0 ? (
                 <p className="text-sm text-ink-500 dark:text-parchment-300/70 italic py-4 text-center">
                   No gifts recorded for this member.
                   {member.email
@@ -896,7 +1012,7 @@ export default function MemberDetail() {
                         <p className="text-xs text-ink-500 dark:text-parchment-300/70 mt-0.5">
                           {fmtDateLong(l.date)} · {l.method}
                           {l.notes && !l.notes.startsWith('[Sample]') && (
-                            <span className="text-ink-400 dark:text-parchment-300/50"> · {l.notes}</span>
+                            <span className="text-ink-400 dark:text-parchment-300/70"> · {l.notes}</span>
                           )}
                         </p>
                       </div>

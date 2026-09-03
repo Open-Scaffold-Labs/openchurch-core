@@ -90,7 +90,7 @@ function GenerationCard({ entry }) {
             {promptPreview || <span className="italic text-ink-500 dark:text-parchment-300/70">No prompt recorded</span>}
           </p>
         </div>
-        <div className="shrink-0 self-center text-ink-400 dark:text-parchment-300/50">
+        <div className="shrink-0 self-center text-ink-400 dark:text-parchment-300/70">
           {open ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
         </div>
       </button>
@@ -224,7 +224,7 @@ export default function Library() {
             <div className="flex-1 min-w-[180px]">
               <label className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">Search</label>
               <div className="relative">
-                <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-ink-400 dark:text-parchment-300/50" />
+                <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-ink-400 dark:text-parchment-300/70" />
                 <input
                   type="text"
                   value={filters.q}

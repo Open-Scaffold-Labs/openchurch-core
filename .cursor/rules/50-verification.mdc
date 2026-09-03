@@ -1,0 +1,30 @@
+---
+description: Apply when implementing, debugging, reviewing CI or security, or completing work. Derive commands from current package scripts and CI, reproduce before fixing, run focused checks first, review the final diff, and never claim an unrun suite passed.
+alwaysApply: false
+---
+
+# Verification
+
+Applies while implementing, debugging, reviewing, or finishing a task. Evidence rungs are
+defined in `docs/EVIDENCE.md`; name the rung your claim reached.
+
+- **Derive commands, don't remember them.** Read the current `package.json` scripts and
+  `.github/workflows/ci.yml` to learn what actually runs. Do not hard-code a command from memory
+  — script names and gates change.
+- **Reproduce before you fix.** For a defect, first reproduce it (a failing test or an observed
+  bad output), then fix, then show the same steps now pass. Prefer adding a regression test at
+  the level the bug lives.
+- **Focused checks first, then the gates.** Run the narrow check for what you touched before the
+  broad ones. The repo's gates include `npm test` (server smoke suite on a real throwaway
+  Postgres), `npm test` (client), `npm run build` (both clients), and the ratchets
+  `lint:operator`, `lint:honest`, `lint:api-shape`, `lint:client-scope`, plus
+  `server/scripts/audit-tenancy.mjs`, `server/scripts/env-documented.mjs`,
+  `scripts/tenant-fk-audit.mjs`, and `scripts/money-invariants.mjs`. Match the subset to your
+  change.
+- **Gate on the summary, not the exit code.** A test runner can print "skipped" and still exit
+  0; confirm the summary line reports the tests actually passed.
+- **Review the final diff** before declaring done — no stray debug code, no widened scope, no
+  reverted hardening.
+- **Claims need evidence.** Never say a suite passed unless it ran and passed. A security or
+  correctness finding stays a claim until code, a query, or a test confirms it. Report what you
+  did not verify.

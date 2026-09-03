@@ -1,6 +1,6 @@
 import { BrowserRouter, Routes, Route, NavLink, useNavigate, Navigate, useLocation } from 'react-router-dom'
 import { useRef, useState, useEffect, lazy, Suspense } from 'react'
-import { Users, Calendar, DollarSign, Heart, CheckSquare, Clock, Search, Bell, Sun, Moon, LayoutDashboard, LogOut, Settings, User, ChevronDown, ChevronsLeft, ChevronsRight, X, Loader2, Feather, Shield, CreditCard, ScrollText, SlidersHorizontal, BookOpen, Building2, BarChart3, FileText, UserCheck, Menu, Newspaper, ListMusic, Church, Flame, MessageCircle, Landmark, HelpCircle, LifeBuoy } from 'lucide-react'
+import { Users, Calendar, DollarSign, Heart, CheckSquare, Clock, Search, Bell, Sun, Moon, LayoutDashboard, LogOut, Settings, User, ChevronDown, ChevronsLeft, ChevronsRight, X, Loader2, Feather, Shield, CreditCard, ScrollText, SlidersHorizontal, BookOpen, Building2, BarChart3, FileText, UserCheck, Menu, Newspaper, ListMusic, Church, Flame, MessageCircle, Landmark, HelpCircle, LifeBuoy, ArchiveRestore, HandCoins, PackageOpen, Compass } from 'lucide-react'
 import { AlertTriangle } from 'lucide-react'
 import { Users2 } from 'lucide-react'
 import FeedbackModal from './components/FeedbackModal'
@@ -8,6 +8,7 @@ import OpenMark from './components/OpenMark'
 import { ThemeProvider, useTheme } from './context/ThemeContext'
 import { AuthProvider, useAuth } from './context/AuthContext'
 import { LocaleProvider, useLocale } from './i18n'
+import { ConfirmProvider } from './components/ConfirmProvider'
 import { apiUrl } from './api'
 // Shell components load eagerly — they're the always-present chrome
 // (search palette, PWA prompts, error boundary, avatar), not route-split
@@ -17,7 +18,9 @@ import InstallPrompt from './components/InstallPrompt'
 import OfflineBanner from './components/OfflineBanner'
 import UpdatePrompt from './components/UpdatePrompt'
 import PageErrorBoundary from './components/PageErrorBoundary'
+import SessionUnconfirmed from './components/SessionUnconfirmed'
 import UserAvatar from './components/UserAvatar'
+import { mutate, loadList } from './utils/format'
 
 // Route-split pages (POL.1). Each becomes its own chunk via React.lazy,
 // so the initial download is the shell + the current route — not all 36
@@ -39,6 +42,7 @@ const DonorStatement = lazy(() => import('./pages/DonorStatement'))
 const OrgSettings = lazy(() => import('./pages/OrgSettings'))
 const Insights = lazy(() => import('./pages/Insights'))
 const MemberDetail = lazy(() => import('./pages/MemberDetail'))
+const SacramentRecord = lazy(() => import('./pages/SacramentRecord'))
 const PublicEvents = lazy(() => import('./pages/PublicEvents'))
 const PublicChurch = lazy(() => import('./pages/PublicChurch'))
 const PublicGive = lazy(() => import('./pages/PublicGive'))
@@ -46,6 +50,10 @@ const PublicForm = lazy(() => import('./pages/PublicForm'))
 const PublicSwap = lazy(() => import('./pages/PublicSwap'))
 const Kiosk = lazy(() => import('./pages/Kiosk'))
 const Pledges = lazy(() => import('./pages/Pledges'))
+const Offerings = lazy(() => import('./pages/Offerings'))
+const InvoicePrint = lazy(() => import('./pages/InvoicePrint'))
+const MigrationStudio = lazy(() => import('./pages/MigrationStudio'))
+const ImportReceipt = lazy(() => import('./pages/ImportReceipt'))
 const Forms = lazy(() => import('./pages/Forms'))
 const FormResponses = lazy(() => import('./pages/FormResponses'))
 const AI = lazy(() => import('./pages/AI'))
@@ -57,7 +65,11 @@ const ResetPassword = lazy(() => import('./pages/ResetPassword'))
 const Team = lazy(() => import('./pages/Team'))
 const Billing = lazy(() => import('./pages/Billing'))
 const Audit = lazy(() => import('./pages/Audit'))
+const Archive = lazy(() => import('./pages/Archive'))
+const GettingSettled = lazy(() => import('./pages/GettingSettled'))
+const SetupRecord = lazy(() => import('./pages/SetupRecord'))
 const Notifications = lazy(() => import('./pages/Notifications'))
+const Diocese = lazy(() => import('./pages/Diocese'))
 const Checkin = lazy(() => import('./pages/Checkin'))
 const Preferences = lazy(() => import('./pages/Preferences'))
 const Library = lazy(() => import('./pages/Library'))
@@ -119,20 +131,35 @@ const NAV_ITEMS = [
   // Money in, money out
   { to: '/donations', icon: Heart,         label: 'Donations',   section: 'Stewardship' },
   { to: '/pledges',   icon: Heart,         label: 'Pledges',     section: 'Stewardship', adminOnly: true },
+  { to: '/offerings', icon: HandCoins,     label: 'Offerings',   section: 'Stewardship' },
   { to: '/payroll',   icon: DollarSign,    label: 'Payroll',     section: 'Stewardship' },
   { to: '/finance',   icon: Landmark,      label: 'Finance',     section: 'Stewardship', adminOnly: true },
+  // DIO.6 — hidden unless this parish is actually affiliated. An
+  // independent parish has no diocese, and a nav item promising one it
+  // does not have is a small lie told on every page load.
+  { to: '/diocese',   icon: Building2,     label: 'Diocese',     section: 'Stewardship', affiliatedOnly: true },
 
   // AI generation + the archive of what you've made
   { to: '/ai',        icon: Feather,      label: 'AI Studio',   section: 'Studio' },
   { to: '/library',   icon: BookOpen,      label: 'Library',     section: 'Studio' },
 
   // Org-wide settings (admin)
+  // Deliberately NOT adminOnly, and deliberately first in Admin. The
+  // person most likely to need orientation is the one who was invited
+  // last week and holds the smallest role.
+  { to: '/getting-settled', icon: Compass,   label: 'Getting settled', section: 'Admin' },
   { to: '/insights',  icon: BarChart3,     label: 'Insights',    section: 'Admin', adminOnly: true },
   { to: '/team',      icon: Shield,        label: 'Team',        section: 'Admin', adminOnly: true },
   { to: '/settings',  icon: Building2,     label: 'Org details', section: 'Admin', adminOnly: true },
   { to: '/billing',   icon: CreditCard,    label: 'Billing',     section: 'Admin', adminOnly: true },
   { to: '/audit',     icon: ScrollText,    label: 'Audit log',   section: 'Admin', adminOnly: true },
+  // Deliberately NOT adminOnly. The person most likely to need this page
+  // is whoever just removed the wrong thing, and they are usually not the
+  // administrator. They cannot restore it — the page says so, and says who
+  // can — but they can see that it is recoverable and stop worrying.
+  { to: '/archive',   icon: ArchiveRestore, label: 'Archive',    section: 'Admin' },
   { to: '/support',   icon: LifeBuoy,      label: 'Support',     section: 'Admin', adminOnly: true },
+  { to: '/migration', icon: PackageOpen,   label: 'Migration',   section: 'Admin', adminOnly: true },
   { to: '/notifications', icon: Bell,      label: 'Notifications', section: 'Admin', adminOnly: true },
 
   // Per-user
@@ -140,9 +167,11 @@ const NAV_ITEMS = [
 ]
 
 // Returns NAV_ITEMS filtered by the current user's role. adminOnly
-// items are hidden for staff/viewer; everything else is shown.
-function visibleNavFor(role) {
-  return NAV_ITEMS.filter(item => !item.adminOnly || role === 'admin')
+// items are hidden for staff/viewer; affiliatedOnly items are hidden
+// until this parish actually has a live diocese affiliation.
+function visibleNavFor(role, affiliated) {
+  return NAV_ITEMS.filter(item =>
+    (!item.adminOnly || role === 'admin') && (!item.affiliatedOnly || affiliated))
 }
 
 // Bucket nav items into sections preserving NAV_ITEMS order. Items
@@ -178,7 +207,19 @@ function Sidebar({ collapsed: collapsedProp, onToggle, mobileOpen }) {
   const { dark, toggle } = useTheme()
   const { user } = useAuth()
   const { t } = useLocale()
-  const items = visibleNavFor(user?.role)
+  // One cheap read, cached for the session: does this parish have a live
+  // diocese? Failure is treated as "no" — a missing nav item is a smaller
+  // wrong than a nav item leading to an empty page.
+  const [affiliated, setAffiliated] = useState(false)
+  useEffect(() => {
+    let alive = true
+    fetch(apiUrl('/api/affiliation'))
+      .then(r => (r.ok ? r.json() : { affiliation: null }))
+      .then(d => { if (alive) setAffiliated(d.affiliation?.status === 'active') })
+      .catch(() => {})
+    return () => { alive = false }
+  }, [])
+  const items = visibleNavFor(user?.role, affiliated)
 
   // POL.4 — below md the sidebar is an off-canvas drawer, so the
   // desktop "rail" (collapsed) mode never applies there: a narrow rail
@@ -324,15 +365,20 @@ function Header({ onMenuClick }) {
   const [open, setOpen] = useState(false)
   const [helpOpen, setHelpOpen] = useState(false)
   const [notifications, setNotifications] = useState([])
+  const [notificationsFailed, setNotificationsFailed] = useState(false)
   const ref = useRef(null)
   const navigate = useNavigate()
   const { user } = useAuth()
 
+  // A failed poll leaves the last known list alone. Overwriting it with []
+  // silently drops the unread badge to zero every 30 seconds on a flaky
+  // connection, and "No notifications yet" is then a lie the user has no
+  // way to detect.
   const fetchNotifications = () => {
-    fetch(apiUrl('/api/notifications'))
-      .then(r => r.ok ? r.json() : [])
-      .then(setNotifications)
-      .catch(err => console.error('Failed to load notifications:', err))
+    loadList(apiUrl('/api/notifications')).then(({ ok, data }) => {
+      if (ok) setNotifications(data)
+      setNotificationsFailed(!ok)
+    })
   }
 
   useEffect(() => {
@@ -349,8 +395,12 @@ function Header({ onMenuClick }) {
     return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [])
 
+  // The list only shows what the server actually recorded. If the write
+  // fails the item stays unread and the badge keeps its count — a stale
+  // badge is recoverable, a badge that lies about a saved state is not.
   async function markRead(id) {
-    await fetch(apiUrl(`/api/notifications/${id}/read`), { method: 'PATCH' })
+    const { ok } = await mutate(apiUrl(`/api/notifications/${id}/read`), { method: 'PATCH' })
+    if (!ok) return
     setNotifications(ns => ns.map(n => n.id === id ? { ...n, read: true } : n))
   }
 
@@ -365,7 +415,8 @@ function Header({ onMenuClick }) {
   }
 
   async function markAllRead() {
-    await fetch(apiUrl('/api/notifications/read-all'), { method: 'PATCH' })
+    const { ok } = await mutate(apiUrl('/api/notifications/read-all'), { method: 'PATCH' })
+    if (!ok) return
     setNotifications(ns => ns.map(n => ({ ...n, read: true })))
   }
 
@@ -412,7 +463,7 @@ function Header({ onMenuClick }) {
           type="button"
           onClick={onMenuClick}
           aria-label="Open navigation menu"
-          className="md:hidden -ml-1 shrink-0 p-2 rounded-lg text-ink-500 dark:text-parchment-300/70 hover:bg-parchment-200/60 dark:hover:bg-ink-800/80 transition-colors"
+          className="tap md:hidden -ml-1 shrink-0 inline-flex items-center justify-center p-2 rounded-lg text-ink-500 dark:text-parchment-300/70 hover:bg-parchment-200/60 dark:hover:bg-ink-800/80 transition-colors"
         >
           <Menu size={18} />
         </button>
@@ -422,7 +473,7 @@ function Header({ onMenuClick }) {
           type="button"
           onClick={() => setSearchOpen(true)}
           aria-label="Open search"
-          className="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-parchment-50 dark:bg-ink-800 border border-parchment-300/70 dark:border-brass-900/40 text-ink-500 dark:text-parchment-300/70 hover:bg-parchment-200/60 dark:hover:bg-ink-800/80 transition-colors w-full"
+          className="tap inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-parchment-50 dark:bg-ink-800 border border-parchment-300/70 dark:border-brass-900/40 text-ink-500 dark:text-parchment-300/70 hover:bg-parchment-200/60 dark:hover:bg-ink-800/80 transition-colors w-full"
         >
           <Search size={14} className="shrink-0" />
           <span className="text-sm flex-1 text-left hidden sm:inline">{t('shell.search')}</span>
@@ -444,7 +495,7 @@ function Header({ onMenuClick }) {
           onClick={() => setHelpOpen(true)}
           aria-label={t('help.title')}
           title={t('help.title')}
-          className="p-2 rounded-lg text-ink-500 hover:text-church-900 dark:text-parchment-200/70 dark:hover:text-brass-200 hover:bg-parchment-200/60 dark:hover:bg-ink-800 transition-colors"
+          className="tap inline-flex items-center justify-center p-2 rounded-lg text-ink-500 hover:text-church-900 dark:text-parchment-200/70 dark:hover:text-brass-200 hover:bg-parchment-200/60 dark:hover:bg-ink-800 transition-colors"
         >
           <HelpCircle size={18} aria-hidden="true" />
         </button>
@@ -458,7 +509,7 @@ function Header({ onMenuClick }) {
             onClick={() => setOpen(o => !o)}
             aria-label={unread > 0 ? `Notifications, ${unread} unread` : 'Notifications'}
             aria-expanded={open}
-            className="relative p-2 rounded-lg text-ink-500 hover:text-church-900 dark:text-parchment-200/70 dark:hover:text-brass-200 hover:bg-parchment-200/60 dark:hover:bg-ink-800 transition-colors"
+            className="tap relative inline-flex items-center justify-center p-2 rounded-lg text-ink-500 hover:text-church-900 dark:text-parchment-200/70 dark:hover:text-brass-200 hover:bg-parchment-200/60 dark:hover:bg-ink-800 transition-colors"
           >
             <Bell size={18} aria-hidden="true" />
             {unread > 0 && (
@@ -490,8 +541,18 @@ function Header({ onMenuClick }) {
                 )}
               </div>
 
+              {notificationsFailed && notifications.length > 0 && (
+                <p role="status" className="px-4 py-2 text-[11px] text-amber-700 dark:text-amber-400 border-b border-parchment-200/60 dark:border-brass-900/25">
+                  This list may be out of date — the last check didn't reach the server.
+                </p>
+              )}
+
               {notifications.length === 0 ? (
-                <p className="px-4 py-4 text-xs text-ink-500 dark:text-parchment-300/70 text-center">No notifications yet</p>
+                <p role="status" className={`px-4 py-4 text-xs text-center ${notificationsFailed ? 'text-amber-700 dark:text-amber-400' : 'text-ink-500 dark:text-parchment-300/70'}`}>
+                  {notificationsFailed
+                    ? "We couldn't check your notifications just now."
+                    : 'No notifications yet'}
+                </p>
               ) : (
                 <ul className="max-h-56 overflow-y-auto divide-y divide-parchment-200/60 dark:divide-brass-900/25">
                   {notifications.slice(0, 8).map(n => {
@@ -596,7 +657,7 @@ function ProfileDropdown() {
         onClick={() => setOpen(o => !o)}
         aria-label={`Account menu for ${displayName}`}
         aria-expanded={open}
-        className="flex items-center gap-2 p-1 pr-2 rounded-lg hover:bg-parchment-200/60 dark:hover:bg-ink-800 transition-colors"
+        className="tap flex items-center gap-2 p-1 pr-2 rounded-lg hover:bg-parchment-200/60 dark:hover:bg-ink-800 transition-colors"
       >
         <UserAvatar avatar={user?.avatar} name={displayName} className="w-8 h-8" textClassName="text-xs" />
         <ChevronDown size={14} className={`text-ink-400 dark:text-parchment-300/60 transition-transform ${open ? 'rotate-180' : ''}`} />
@@ -691,7 +752,7 @@ function ProfileDropdown() {
 // of these routes without a valid session is bounced to /login, preserving
 // the attempted URL so we can return them there after sign-in.
 function ProtectedLayout() {
-  const { isAuthenticated, loading, user } = useAuth()
+  const { isAuthenticated, loading, user, authUnavailable } = useAuth()
   const location = useLocation()
 
   // Multi-tenant title: reflect the signed-in org's name in the browser
@@ -729,6 +790,10 @@ function ProtectedLayout() {
       </div>
     )
   }
+  // A credential nobody has rejected is not a signed-out user. Bouncing to
+  // /login here told the secretary her session was invalid on the strength
+  // of a 500 from the auth check — and cost her her password to undo it.
+  if (authUnavailable) return <SessionUnconfirmed />
   if (!isAuthenticated) {
     return <Navigate to="/login" replace state={{ from: location }} />
   }
@@ -776,10 +841,18 @@ function ProtectedLayout() {
             <Route path="/tasks"     element={<PageErrorBoundary scope="Tasks"><Tasks /></PageErrorBoundary>} />
             <Route path="/payroll"   element={<PageErrorBoundary scope="Payroll"><Payroll /></PageErrorBoundary>} />
             <Route path="/finance"   element={<PageErrorBoundary scope="Finance"><Finance /></PageErrorBoundary>} />
+            {/* DIO.6 — the route exists whether or not the nav shows it, so
+                a bookmarked link still works and an unaffiliated parish gets
+                an explanation rather than a 404. */}
+            <Route path="/diocese"   element={<PageErrorBoundary scope="Diocese"><Diocese /></PageErrorBoundary>} />
             <Route path="/donations" element={<PageErrorBoundary scope="Donations"><Donations /></PageErrorBoundary>} />
             <Route path="/donations/statements" element={<PageErrorBoundary scope="Giving statements"><GivingStatements /></PageErrorBoundary>} />
             <Route path="/donations/statements/:donorKey" element={<PageErrorBoundary scope="Donor statement"><DonorStatement /></PageErrorBoundary>} />
             <Route path="/pledges"   element={<PageErrorBoundary scope="Pledges"><Pledges /></PageErrorBoundary>} />
+            <Route path="/offerings" element={<PageErrorBoundary scope="Offerings"><Offerings /></PageErrorBoundary>} />
+            <Route path="/offerings/:id/print" element={<PageErrorBoundary scope="Offerings sheet"><InvoicePrint /></PageErrorBoundary>} />
+            <Route path="/migration" element={<PageErrorBoundary scope="Migration Studio"><MigrationStudio /></PageErrorBoundary>} />
+            <Route path="/migration/:id/receipt" element={<PageErrorBoundary scope="Import receipt"><ImportReceipt /></PageErrorBoundary>} />
             <Route path="/forms"     element={<PageErrorBoundary scope="Forms"><Forms /></PageErrorBoundary>} />
             <Route path="/forms/:id/responses" element={<PageErrorBoundary scope="Form responses"><FormResponses /></PageErrorBoundary>} />
             <Route path="/settings"  element={<PageErrorBoundary scope="Org settings"><OrgSettings /></PageErrorBoundary>} />
@@ -793,12 +866,16 @@ function ProtectedLayout() {
             <Route path="/register"  element={<PageErrorBoundary scope="Sacramental Register"><SacramentalRegister /></PageErrorBoundary>} />
             <Route path="/register/drafts" element={<PageErrorBoundary scope="Register Drafts"><RegisterDrafts /></PageErrorBoundary>} />
             <Route path="/admin/workbench" element={<PageErrorBoundary scope="Workbench"><Workbench /></PageErrorBoundary>} />
-            <Route path="/register/:id/certificate" element={<PageErrorBoundary scope="Certificate"><SacramentCertificate /></PageErrorBoundary>} />
+                        <Route path="/register/:id" element={<PageErrorBoundary scope="Register entry"><SacramentRecord /></PageErrorBoundary>} />
+<Route path="/register/:id/certificate" element={<PageErrorBoundary scope="Certificate"><SacramentCertificate /></PageErrorBoundary>} />
             <Route path="/mass-intentions" element={<PageErrorBoundary scope="Mass Intentions"><MassIntentions /></PageErrorBoundary>} />
             <Route path="/mass-intentions/print" element={<PageErrorBoundary scope="Sacristy Sheet"><SacristySheet /></PageErrorBoundary>} />
             <Route path="/team"        element={<PageErrorBoundary scope="Team"><Team /></PageErrorBoundary>} />
             <Route path="/billing"     element={<PageErrorBoundary scope="Billing"><Billing /></PageErrorBoundary>} />
             <Route path="/audit"       element={<PageErrorBoundary scope="Audit log"><Audit /></PageErrorBoundary>} />
+            <Route path="/archive"     element={<PageErrorBoundary scope="Archive & Recovery"><Archive /></PageErrorBoundary>} />
+            <Route path="/getting-settled" element={<PageErrorBoundary scope="Getting settled"><GettingSettled /></PageErrorBoundary>} />
+            <Route path="/getting-settled/record" element={<PageErrorBoundary scope="First Parish Setup Record"><SetupRecord /></PageErrorBoundary>} />
             <Route path="/support"     element={<PageErrorBoundary scope="Support"><Support /></PageErrorBoundary>} />
             <Route path="/notifications" element={<PageErrorBoundary scope="Notifications"><Notifications /></PageErrorBoundary>} />
             <Route path="/preferences" element={<PageErrorBoundary scope="Preferences"><Preferences /></PageErrorBoundary>} />
@@ -827,7 +904,7 @@ function RedirectIfAuthed({ children }) {
 // shell (sidebar + header). Used by /welcome, which is a focused one-page
 // experience shown once post-signup.
 function RequireAuth({ children }) {
-  const { isAuthenticated, loading } = useAuth()
+  const { isAuthenticated, loading, authUnavailable } = useAuth()
   const location = useLocation()
   if (loading) {
     return (
@@ -836,6 +913,7 @@ function RequireAuth({ children }) {
       </div>
     )
   }
+  if (authUnavailable) return <SessionUnconfirmed />
   if (!isAuthenticated) return <Navigate to="/login" replace state={{ from: location }} />
   return children
 }
@@ -848,6 +926,10 @@ export default function App() {
         {/* Locale spine — inside AuthProvider so the parish default
             (user.organization.locale) can join the fallback chain. */}
         <LocaleProvider>
+        {/* Inside the locale spine, because the confirmation dialog now
+            speaks: its "a recoverable copy is kept" note is a translated
+            string, and a provider can only read contexts above it. */}
+        <ConfirmProvider>
           {/* Install prompt lives outside Routes so it can render on
               any page — including /login + /p/:slug/events where the
               user isn't yet authenticated. Self-hides when the app is
@@ -898,6 +980,7 @@ export default function App() {
             <Route path="/*"       element={<ProtectedLayout />} />
           </Routes>
           </Suspense>
+        </ConfirmProvider>
         </LocaleProvider>
         </AuthProvider>
       </BrowserRouter>

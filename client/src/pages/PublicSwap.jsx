@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Loader2, AlertTriangle, X, Calendar, Send, Inbox, Clock } from 'lucide-react'
+import { Loader2, AlertTriangle, X, Calendar, Send, Inbox, Clock, RefreshCw } from 'lucide-react'
 import { apiUrl } from '../api'
 import { parseLocalDate } from '../utils/dates'
+import { useLocale } from '../i18n'
 
 // VS.2 — Public parishioner swap-request page.
 //
@@ -37,6 +38,10 @@ function fmtTime(hms) {
 }
 
 export default function PublicSwap() {
+  // Not for t() — these pages are still English (the string pass is
+  // separate work). This is the switch that lets the parish's language
+  // reach a page nobody signs in to.
+  const { setPublicLocale } = useLocale()
   const { token } = useParams()
   const [data,    setData]    = useState(null)
   const [loading, setLoading] = useState(true)
@@ -46,19 +51,41 @@ export default function PublicSwap() {
   // label and other buttons disable while one action is in flight.
   const [busy,         setBusy]         = useState(null)
   const [requestModal, setRequestModal] = useState(null)
-  const [requestForm,  setRequestForm]  = useState({ targetId: '', note: '' })
+  const [requestForm,  setRequestForm]  = useState({ targetId: '', targetName: '', note: '' })
+  // The swap link used to arrive with the whole parish directory attached, so
+  // this was a <select>. It isn't any more: a forwarded link should not be a
+  // copy of the roster. You type the name of the person you already have in
+  // mind — which is how choosing a swap partner actually works.
+  const [memberQuery,   setMemberQuery]   = useState('')
+  const [memberResults, setMemberResults] = useState([])
+  const [searching,     setSearching]     = useState(false)
   const [savingPref,   setSavingPref]   = useState(false)
+  // Whether the token is genuinely gone, as opposed to us being unable to answer.
+  const [linkIsGone,   setLinkIsGone]   = useState(false)
+  const [searchFailed, setSearchFailed] = useState(false)
 
   const load = async () => {
     setError(null)
     try {
       const res = await fetch(apiUrl(`/api/swap/by-token/${token}`))
       if (!res.ok) {
-        setError("We couldn't find that link. It may have been rotated or never existed.")
+        // Same split as the kiosk, for the same reason: only a 404 means the
+        // link is gone. Anything else means we could not answer, and telling
+        // a volunteer their link is dead sends them to an admin to solve a
+        // problem that is not theirs.
+        setLinkIsGone(res.status === 404)
+        setError(res.status === 404
+          ? "We couldn't find that link. It may have been rotated or never existed."
+          : "We couldn't reach the server just now. Your link is fine — this is on our side.")
         setData(null); setLoading(false); return
       }
-      setData(await res.json())
+      const body = await res.json()
+      // The parish's language, from the endpoint. Nobody is signed in
+      // here, so this is the only thing that can make the page speak it.
+      setPublicLocale(body.org?.locale)
+      setData(body)
     } catch {
+      setLinkIsGone(false)
       setError("We couldn't reach the server. Please check your connection and try again.")
     } finally {
       setLoading(false)
@@ -69,6 +96,32 @@ export default function PublicSwap() {
 
   // Transient action error — an inline banner, never a native alert().
   const [flash, setFlash] = useState(null)
+
+  // Debounced so a name typed at speed is one request, not eight. Two
+  // characters minimum, matching what the server will answer.
+  useEffect(() => {
+    const q = memberQuery.trim()
+    // Clear the spinner on the way out, not only in the fetch's finally —
+    // the previous effect's cleanup has already run by now, so deleting a
+    // query back to empty inside the debounce window left "Looking…" under
+    // an empty box forever.
+    if (q.length < 2) { setMemberResults([]); setSearching(false); return }
+    let cancelled = false
+    setSearching(true)
+    const t = setTimeout(async () => {
+      try {
+        const res = await fetch(apiUrl(`/api/swap/by-token/${token}/members?q=${encodeURIComponent(q)}`))
+        if (!res.ok) { if (!cancelled) setSearchFailed(true); return }
+        const d = await res.json()
+        if (!cancelled) { setSearchFailed(false); setMemberResults(d.members ?? []) }
+      } catch {
+        if (!cancelled) setSearchFailed(true)
+      } finally {
+        if (!cancelled) setSearching(false)
+      }
+    }, 250)
+    return () => { cancelled = true; clearTimeout(t) }
+  }, [memberQuery, token])
 
   const act = async (key, url, body) => {
     setBusy(key)
@@ -139,15 +192,28 @@ export default function PublicSwap() {
       <div className="min-h-screen flex items-center justify-center bg-parchment-100 dark:bg-ink-900 p-6">
         <div className="max-w-md text-center space-y-3">
           <AlertTriangle className="mx-auto text-amber-600" size={36} />
+          {/* The heading used to read "Link not found" above a body that
+              said "We couldn't reach the server" — a page contradicting
+              itself, with advice that matched neither. */}
           <h1 className="text-xl font-bold text-ink-900 dark:text-parchment-50 font-display">
-            Link not found
+            {linkIsGone ? 'Link not found' : "We couldn't open your swap link"}
           </h1>
-          <p className="text-sm text-ink-700 dark:text-parchment-200">
+          <p role="status" className="text-sm text-ink-700 dark:text-parchment-200">
             {error || "We couldn't find that link."}
           </p>
-          <p className="text-xs text-ink-500 dark:text-parchment-300/70 mt-4">
-            Ask your church admin for a fresh swap link.
-          </p>
+          {linkIsGone ? (
+            <p className="text-xs text-ink-500 dark:text-parchment-300/70 mt-4">
+              Ask your church admin for a fresh swap link.
+            </p>
+          ) : (
+            <button
+              type="button"
+              onClick={() => { setLoading(true); load() }}
+              className="tap mt-4 inline-flex items-center justify-center gap-1.5 px-5 py-2.5 text-sm font-semibold rounded-lg bg-church-900 text-parchment-50 hover:bg-church-800"
+            >
+              <RefreshCw size={15} aria-hidden="true" /> Try again
+            </button>
+          )}
         </div>
       </div>
     )
@@ -376,21 +442,66 @@ export default function PublicSwap() {
                 <span className="font-semibold">{requestModal.event.title}</span> · {fmtDate(requestModal.event.date)} at {fmtTime(requestModal.event.start_time)}
               </p>
               <div>
-                <label className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1.5">
+                <label htmlFor="swap-ask" className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1.5">
                   Ask
                 </label>
-                <select
-                  value={requestForm.targetId}
-                  onChange={e => setRequestForm(f => ({ ...f, targetId: e.target.value }))}
-                  className="w-full px-3 py-2 text-sm rounded-lg border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-100 dark:bg-ink-800 text-ink-900 dark:text-parchment-50 focus:outline-none focus:ring-2 focus:ring-church-500"
-                >
-                  <option value="">Pick a member…</option>
-                  {data.roster.map(m => (
-                    <option key={m.id} value={m.id}>
-                      {m.name}{m.role ? ` · ${m.role}` : ''}
-                    </option>
-                  ))}
-                </select>
+                {requestForm.targetId ? (
+                  <div className="flex items-center justify-between gap-2 w-full px-3 py-2 text-sm rounded-lg border border-church-400/60 dark:border-brass-700/50 bg-parchment-100 dark:bg-ink-800">
+                    <span className="font-semibold text-ink-900 dark:text-parchment-50 truncate">
+                      {requestForm.targetName}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => { setRequestForm(f => ({ ...f, targetId: '', targetName: '' })); setMemberQuery('') }}
+                      className="text-xs font-semibold text-church-800 dark:text-brass-300 hover:text-church-900 dark:hover:text-parchment-50 shrink-0"
+                    >
+                      Change
+                    </button>
+                  </div>
+                ) : (
+                  <>
+                    <input
+                      id="swap-ask"
+                      type="text"
+                      value={memberQuery}
+                      onChange={e => setMemberQuery(e.target.value)}
+                      placeholder="Start typing a name…"
+                      autoComplete="off"
+                      aria-describedby="swap-ask-help"
+                      className="w-full px-3 py-2 text-sm rounded-lg border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-100 dark:bg-ink-800 text-ink-900 dark:text-parchment-50 placeholder-ink-400 dark:placeholder-parchment-400/50 focus:outline-none focus:ring-2 focus:ring-church-500"
+                    />
+                    <p id="swap-ask-help" className="mt-1 text-[11px] text-ink-500 dark:text-parchment-300/70">
+                      {memberQuery.trim().length > 0 && memberQuery.trim().length < 2
+                        ? 'Two letters or more.'
+                        : searching ? 'Looking…'
+                        // "Nobody by that name" is a statement about the
+                        // roster. It must not be made on the strength of a
+                        // request that failed.
+                        : searchFailed ? "We couldn't search just now — that's our side, not a missing name."
+                        : memberQuery.trim().length >= 2 && memberResults.length === 0
+                          ? 'Nobody by that name.'
+                          : 'Type part of their name.'}
+                    </p>
+                    {memberResults.length > 0 && (
+                      <ul className="mt-1.5 rounded-lg border border-parchment-300/70 dark:border-brass-900/40 divide-y divide-parchment-200/60 dark:divide-brass-900/25 overflow-hidden">
+                        {memberResults.map(m => (
+                          <li key={m.id}>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setRequestForm(f => ({ ...f, targetId: String(m.id), targetName: m.name }))
+                                setMemberResults([])
+                              }}
+                              className="w-full text-left px-3 py-2 text-sm text-ink-900 dark:text-parchment-50 hover:bg-parchment-200/50 dark:hover:bg-ink-700/50 transition-colors"
+                            >
+                              {m.name}
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </>
+                )}
               </div>
               <div>
                 <label className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1.5">

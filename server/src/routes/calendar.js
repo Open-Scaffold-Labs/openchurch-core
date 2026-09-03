@@ -1,6 +1,6 @@
 import { Router } from 'express'
 import pool from '../db.js'
-import { requireIntParam } from '../utils/params.js'
+import { requireIntParam, parsePagination } from '../utils/params.js'
 import { monitor } from '../monitoring/index.js'
 import {
   syncEventReminders, syncSeriesReminders,
@@ -8,6 +8,7 @@ import {
   notifyAssignmentAdded,
 } from '../notifications/calendarReminders.js'
 import { resolveLiturgicalContext, resolveLiturgicalBatch } from './liturgical.js'
+import { captureAndDelete, captureAndDeleteMany, VaultError } from '../vault/index.js'
 
 const router = Router()
 
@@ -238,19 +239,35 @@ router.get('/conflicts/scan', async (req, res) => {
 })
 
 // GET /api/calendar?start=YYYY-MM-DD&end=YYYY-MM-DD
+//
+// Both branches are bounded. The windowed one takes limit/offset like every
+// other list; the no-window one is a legacy shape whose ONLY guarantee is
+// "at most N events, earliest first". It used to return the parish's entire
+// calendar history on every call, and the Dashboard called it that way — so
+// the front page's "This Week" figure was really "every event ever logged",
+// growing forever and correct only in a parish's first seven days. The
+// Dashboard now passes a real week window; the cap here is the safety net
+// for whatever calls this next.
+//
+// Callers that want a period must ask for one. Nothing about this endpoint
+// can tell you "the whole calendar" any more, on purpose.
 router.get('/', async (req, res) => {
   try {
     const { start, end } = req.query
+    const { limit, offset } = parsePagination(req.query)
     const { rows } = start && end
       ? await pool.query(
           `SELECT * FROM ochr_calendar_events
            WHERE organization_id = $1 AND date >= $2 AND date <= $3
-           ORDER BY date, start_time`,
-          [req.organizationId, start, end]
+           ORDER BY date, start_time
+           LIMIT $4 OFFSET $5`,
+          [req.organizationId, start, end, limit, offset]
         )
       : await pool.query(
-          `SELECT * FROM ochr_calendar_events WHERE organization_id = $1 ORDER BY date, start_time`,
-          [req.organizationId]
+          `SELECT * FROM ochr_calendar_events WHERE organization_id = $1
+           ORDER BY date, start_time
+           LIMIT $2 OFFSET $3`,
+          [req.organizationId, limit, offset]
         )
     res.json(rows)
   } catch (err) {
@@ -351,7 +368,8 @@ router.post('/', async (req, res) => {
     )
     const seed = seedRes.rows[0]
     await client.query(
-      'UPDATE ochr_calendar_events SET recurrence_parent_id = $1 WHERE id = $1',
+      `UPDATE ochr_calendar_events SET recurrence_parent_id = $1 WHERE id = $1
+       -- tenancy: same id, same transaction: the row was inserted by this handler with the caller's organization_id moments earlier.`,
       [seed.id]
     )
 
@@ -380,7 +398,8 @@ router.post('/', async (req, res) => {
     // Return the seed with its parent_id reflected so the client
     // can display the recurring badge immediately.
     const finalRes = await pool.query(
-      'SELECT * FROM ochr_calendar_events WHERE id = $1',
+      `SELECT * FROM ochr_calendar_events WHERE id = $1
+       -- tenancy: seed.id was created by this handler inside the transaction just committed, with organization_id set from req.organizationId. Re-reading a row we just wrote.`,
       [seed.id]
     )
     await syncSeriesReminders(req.organizationId, seed.id)
@@ -663,48 +682,62 @@ router.patch('/:id', async (req, res) => {
 //   ?scope=series → delete every row sharing the target's parent_id
 //                   (= the whole series, including the seed).
 //   default       → delete just that one occurrence.
+//
+// Both paths go through the Continuity Vault, and the series path is the
+// reason multi-root capture exists. It is not a loop over the single
+// path: twenty-six occurrences are captured as twenty-six roots of ONE
+// entry, so an administrator who meant to remove next Tuesday and
+// removed the autumn gets the autumn back in one click rather than
+// twenty-six.
+//
+// Deleting the SEED alone is the quiet case. Its self-referencing FK
+// cascades every later occurrence away with it, so a single-occurrence
+// delete can take the whole series — the vault captures those siblings
+// as cascade children and the entry says how many, which is the first
+// time that behaviour has been visible to anyone.
+//
+// Reminders are cancelled BEFORE capture, while the occurrence ids still
+// resolve. They are not restored; the registry says so on the entry.
 router.delete('/:id', async (req, res) => {
   const id = requireIntParam(req, res); if (id === null) return
   const seriesScope = req.query.scope === 'series'
+  const reason = typeof req.query.reason === 'string' ? req.query.reason.slice(0, 500) : null
   try {
-    if (seriesScope) {
-      // Look up the target's parent_id so we know which series to wipe.
-      // If the row isn't recurring, we still delete just it (graceful).
-      const { rows: target } = await pool.query(
-        'SELECT recurrence_parent_id FROM ochr_calendar_events WHERE id = $1 AND organization_id = $2',
-        [id, req.organizationId]
-      )
-      if (!target.length) return res.status(404).json({ error: 'Not found' })
-      const parentId = target[0].recurrence_parent_id
-      if (!parentId) {
-        // Not actually a series — fall through to single-row delete.
-        const result = await pool.query(
-          'DELETE FROM ochr_calendar_events WHERE id = $1 AND organization_id = $2',
-          [id, req.organizationId]
-        )
-        if (result.rowCount === 0) return res.status(404).json({ error: 'Not found' })
-        await cancelEventReminders(req.organizationId, id)
-        return res.status(204).end()
-      }
-      // Cancel reminders for the whole series BEFORE deleting, while the
-      // occurrence ids still resolve.
-      await cancelSeriesReminders(req.organizationId, parentId)
-      const result = await pool.query(
-        'DELETE FROM ochr_calendar_events WHERE recurrence_parent_id = $1 AND organization_id = $2',
+    const { rows: target } = await pool.query(
+      'SELECT recurrence_parent_id FROM ochr_calendar_events WHERE id = $1 AND organization_id = $2',
+      [id, req.organizationId]
+    )
+    if (!target.length) return res.status(404).json({ error: 'Not found' })
+    const parentId = seriesScope ? target[0].recurrence_parent_id : null
+
+    if (parentId) {
+      const { rows: siblings } = await pool.query(
+        'SELECT id FROM ochr_calendar_events WHERE recurrence_parent_id = $1 AND organization_id = $2',
         [parentId, req.organizationId]
       )
-      if (result.rowCount === 0) return res.status(404).json({ error: 'Not found' })
+      await cancelSeriesReminders(req.organizationId, parentId)
+      const captured = await captureAndDeleteMany({
+        kind: 'event',
+        ids: siblings.map(r => r.id),
+        orgId: req.organizationId,
+        user: req.user,
+        reason,
+      })
+      if (!captured) return res.status(404).json({ error: 'Not found' })
       return res.status(204).end()
     }
 
-    const result = await pool.query(
-      'DELETE FROM ochr_calendar_events WHERE id = $1 AND organization_id = $2',
-      [id, req.organizationId]
-    )
-    if (result.rowCount === 0) return res.status(404).json({ error: 'Not found' })
+    // Either a one-off, or series scope on a row that is not recurring.
     await cancelEventReminders(req.organizationId, id)
+    const captured = await captureAndDelete({
+      kind: 'event', id, orgId: req.organizationId, user: req.user, reason,
+    })
+    if (!captured) return res.status(404).json({ error: 'Not found' })
     res.status(204).end()
   } catch (err) {
+    if (err instanceof VaultError) {
+      return res.status(err.status).json({ error: err.message, code: err.code })
+    }
     monitor.error('calendar.delete', err, { orgId: req.organizationId, id, seriesScope })
     res.status(500).json({ error: 'Failed to delete event' })
   }

@@ -47,13 +47,29 @@ export async function scheduleNotification({
   return rows[0]
 }
 
+// A row may be claimed this many times without ever confirming before it
+// is parked as failed. Five is enough to survive a genuinely unlucky run
+// of redeploys, and small enough that a poisoned row cannot hold the
+// queue for a day. Parked, not deleted: an operator has to be able to
+// see what it was and why it never went.
+export const MAX_ATTEMPTS = 5
+
 // Process the next batch of due notifications. Each row's status is
 // flipped under a single UPDATE ... RETURNING so two concurrent
 // drainers can't pick the same row twice (the status='pending' guard
 // in the WHERE clause will fail for any losing claimer).
 //
+// FAIRNESS (migration 081). Claims are ordered by (attempts, send_at),
+// not send_at alone. Strict oldest-first plus the reaper below is a
+// starvation loop: if one row in the oldest batch reliably kills the
+// drainer, every tick reaps the same rows back to 'pending', re-claims
+// the same rows, dies in the same place, and nothing queued afterwards
+// ever sends. Ordering by attempts first means a row that has already
+// had a turn steps behind a row that has never had one, while rows with
+// equal history stay strictly oldest-first.
+//
 // Returns counts so an operator (or cron job report) can see what
-// happened: { processed, sent, failed }.
+// happened: { processed, sent, failed, gaveUp }.
 export async function processDueNotifications({ now = new Date(), batchSize = 50 } = {}) {
   // Reap stranded claims first. A drainer that died mid-batch (cron
   // timeout, redeploy) leaves rows in 'processing' forever — nothing
@@ -63,6 +79,19 @@ export async function processDueNotifications({ now = new Date(), batchSize = 50
   // before their claim could age, so a reaped row re-sends at most a
   // reminder whose send was never confirmed — the right tradeoff for
   // "the reminder must go out".
+  // A row that has burned through MAX_ATTEMPTS claims without ever
+  // confirming is not going to send. Park it with its reason rather than
+  // returning it to the queue for a sixth identical death.
+  const { rowCount: gaveUp } = await pool.query(
+    `UPDATE ochr_scheduled_notifications
+        SET status = 'failed',
+            error  = COALESCE(error, 'never confirmed after ' || attempts || ' attempts')
+      WHERE status = 'processing'
+        AND attempted_at < NOW() - INTERVAL '10 minutes'
+        AND attempts >= $1`,
+    [MAX_ATTEMPTS]
+  )
+
   await pool.query(
     `UPDATE ochr_scheduled_notifications
         SET status = 'pending'
@@ -75,11 +104,11 @@ export async function processDueNotifications({ now = new Date(), batchSize = 50
   // the future), the function returns the zero counts immediately.
   const { rows: claimed } = await pool.query(
     `UPDATE ochr_scheduled_notifications
-        SET status = 'processing', attempted_at = NOW()
+        SET status = 'processing', attempted_at = NOW(), attempts = attempts + 1
       WHERE id IN (
         SELECT id FROM ochr_scheduled_notifications
          WHERE status = 'pending' AND send_at <= $1
-         ORDER BY send_at ASC
+         ORDER BY attempts ASC, send_at ASC
          LIMIT $2
          FOR UPDATE SKIP LOCKED
       )
@@ -115,5 +144,5 @@ export async function processDueNotifications({ now = new Date(), batchSize = 50
     }
   }
 
-  return { processed: claimed.length, sent, failed }
+  return { processed: claimed.length, sent, failed, gaveUp }
 }

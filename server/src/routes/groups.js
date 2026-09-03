@@ -1,6 +1,7 @@
 import { Router } from 'express'
 import pool from '../db.js'
 import { monitor } from '../monitoring/index.js'
+import { protectedDelete } from '../vault/deleteRoute.js'
 
 // Anchor 4 / A4.1 — Groups CRUD + member management.
 //
@@ -230,24 +231,12 @@ router.patch('/:id', async (req, res) => {
 })
 
 // DELETE /api/groups/:id
-//   ON DELETE CASCADE on ochr_group_members handles the roster cleanup.
-router.delete('/:id', async (req, res) => {
-  const id = Number(req.params.id)
-  if (!Number.isInteger(id) || id < 1)
-    return res.status(400).json({ error: 'Invalid group id' })
-  try {
-    const { rowCount } = await pool.query(
-      `DELETE FROM ochr_groups WHERE id = $1 AND organization_id = $2`,
-      [id, req.organizationId]
-    )
-    if (rowCount === 0)
-      return res.status(404).json({ error: 'Group not found' })
-    res.status(204).end()
-  } catch (err) {
-    monitor.error('groups.delete', err)
-    res.status(500).json({ error: 'Failed to delete group' })
-  }
-})
+//   ON DELETE CASCADE on ochr_group_members takes the roster with it —
+//   which is why this is protected by the Continuity Vault. A restore
+//   brings the roster back, not just the group's name.
+router.delete('/:id', protectedDelete('group', {
+  notFound: 'Group not found', failure: 'Failed to delete group',
+}))
 
 // POST /api/groups/:id/members
 //   Body: { client_id }

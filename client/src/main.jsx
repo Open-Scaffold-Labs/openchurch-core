@@ -26,7 +26,6 @@ import './index.css'
 import App from './App.jsx'
 import ErrorBoundary from './components/ErrorBoundary'
 import { ToastProvider } from './components/ToastProvider'
-import { ConfirmProvider } from './components/ConfirmProvider'
 import { installFetchInterceptor } from './auth/fetchInterceptor'
 
 // Attach the auth token to every /api request before React mounts so the
@@ -47,10 +46,13 @@ window.addEventListener('unhandledrejection', (e) => {
 createRoot(document.getElementById('root')).render(
   <StrictMode>
     <ErrorBoundary>
+      {/* ConfirmProvider used to sit here. It moved inside <LocaleProvider>
+          in App.jsx when the dialog started speaking — its recoverable
+          note has to be translated, and a provider cannot read a context
+          that is mounted below it. The build was perfectly happy; every
+          page threw on first paint. */}
       <ToastProvider>
-        <ConfirmProvider>
-          <App />
-        </ConfirmProvider>
+        <App />
       </ToastProvider>
     </ErrorBoundary>
   </StrictMode>

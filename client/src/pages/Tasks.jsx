@@ -1,10 +1,6 @@
 import { useEffect, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import {
-  CheckSquare, Plus, ChevronDown, ChevronUp, Circle,
-  CheckCircle2, Clock, AlertTriangle, RotateCcw, Trash2, X,
-  Link2, Calendar, User
-} from 'lucide-react'
+import { AlertCircle, AlertTriangle, Calendar, CheckCircle2, CheckSquare, ChevronDown, ChevronUp, Circle, Clock, Link2, Plus, RotateCcw, Trash2, User, X } from 'lucide-react'
 import PageWrapper from '../components/PageWrapper'
 import EmptyState from '../components/EmptyState'
 import { TasksIllustration } from '../components/illustrations'
@@ -12,13 +8,14 @@ import { SkeletonRowList } from '../components/Skeleton'
 import { sheetOverlayCls, sheetPanelCls, MobileSheetGrip } from '../components/MobileSheet'
 import { useAuth } from '../context/AuthContext'
 import { useToast } from '../components/ToastProvider'
+import { mutate, loadList, loadOne } from '../utils/format'
 import { apiUrl } from '../api'
 import { initials } from '../utils/format'
 import { celebrateFirstAction } from '../utils/firstActionToast'
 import { useConfirm } from '../components/ConfirmProvider'
 
 // ── Constants ────────────────────────────────────────────────
-const CATEGORIES = ['OPENING', 'CLOSING', 'DAILY_OPS', 'CLEANING', 'SERVICE_PREP', 'MAINTENANCE']
+const CATEGORIES = ['OPENING', 'CLOSING', 'DAILY_OPS', 'CLEANING', 'SERVICE_PREP', 'MAINTENANCE', 'COMMUNICATIONS']
 const PRIORITIES  = ['LOW', 'MEDIUM', 'HIGH']
 const STATUSES    = ['PENDING', 'IN_PROGRESS', 'COMPLETED']
 const RECURRING   = ['DAILY', 'WEEKLY', 'SUNDAY_ONLY']
@@ -34,6 +31,10 @@ const CATEGORY_META = {
   CLEANING:     { label: 'Cleaning',      color: 'bg-brass-500', light: CATEGORY_CHIP },
   SERVICE_PREP: { label: 'Service Prep',  color: 'bg-brass-500', light: CATEGORY_CHIP },
   MAINTENANCE:  { label: 'Maintenance',   color: 'bg-brass-500', light: CATEGORY_CHIP },
+  // Shipped in every sample org since onboarding's seeder was written, and
+  // missing from here the whole time — so "[Sample] Send weekly newsletter"
+  // rendered through the unknown-category fallback and could not be filtered.
+  COMMUNICATIONS: { label: 'Communications', color: 'bg-brass-500', light: CATEGORY_CHIP },
 }
 
 const PRIORITY_META = {
@@ -130,7 +131,16 @@ function TaskCard({ task, onStatusChange, onDelete, onEdit, canWrite }) {
           <button
             onClick={() => onStatusChange(task.id, STATUS_NEXT[task.status])}
             aria-label={`Mark "${task.title}" as ${STATUS_NEXT[task.status].toLowerCase().replace('_', ' ')}`}
-            className="shrink-0 p-1.5 -m-1.5 text-ink-300 dark:text-parchment-400/50 hover:text-church-900 dark:hover:text-parchment-50 transition-colors"
+            /* `.tap`, not `.tap-reach`. Measured on a 390px viewport 27 Aug:
+               row 1 reached 79x79 and every row after it collapsed to the
+               32x32 visual box. tap-reach centres a 48px pseudo-element on
+               the control, which at iPhone row pitch is TALLER THAN THE ROW —
+               so vertically adjacent rows overlap and the later painter wins.
+               The primitive is not broken; it is documented for isolated
+               inline links, and a dense action row is not that.
+               `.tap` only applies under (pointer: coarse), so desktop density
+               is untouched — measured 63x63 there either way. */
+            className="tap shrink-0 inline-flex items-center justify-center p-1.5 text-ink-300 dark:text-parchment-400/50 hover:text-church-900 dark:hover:text-parchment-50 transition-colors"
           >
             {done
               ? <CheckCircle2 size={20} className="text-brass-600 dark:text-brass-400" />
@@ -183,11 +193,21 @@ function TaskCard({ task, onStatusChange, onDelete, onEdit, canWrite }) {
           )}
           {canWrite && (
             <>
-              <button onClick={() => onEdit(task)} className="text-ink-500 dark:text-parchment-300/70 hover:text-ink-700 dark:hover:text-parchment-50 transition-colors text-xs font-medium px-2 py-1 rounded">
+              {/* Same reasoning as Mark above: 45x24 hittable from row 2 down. */}
+              <button onClick={() => onEdit(task)} className="tap inline-flex items-center justify-center text-ink-500 dark:text-parchment-300/70 hover:text-ink-700 dark:hover:text-parchment-50 transition-colors text-xs font-medium px-3 py-1 rounded">
                 Edit
               </button>
+              {/* `.tap`, not `.tap-reach`. Hit-tested on a 390px viewport on
+                  27 Aug: tap-reach's ::after reach is position-dependent —
+                  adjacent controls in a dense row overlap and the later
+                  painter wins, so THIS button's effective target collapsed
+                  to its 26x26 visual box while its neighbour measured
+                  77x71. A destructive control is the wrong place to rely on
+                  a reach that a sibling can take away. The CSS comment on
+                  .tap-reach already warned that "a neighbour paints into
+                  the top of the reach"; this row is where that happens. */}
               <button onClick={() => onDelete(task.id)} aria-label={`Delete task "${task.title}"`}
-                className="p-1.5 -m-1.5 text-ink-300 hover:text-rose-400 transition-colors">
+                className="tap inline-flex items-center justify-center p-1.5 text-ink-300 hover:text-rose-400 transition-colors">
                 <Trash2 size={14} />
               </button>
             </>
@@ -237,21 +257,24 @@ function TaskCard({ task, onStatusChange, onDelete, onEdit, canWrite }) {
 // Mirrors LinkedTasks in Events.jsx: shows events whose assigned members
 // include this task's assigned_member_id. Re-fetches whenever the assignee
 // changes in the open modal.
+// Mirrors LinkedTasks in Events.jsx, and must keep mirroring it: three
+// states, not two. "isn't on any events yet" is a claim about the parish's
+// calendar; a failed request is not entitled to make it.
 function LinkedEvents({ taskId, assignedMemberId }) {
   const [events, setEvents] = useState(null)
+  const [eventsFailed, setEventsFailed] = useState(false)
 
   useEffect(() => {
     let alive = true
+    setEventsFailed(false)
     if (!taskId) { setEvents([]); return }
     if (!assignedMemberId) { setEvents([]); return }
     setEvents(null)
-    fetch(apiUrl(`/api/tasks/${taskId}/events`))
-      .then(r => r.ok ? r.json() : [])
-      .then(data => { if (alive) setEvents(Array.isArray(data) ? data : []) })
-      .catch(err => {
-        console.error(`Failed to load linked events for task ${taskId}:`, err)
-        if (alive) setEvents([])
-      })
+    loadList(apiUrl(`/api/tasks/${taskId}/events`)).then(({ ok, data }) => {
+      if (!alive) return
+      setEvents(data)
+      setEventsFailed(!ok)
+    })
     return () => { alive = false }
   }, [taskId, assignedMemberId])
 
@@ -264,6 +287,13 @@ function LinkedEvents({ taskId, assignedMemberId }) {
   }
   if (events === null) {
     return <p className="text-xs text-ink-500 dark:text-parchment-300/70">Loading linked events…</p>
+  }
+  if (eventsFailed) {
+    return (
+      <p role="status" className="text-xs text-amber-700 dark:text-amber-400">
+        We couldn't check which events this member is on. This is a connection problem, not an empty calendar.
+      </p>
+    )
   }
   if (events.length === 0) {
     return (
@@ -306,13 +336,16 @@ function TaskModal({ task, onClose, onSave }) {
   const [checklistInput, setChecklistInput] = useState('')
   const [members, setMembers] = useState([])
   const [memberSearch, setMemberSearch] = useState('')
+  const [membersFailed, setMembersFailed] = useState(false)
   const field = k => e => setForm(f => ({ ...f, [k]: e.target.value }))
 
   useEffect(() => {
-    fetch(apiUrl('/api/clients'))
-      .then(r => r.json())
-      .then(setMembers)
-      .catch(err => console.error('Failed to load members for task modal:', err))
+    // An empty picker reads as "this parish has no members". If the roster
+    // call failed we do not know that, so the field says so instead.
+    loadList(apiUrl('/api/clients')).then(({ ok, data }) => {
+      setMembers(data)
+      setMembersFailed(!ok)
+    })
   }, [])
 
   const selectedMember = members.find(m => String(m.id) === String(form.assigned_member_id))
@@ -367,6 +400,11 @@ function TaskModal({ task, onClose, onSave }) {
           {/* Assign to member */}
           <div>
             <label className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1.5">Assign To</label>
+            {membersFailed && (
+              <p role="status" className="mb-2 text-xs text-amber-700 dark:text-amber-400">
+                The member list didn't load, so this may be incomplete. It is not a sign that your parish has no members.
+              </p>
+            )}
             {selectedMember ? (
               <div className="flex items-center gap-3 px-3 py-2.5 rounded-lg bg-parchment-100 dark:bg-ink-800 border border-parchment-300/70 dark:border-brass-900/40">
                 <div className="w-7 h-7 rounded-full bg-church-900 dark:bg-church-700 flex items-center justify-center text-parchment-50 text-[10px] font-bold shrink-0">
@@ -515,6 +553,8 @@ export default function Tasks() {
   // Loading guard for the very first fetch only — refilters keep
   // existing data visible to avoid flicker between filter clicks.
   const [initialLoading, setInitialLoading] = useState(true)
+  // Distinct from "no tasks": we asked and did not get an answer.
+  const [loadFailed, setLoadFailed] = useState(false)
   // Pagination (mirrors Clients). "Load more" appends the next page;
   // `hasMore` is derived from whether the last page came back full.
   const [hasMore, setHasMore] = useState(false)
@@ -532,14 +572,25 @@ export default function Tasks() {
     const params = new URLSearchParams(Object.fromEntries(Object.entries(filter).filter(([,v]) => v)))
     params.set('limit', String(PAGE_SIZE))
     params.set('offset', '0')
+
+    // This used to be two bare `.then(r => r.json())` calls inside a
+    // Promise.all with no catch anywhere. A 500 returns HTML, r.json() throws
+    // a SyntaxError, the Promise.all rejects — and setInitialLoading(false)
+    // never runs. The page did not show an error or an empty list. It showed
+    // the loading skeleton, forever, with an unhandled rejection in a console
+    // nobody has open. Same family as the Dashboard's M2 fix; it never
+    // travelled here.
     const [t, s] = await Promise.all([
-      fetch(apiUrl(`/api/tasks?${params}`)).then(r => r.json()),
-      fetch(apiUrl('/api/tasks/stats')).then(r => r.json()),
+      loadList(apiUrl(`/api/tasks?${params}`)),
+      loadOne(apiUrl('/api/tasks/stats')),
     ])
-    setTasks(t)
-    // A full page implies there may be more; a short page is the end.
-    setHasMore(Array.isArray(t) && t.length === PAGE_SIZE)
-    setStats(s)
+
+    setTasks(t.data)
+    // A full page implies there may be more; a short page is the end. A failed
+    // page is neither — and must not be read as "you have reached the end".
+    setHasMore(t.ok && t.data.length === PAGE_SIZE)
+    setStats(s.data)
+    setLoadFailed(!t.ok || !s.ok)
     setInitialLoading(false)
   }
 
@@ -550,27 +601,23 @@ export default function Tasks() {
   const loadMoreTasks = async () => {
     if (loadingMore) return
     setLoadingMore(true)
-    try {
-      const params = new URLSearchParams(Object.fromEntries(Object.entries(filter).filter(([,v]) => v)))
-      params.set('limit', String(PAGE_SIZE))
-      params.set('offset', String(tasks.length))
-      const res = await fetch(apiUrl(`/api/tasks?${params}`))
-      if (!res.ok) return
-      const rows = await res.json()
-      setTasks(prev => [...prev, ...rows])
-      setHasMore(Array.isArray(rows) && rows.length === PAGE_SIZE)
-    } catch (err) {
-      console.error(err)
-    } finally {
-      setLoadingMore(false)
-    }
+    const params = new URLSearchParams(Object.fromEntries(Object.entries(filter).filter(([,v]) => v)))
+    params.set('limit', String(PAGE_SIZE))
+    params.set('offset', String(tasks.length))
+    const { ok, data } = await loadList(apiUrl(`/api/tasks?${params}`))
+    // A silent return here is FAILED presented as NONE: the spinner
+    // stops, no rows appear, and the person concludes they have reached
+    // the end of their own records. Say it instead.
+    if (!ok) { toast.error("Couldn't load more tasks. Nothing was lost — try again."); setLoadingMore(false); return }
+    setTasks(prev => [...prev, ...data])
+    setHasMore(data.length === PAGE_SIZE)
+    setLoadingMore(false)
   }
 
   const handleStatusChange = async (id, status) => {
-    await fetch(apiUrl(`/api/tasks/${id}/status`), {
-      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status }),
-    })
+    const { ok, error } = await mutate(apiUrl(`/api/tasks/${id}/status`),
+      { method: 'PATCH', body: { status } })
+    if (!ok) { toast.error(error); return }
     load()
   }
 
@@ -580,7 +627,8 @@ export default function Tasks() {
       body: 'This cannot be undone.',
       confirmLabel: 'Delete task',
     }))) return
-    await fetch(apiUrl(`/api/tasks/${id}`), { method: 'DELETE' })
+    const { ok, error } = await mutate(apiUrl(`/api/tasks/${id}`), { method: 'DELETE' })
+    if (!ok) { toast.error(error); return }
     load()
   }
 
@@ -699,6 +747,26 @@ export default function Tasks() {
 
         {/* Task groups */}
         <div className="space-y-8">
+          {loadFailed && !initialLoading && (
+            <div role="status" className="mb-5 flex items-start gap-3 rounded-2xl border border-amber-300/70 dark:border-amber-700/40 bg-amber-50/70 dark:bg-amber-900/15 px-5 py-4">
+              <AlertCircle size={18} className="shrink-0 mt-0.5 text-amber-700 dark:text-amber-400" aria-hidden="true" />
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-semibold text-ink-900 dark:text-parchment-50">
+                  Some tasks didn't load.
+                </p>
+                <p className="text-sm text-ink-600 dark:text-parchment-300/80 mt-0.5">
+                  Nothing was lost — this is a connection problem, not your parish's data. What's shown below may be incomplete.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={load}
+                className="shrink-0 text-sm font-semibold text-church-700 dark:text-brass-300 hover:underline focus:outline-none focus:ring-2 focus:ring-church-500 rounded px-2 py-1"
+              >
+                Try again
+              </button>
+            </div>
+          )}
           {initialLoading ? (
             <SkeletonRowList count={6} />
           ) : (<>
@@ -731,7 +799,12 @@ export default function Tasks() {
             )
           })}
 
-          {tasks.length === 0 && (
+          {/* An empty list is only allowed to speak when the load succeeded.
+              `loadFailed` means we do not know what this parish has, and
+              "No tasks yet / Add your first task" is a claim about their
+              data that we are in no position to make. Observed 27 Aug: a
+              parish with 14 tasks was shown the first-run card. */}
+          {!loadFailed && tasks.length === 0 && (
             !filter.category && !filter.status && !filter.priority ? (
               <EmptyState
                 illustration={TasksIllustration}

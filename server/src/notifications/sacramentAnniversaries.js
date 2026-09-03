@@ -81,6 +81,11 @@ export async function enqueueSacramentAnniversaryDigests({ now = new Date() } = 
            JOIN ochr_clients c
              ON c.id = s.client_id AND c.organization_id = s.organization_id AND c.status = 'active'
           WHERE s.organization_id = $1 AND s.date IS NOT NULL
+            -- REG.1: a voided entry left the working register. The parochial
+            -- report already filtered it; this query and /anniversaries did
+            -- not, so a pastor was handed a draft note congratulating someone
+            -- on a sacrament the parish had struck from the book.
+            AND s.voided_at IS NULL
             AND s.type <> 'burial'  -- never auto-draft a burial note (070)
             AND EXTRACT(MONTH FROM s.date) = ANY($2::int[])
           LIMIT 2000`,

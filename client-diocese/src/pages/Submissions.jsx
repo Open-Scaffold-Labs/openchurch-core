@@ -1,12 +1,12 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { Loader2, Check, Undo2 } from 'lucide-react'
 import { apiUrl } from '../api'
-import { usePrompt } from '../components/ConfirmProvider'
+import { useConfirm, usePrompt } from '../components/ConfirmProvider'
+import { fmtMoney, loadOne } from '../utils/format'
+import LoadError from '../components/LoadError'
 
 // Review queue (DIO.2): approve a parish's frozen period, or return it
 // with a note. Only approved periods feed the roll-up.
-
-const fmtMoney = v => Number(v ?? 0).toLocaleString('en-US', { style: 'currency', currency: 'USD' })
 const STATUS_CLS = {
   submitted: 'bg-parchment-200/80 text-ink-700',
   approved:  'bg-brass-50 text-brass-700 border border-brass-200/70',
@@ -15,21 +15,44 @@ const STATUS_CLS = {
 
 export default function Submissions() {
   const askFor = usePrompt()
+  const ask = useConfirm()
   const [rows, setRows] = useState(null)
   const [filter, setFilter] = useState('')
   const [busyId, setBusyId] = useState(null)
   const [error, setError] = useState('')
+  // A failed queue used to `setRows([])`, and an empty queue reads as
+  // "nothing to review" — the one message that makes a chancery close the
+  // tab. A pending submission going unseen is the failure that matters here.
+  const [failed, setFailed] = useState(false)
 
-  const load = (f = filter) => {
-    fetch(apiUrl(`/api/diocese/submissions${f ? `?status=${f}` : ''}`))
-      .then(r => r.json())
-      .then(d => setRows(d.submissions ?? []))
-      .catch(() => setRows([]))
-  }
+  const load = useCallback(async (f = filter) => {
+    setFailed(false)
+    const { ok, data } = await loadOne(
+      apiUrl(`/api/diocese/submissions${f ? `?status=${f}` : ''}`),
+      d => d.submissions ?? [],
+    )
+    if (!ok) { setFailed(true); setRows([]); return }
+    setRows(data)
+  }, [filter])
   useEffect(() => { setRows(null); load(filter) }, [filter]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const review = async (id, status) => {
+  const review = async (id, status, row) => {
     let note = null
+    // Approve is irreversible and Return was not: returning asks for a note,
+    // so it pauses; approving went through on the first click. That is
+    // backwards — approving admits a parish's numbers to the diocesan
+    // roll-up permanently as-of that submission, and it is the assessment
+    // base. The heavier action now asks the heavier question.
+    if (status === 'approved') {
+      const period = row ? `${row.period_start} → ${row.period_end}` : 'this period'
+      const ok = await ask({
+        title: `Approve ${row?.parish_name || 'this parish'}?`,
+        body: `${period} joins the diocese roll-up and the assessable base at these figures, and stays there. If something looks off, return it instead — the parish can resubmit.`,
+        confirmLabel: 'Approve period',
+        tone: 'neutral',
+      })
+      if (!ok) return
+    }
     if (status === 'returned') {
       note = await askFor({
         title: 'Return this period to the parish',
@@ -70,12 +93,27 @@ export default function Submissions() {
 
       {rows === null ? (
         <div className="flex justify-center py-24"><Loader2 size={22} className="animate-spin text-brass-500" /></div>
+      ) : failed ? (
+        <LoadError
+          title="The review queue didn't load."
+          body="Do not read this as an empty queue — a parish may be waiting. Nothing was approved or returned."
+          onRetry={() => load(filter)}
+        />
       ) : rows.length === 0 ? (
         <div className="bg-parchment-50 rounded-2xl border border-parchment-300/70 p-8 text-center text-sm text-ink-500">
           Nothing here. Parish submissions arrive from the parish app's Finance page.
         </div>
       ) : (
-        <div className="bg-parchment-50 rounded-2xl border border-parchment-300/70 overflow-hidden">
+          /* `relative` is load-bearing, not decoration. The header cells
+             carry `sr-only` spans, which Tailwind implements as
+             position:absolute. With no positioned ancestor between them and
+             <html>, they resolve against the DOCUMENT — so an invisible
+             screen-reader label sitting inside a horizontally scrolled
+             table dragged the whole page 174px wider than the viewport, and
+             the page slid sideways under your thumb for no visible reason.
+             Making the scroll container the containing block keeps them in
+             it. Found auditing iPad portrait widths. */
+        <div className="relative bg-parchment-50 rounded-2xl border border-parchment-300/70 overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="text-left text-[11px] uppercase tracking-widest text-brass-600 border-b border-parchment-300/60">
@@ -101,7 +139,7 @@ export default function Submissions() {
                   <td className="px-4 py-2.5 text-right whitespace-nowrap space-x-3">
                     {s.status === 'submitted' && (
                       <>
-                        <button disabled={busyId === s.id} onClick={() => review(s.id, 'approved')}
+                        <button disabled={busyId === s.id} onClick={() => review(s.id, 'approved', s)}
                           className="inline-flex items-center gap-1 text-[12px] font-semibold text-brass-700 hover:underline disabled:opacity-50">
                           <Check size={13} /> Approve
                         </button>

@@ -16,17 +16,131 @@
 // conversion is a provider-file concern, not a caller concern.
 
 import pool from '../db.js'
+import { normalizeDonorEmail } from '../finance/donorIdentity.js'
 import { monitor } from '../monitoring/index.js'
 import { notify } from '../notifications/transport.js'
 import { stripeRequest } from '../utils/stripeApi.js'
 
-// Provider selection, checked at call time. Explicit PAYMENTS_PROVIDER
-// wins; otherwise the presence of the Stripe secret (shared with
-// billing) flips giving to live. No secret, no env → stub.
-const stripeSecret = () => process.env.BILLING_PROVIDER_SECRET
+// Provider selection, checked at call time. Explicit PAYMENTS_PROVIDER wins;
+// otherwise a giving secret flips giving to live. No secret, no env → stub.
+//
+// GIVING AND BILLING NO LONGER SHARE A SECRET. They used to: this read
+// BILLING_PROVIDER_SECRET, which is the SaaS subscription concern — what the
+// parish pays us. So configuring subscription billing, an unrelated decision
+// made by a different person on a different day, silently flipped parishioner
+// giving to live Stripe. And because chargeStripe() below has never been
+// implemented, that would have failed every recurring gift in every
+// organisation on the next daily cron: three attempts each, then paused, with
+// nobody having touched giving at all.
+//
+// Two concerns, two variables. PAYMENTS_PROVIDER_SECRET is giving.
+// BILLING_PROVIDER_SECRET stays what a parish is charged. Setting one no
+// longer moves the other.
+const stripeSecret = () => process.env.PAYMENTS_PROVIDER_SECRET
 function currentProvider() {
   if (process.env.PAYMENTS_PROVIDER) return process.env.PAYMENTS_PROVIDER
   return stripeSecret() ? 'stripe' : 'stub'
+}
+
+// Can this provider charge a card we already hold — the thing a recurring
+// gift needs on its second and every subsequent cycle?
+//
+// Stripe cannot, here, today: one-time gifts go through hosted Checkout,
+// where the card is entered by the donor, and saved-card charging was never
+// built (chargeStripe throws, see below). Treating that as a per-gift ERROR
+// meant switching Stripe on would look exactly like every donor's card being
+// declined at once — three failed attempts each, every gift paused, every
+// donor emailed. It is not a failure. It is a capability this provider does
+// not have yet, and the honest response is to decline to run at all and say
+// so once.
+export function canChargeSavedCards() {
+  return currentProvider() === 'stub'
+}
+
+// "Which provider is running" and "has anybody chosen one" are different
+// questions, and conflating them is what let the public giving route write
+// donation rows for free. The stub is a legitimate thing to RUN — tests and
+// demos need an end-to-end giving flow without a merchant account — but it is
+// not a legitimate thing to DEFAULT into on a page a stranger can reach.
+//
+// So: an explicit PAYMENTS_PROVIDER (including 'stub') is a choice somebody
+// made. Nothing set at all, with no Stripe secret either, is the absence of a
+// choice — which is production's state today. The public route refuses in
+// that case and only that case.
+export function paymentsConfigured() {
+  return Boolean(process.env.PAYMENTS_PROVIDER || stripeSecret())
+}
+
+// ── STUB IS NOT MONEY, AND A DEPLOYMENT MUST NOT BE ABLE TO SAY IT IS ────
+//
+// paymentsConfigured() above closes the ABSENCE of a choice. It does not
+// close the wrong choice: set PAYMENTS_PROVIDER=stub on the deployed
+// environment and everything downstream reads as a made decision. The
+// public give page then takes a stranger's card details, chargeStub()
+// returns a synthetic succeeded charge, a donation row is written with
+// payment_status 'succeeded', and a receipt thanks them for money that
+// never moved. That row reaches the dashboard, the finance summary, the
+// diocesan assessable base and the donor's year-end tax statement. One
+// environment variable is the whole distance between the demo flow and
+// that, and today production sits one keystroke from it.
+//
+// WHAT DETERMINES THE ACTUAL TARGET.
+//
+// Not NODE_ENV: it is a label somebody sets, it is unset on Vercel by
+// default, and this codebase already learned (local-db.mjs) that "we are in
+// development" is a belief rather than a safety mechanism. Two directer
+// signals, in order:
+//
+//   1. VERCEL_ENV — set by the platform, not by us, and it says exactly
+//      which deployment this is. Preview deployments are not production,
+//      and a stub there is legitimate.
+//   2. Failing that, WHERE THE DONATION ROW WOULD LAND. If DATABASE_URL is
+//      not loopback, the row is real to somebody: it is in a database other
+//      people read, back up and bill from. A missing or unparseable
+//      DATABASE_URL counts as not-local, because an unknown target is not a
+//      safe one.
+//
+// Local and CI both keep working: no VERCEL_ENV, DATABASE_URL on
+// localhost/127.0.0.1 → not production-like → the stub runs exactly as it
+// does today. That is the demo and test path and it is not touched.
+const LOOPBACK = /^(localhost|127\.0\.0\.1|::1|\[::1\])$/i
+
+function databaseIsLoopback() {
+  const raw = process.env.DATABASE_URL
+  if (!raw) return false
+  try {
+    return LOOPBACK.test(new URL(raw).hostname)
+  } catch {
+    return false
+  }
+}
+
+export function deploymentIsProductionLike() {
+  if (process.env.VERCEL_ENV) return process.env.VERCEL_ENV === 'production'
+  return !databaseIsLoopback()
+}
+
+// The guardrail predicate: a synthetic charge is about to be treated as a
+// real one, somewhere real.
+export function stubWouldFakeMoney() {
+  return currentProvider() === 'stub' && deploymentIsProductionLike()
+}
+
+// SELECTED IS NOT CONFIGURED IS NOT CAPABLE.
+//
+// PAYMENTS_PROVIDER=stripe with no PAYMENTS_PROVIDER_SECRET reads as a
+// chosen, configured Stripe today — and then every charge fails at the
+// network boundary. Health said "stripe" and meant "somebody typed
+// stripe". This is the question a deploy check actually wants answered:
+// can this deployment move money right now, at all?
+export function paymentsCanMoveMoney() {
+  const provider = currentProvider()
+  // The stub never moves money anywhere, including locally. That is the
+  // point of it.
+  if (provider === 'stub') return false
+  if (provider === 'stripe') return Boolean(stripeSecret())
+  // An unknown provider name is a typo, not a capability.
+  return false
 }
 
 function randomRef(prefix) {
@@ -43,7 +157,23 @@ function randomRef(prefix) {
 // and the partial unique index uq_donations_org_payment_ref (050) turns
 // a retry into a no-op instead of a duplicate row. A real provider maps
 // the same key to its native idempotency header.
+// Test seam, matching _setDispatchForTests and _setAuditCountCapForTests.
+//
+// A declined card and an unsupported provider are different facts and now
+// take different paths — one fails a single gift, the other declines the
+// whole run. The recurring tests used to simulate a decline by naming a
+// provider that does not exist, which was always a proxy for the wrong thing
+// and is now caught by the capability gate. This lets a test say "the charge
+// failed" without lying about which provider is running.
+let _forcedChargeError = null
+export function _setChargeFailureForTests(message) {
+  const previous = _forcedChargeError
+  _forcedChargeError = message
+  return previous
+}
+
 async function chargeStub({ amount, currency, donorName, idempotencyKey }) {
+  if (_forcedChargeError) throw new Error(_forcedChargeError)
   const ref = idempotencyKey
     ? `stub_${String(idempotencyKey).replace(/[^a-zA-Z0-9_-]/g, '')}`
     : randomRef('stub')
@@ -239,7 +369,7 @@ export async function recordDonationCheckoutCompleted(session) {
     [
       orgId,
       md.donor_name || 'Online donor',
-      md.donor_email || null,
+      normalizeDonorEmail(md.donor_email),
       dollars,
       md.fund || null,
       Number.isInteger(fundId) ? fundId : null,

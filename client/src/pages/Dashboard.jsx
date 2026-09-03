@@ -14,10 +14,11 @@ import NextOnCalendar from '../components/NextOnCalendar'
 import SacramentAnniversaries from '../components/SacramentAnniversaries'
 import LiturgicalDayDetail from '../components/LiturgicalDayDetail'
 import LiturgicalWidget from '../components/LiturgicalWidget'
-import OnboardingChecklist from '../components/OnboardingChecklist'
+import GettingSettledCard from '../components/GettingSettledCard'
 import DailyChecklists from '../components/DailyChecklists'
 import { useAuth } from '../context/AuthContext'
 import { useConfirm } from '../components/ConfirmProvider'
+import { useToast } from '../components/ToastProvider'
 import { useLocale } from '../i18n'
 import { apiUrl } from '../api'
 import { todayLocalISO, parseLocalDate } from '../utils/dates'
@@ -96,6 +97,7 @@ const CATEGORY_LABELS = {
 
 function UrgentTasks({ tasks }) {
   const { t } = useLocale()
+  const toast = useToast()
   const [doneIds, setDoneIds] = useState(new Set())
   // Collapse state — persisted under the ochr_ key prefix so the
   // admin's show/hide choice survives reloads, same pattern as the
@@ -123,13 +125,26 @@ function UrgentTasks({ tasks }) {
       return new Date(a.due_date) - new Date(b.due_date)
     })
 
+  // Optimistic, then verified. This used to tick the box and throw the
+  // response away — and unlike the Tasks page, nothing here reloads
+  // afterwards, so a failed PATCH left the task struck through on the
+  // dashboard for the rest of the session while the server still had it
+  // open. The person moves on believing it is done. Put it back instead.
   async function complete(id) {
     setDoneIds(prev => new Set([...prev, id]))
-    await fetch(apiUrl(`/api/tasks/${id}/status`), {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status: 'COMPLETED' }),
-    })
+    let ok = false
+    try {
+      const res = await fetch(apiUrl(`/api/tasks/${id}/status`), {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'COMPLETED' }),
+      })
+      ok = res.ok
+    } catch { ok = false }
+    if (!ok) {
+      setDoneIds(prev => { const next = new Set(prev); next.delete(id); return next })
+      toast.error("That didn't save — the task is still open.")
+    }
   }
 
   function dueLabel(due_date) {
@@ -706,6 +721,19 @@ const TABS = [
 // GET /api/onboarding/status; hides itself when the org has no samples.
 // `onCleared` is fired after a successful clear so the Dashboard can
 // refetch its data and the freshly-empty state renders immediately.
+
+// The seven days the dashboard's "This Week" card is about: today through
+// today + 6, in the browser's own timezone. Local, not UTC — a parish in
+// California asking at 5pm should get today's events, and toISOString()
+// would already have rolled over to tomorrow.
+function weekWindow() {
+  const iso = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+  const today = new Date()
+  const end   = new Date(today)
+  end.setDate(end.getDate() + 6)
+  return { start: iso(today), end: iso(end) }
+}
+
 function SampleDataBanner({ onCleared }) {
   const ask = useConfirm()
   const [status,  setStatus]  = useState(null)   // { hasSamples, counts } | null
@@ -849,6 +877,9 @@ export default function Dashboard() {
         return await r.json()
       } catch { degraded = true; return fallback }
     }
+    // Computed once, not once per interpolation — two calls could straddle
+    // midnight and ask for a window that starts after it ends.
+    const week = weekWindow()
     try {
       const [members, memberStats, events, schedule, tasks, taskStats, calEvents] = await Promise.all([
         // Dashboard rollups only need a bounded sample — ask explicitly for
@@ -860,7 +891,12 @@ export default function Dashboard() {
         get('/api/schedule', []),
         get('/api/tasks?limit=200', []),
         get('/api/tasks/stats', null),
-        get('/api/calendar', []),
+        // The calendar call used to have no window, which meant the "This
+        // Week" figure below counted every event the parish had ever logged
+        // — a number that only agreed with its own label during a parish's
+        // first seven days, then drifted upward forever. Ask for the seven
+        // days the card claims to be about.
+        get(`/api/calendar?start=${week.start}&end=${week.end}`, []),
       ])
       setData({ members, memberStats, events, schedule, tasks, taskStats, calEvents })
       setLoadFailed(degraded)
@@ -886,7 +922,7 @@ export default function Dashboard() {
             data banner so the "what to do next" frame anchors the
             page; the sample data note is informational, not the
             action item. */}
-        <OnboardingChecklist />
+        <GettingSettledCard />
 
         {/* Sample-data banner — hides itself when the org has none. */}
         {loadFailed && (

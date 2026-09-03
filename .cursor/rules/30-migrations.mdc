@@ -1,0 +1,28 @@
+---
+description: Database migration conventions — number from the registry, stay idempotent and ledgered, enable RLS, preserve data, and test only against a disposable database.
+globs: server/src/migrations/**
+alwaysApply: false
+---
+
+# Migrations
+
+Applies to files under `server/src/migrations/`. Follow the current chain; verify numbers, do
+not trust memory.
+
+- **Number from the registry.** The chain lives in `server/src/migrations/index.js` (the
+  `MIGRATIONS` array) and `server/src/migrations/names.js` (`MIGRATION_NAMES`), and they assert
+  against each other at load. Read the current highest entry and add the next number; register
+  the new migration in **both** files or the app throws on boot.
+- **Follow the nearest verified example.** Match the shape of recent migrations: a numbered
+  `NNN-kebab-name.js` exporting `async function up()`, idempotent DDL (`CREATE ... IF NOT
+  EXISTS`, `ALTER ... ADD ... IF NOT EXISTS`), a self-assertion block that re-reads the catalog
+  to confirm the object landed, and `ENABLE ROW LEVEL SECURITY` on every new `ochr_` table.
+- **Never rewrite an applied migration.** Ledger names in `ochr_schema_migrations` are permanent;
+  renaming or editing a shipped entry re-runs or desyncs it. New change → new migration.
+- **Protect the data.** Consider backfills, defaults, nullability, added constraints, and
+  recovery/rollback implications before writing. A destructive one-time backfill must be safe to
+  run exactly once and never on adoption of an existing database.
+- **Test on a throwaway only.** Build and verify against a disposable database
+  (`node scripts/local-db.mjs up`), never a production URL, and never without exact
+  authorization. Export `DATABASE_URL`, `JWT_SECRET`, and `CHECKIN_CODE_PEPPER` for a local
+  target before running — `dotenv` will not override an already-set variable.

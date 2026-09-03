@@ -40,7 +40,7 @@ export default function ResetPassword() {
           </p>
           <Link
             to="/forgot"
-            className="mt-6 inline-flex items-center justify-center px-5 py-2.5 rounded-lg bg-church-900 dark:bg-church-700 text-parchment-50 text-sm font-semibold shadow-warm hover:bg-church-800 dark:hover:bg-church-600 transition-colors"
+            className="tap mt-6 inline-flex items-center justify-center px-5 py-2.5 rounded-lg bg-church-900 dark:bg-church-700 text-parchment-50 text-sm font-semibold shadow-warm hover:bg-church-800 dark:hover:bg-church-600 transition-colors"
           >
             Send a reset link
           </Link>
@@ -118,7 +118,7 @@ export default function ResetPassword() {
                 <button
                   type="button"
                   onClick={() => setShowPw(s => !s)}
-                  className="text-ink-400 dark:text-parchment-400/60 hover:text-ink-600 dark:hover:text-parchment-200 transition-colors"
+                  className="tap-reach text-ink-400 dark:text-parchment-400/60 hover:text-ink-600 dark:hover:text-parchment-200 transition-colors"
                   tabIndex={-1}
                   aria-label={showPw ? 'Hide password' : 'Show password'}
                 >
@@ -148,7 +148,7 @@ export default function ResetPassword() {
             <button
               type="submit"
               disabled={loading || !password || !confirm}
-              className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-church-900 dark:bg-church-700 text-parchment-50 text-sm font-semibold shadow-warm hover:bg-church-800 dark:hover:bg-church-600 transition-colors disabled:opacity-50"
+              className="tap w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-church-900 dark:bg-church-700 text-parchment-50 text-sm font-semibold shadow-warm hover:bg-church-800 dark:hover:bg-church-600 transition-colors disabled:opacity-50"
             >
               {loading ? <Loader2 size={15} className="animate-spin" /> : null}
               {loading ? 'Updating…' : 'Set new password'}

@@ -40,7 +40,7 @@ const KINDS = new Set(['member', 'guest', 'child'])
 async function orgForToken(token) {
   if (!TOKEN_RX.test(token ?? '')) return null
   const { rows } = await pool.query(
-    'SELECT id, name, timezone FROM ochr_organizations WHERE kiosk_token = $1',
+    'SELECT id, name, timezone, locale FROM ochr_organizations WHERE kiosk_token = $1',
     [token]
   )
   return rows[0] ?? null
@@ -131,7 +131,7 @@ kioskPublicRouter.get('/:token', async (req, res) => {
     ])
 
     res.json({
-      org:      { name: org.name },
+      org:      { name: org.name, locale: org.locale ?? 'en' },
       services: services.rows,
       rooms:    rooms.rows,
     })

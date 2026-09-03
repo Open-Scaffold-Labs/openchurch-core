@@ -58,6 +58,28 @@ const sacramentCount = (type) => ({
 
 // ── the Episcopal Parochial Report ───────────────────────────────────────
 
+// A PERSON, NOT A ROW.
+//
+// Every attendance figure below counts check-in rows, and a row is not a
+// person. The active-row uniqueness index (uq_checkins_active) stops a member
+// being checked in twice AT ONCE — it says nothing about a member who was
+// checked out and checked back in, which leaves two rows for one person at
+// one service. count(*) reported that person twice; a service with three
+// people read as eight. On the parochial report that is a compliance figure
+// inflated by a workflow the volunteer was right to use.
+//
+// So attendance counts DISTINCT people AT A SERVICE: a linked member once
+// per service, however many rows they generated there; a guest per row,
+// because a guest carries no identity to collapse on (five taps for "Smith
+// family" may be five people). PER SERVICE, deliberately: someone at both
+// the 8am and the 10am is attendance at two services, which is what these
+// figures sum — collapsing them across a date would be a report-policy
+// change dressed as a bug fix. Every query using this must therefore group
+// by the event before summing. Bound to the alias `ck`. Exported so the
+// runner's Easter query and the attendance report use the same sentence —
+// a second predicate typed inline is how two surfaces drift.
+export const DISTINCT_PEOPLE = "count(DISTINCT COALESCE(ck.client_id::text, 'row:' || ck.id::text))"
+
 const PAROCHIAL_REPORT = {
   key: 'parochial-report',
   traditions: ['episcopal', 'anglican'],
@@ -119,31 +141,39 @@ const PAROCHIAL_REPORT = {
       // attendance only ever sees members.
       sql: `SELECT COALESCE(ROUND(AVG(n)::numeric, 1), 0)::float8 AS value
               FROM (
-                SELECT e.date, count(*)::int AS n
-                  FROM ochr_checkins ck
-                  JOIN ochr_calendar_events e ON e.id = ck.calendar_event_id
-                 WHERE ck.organization_id = $1
-                   AND e.date >= $2 AND e.date <= $3
-                   AND EXTRACT(DOW FROM e.date) = 0
-                 GROUP BY e.date
+                SELECT date, SUM(n) AS n
+                  FROM (
+                    SELECT e.date, e.id, ${DISTINCT_PEOPLE}::int AS n
+                      FROM ochr_checkins ck
+                      JOIN ochr_calendar_events e ON e.id = ck.calendar_event_id
+                     WHERE ck.organization_id = $1
+                       AND e.date >= $2 AND e.date <= $3
+                       AND EXTRACT(DOW FROM e.date) = 0
+                     GROUP BY e.date, e.id
+                  ) per_service
+                 GROUP BY date
               ) per_sunday`,
-      source: 'Mean of the per-Sunday check-in count, including guests and children.',
+      source: 'Mean of the per-Sunday attendance, summing the distinct people at each service, including guests and children. A member checked out and back in at one service is one person there.',
       note: 'Only Sundays with at least one check-in are averaged. A parish that does not use check-in will see 0 — which means "we have no data", not "nobody came".',
     },
     {
       key: 'easter_attendance', label: 'Easter attendance', requirement: 'unverified',
       sql: null,   // computed in the runner — Easter is a movable feast
-      source: 'Check-ins on Easter Day, computed from the liturgical calendar.',
+      source: 'Attendance at Easter Day services, computed from the liturgical calendar — each service counts its distinct people.',
     },
     {
       key: 'christmas_attendance', label: 'Christmas attendance', requirement: 'unverified',
-      sql: `SELECT COALESCE(count(*), 0)::int AS value
-              FROM ochr_checkins ck
-              JOIN ochr_calendar_events e ON e.id = ck.calendar_event_id
-             WHERE ck.organization_id = $1
-               AND e.date >= $2 AND e.date <= $3
-               AND EXTRACT(MONTH FROM e.date) = 12 AND EXTRACT(DAY FROM e.date) IN (24, 25)`,
-      source: 'Check-ins on 24 and 25 December.',
+      sql: `SELECT COALESCE(SUM(n), 0)::int AS value
+              FROM (
+                SELECT e.id, ${DISTINCT_PEOPLE} AS n
+                  FROM ochr_checkins ck
+                  JOIN ochr_calendar_events e ON e.id = ck.calendar_event_id
+                 WHERE ck.organization_id = $1
+                   AND e.date >= $2 AND e.date <= $3
+                   AND EXTRACT(MONTH FROM e.date) = 12 AND EXTRACT(DAY FROM e.date) IN (24, 25)
+                 GROUP BY e.id
+              ) per_service`,
+      source: 'Attendance at services on 24 and 25 December — each service counts its distinct people.',
     },
     {
       key: 'active_members', label: 'Members on the rolls', requirement: 'unverified',

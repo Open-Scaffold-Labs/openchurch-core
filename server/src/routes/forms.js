@@ -18,6 +18,7 @@
 import { Router } from 'express'
 import pool from '../db.js'
 import { monitor } from '../monitoring/index.js'
+import { protectedDelete } from '../vault/deleteRoute.js'
 
 const router = Router()
 
@@ -280,20 +281,12 @@ router.patch('/:id', async (req, res) => {
   }
 })
 
-// DELETE /api/forms/:id — cascades responses via ON DELETE CASCADE.
-router.delete('/:id', async (req, res) => {
-  try {
-    const { rowCount } = await pool.query(
-      `DELETE FROM ochr_forms WHERE id = $1 AND organization_id = $2`,
-      [req.params.id, req.organizationId]
-    )
-    if (!rowCount) return res.status(404).json({ error: 'Form not found' })
-    res.status(204).end()
-  } catch (err) {
-    monitor.error('forms.delete', err, { id: req.params.id, orgId: req.organizationId })
-    res.status(500).json({ error: 'Failed to delete form' })
-  }
-})
+// DELETE /api/forms/:id — cascades responses via ON DELETE CASCADE, so
+// one click can take two hundred people's answers with it. Protected by
+// the Continuity Vault; the responses come back with the form.
+router.delete('/:id', protectedDelete('form', {
+  notFound: 'Form not found', failure: 'Failed to delete form',
+}))
 
 // GET /api/forms/:id/responses — paginated response inbox.
 //   ?limit (default 50, max 200)

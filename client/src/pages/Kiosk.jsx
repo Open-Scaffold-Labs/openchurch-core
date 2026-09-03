@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Loader2, AlertTriangle, Search, Check, UserPlus, Baby, ArrowLeft } from 'lucide-react'
+import { Loader2, AlertTriangle, Search, Check, UserPlus, Baby, ArrowLeft, RefreshCw } from 'lucide-react'
 import { apiUrl } from '../api'
 import { LIT_COLOR_TEXT, LIT_COLOR_DOT, LIT_COLOR_DOT_NONE } from '../utils/liturgicalColors'
+import { useLocale } from '../i18n'
 
 // Small liturgical chip — season/feast in its canonical color.
 function LitChip({ season, color, feast }) {
@@ -41,10 +42,16 @@ function fmtTime(hms) {
 }
 
 export default function Kiosk() {
+  // Not for t() — these pages are still English (the string pass is
+  // separate work). This is the switch that lets the parish's language
+  // reach a page nobody signs in to.
+  const { setPublicLocale } = useLocale()
   const { token } = useParams()
   const [data,    setData]    = useState(null)
   const [loading, setLoading] = useState(true)
   const [error,   setError]   = useState(null)
+  // Whether the token itself is gone, as opposed to us being unable to answer.
+  const [linkIsGone, setLinkIsGone] = useState(false)
 
   const [serviceId, setServiceId] = useState(null)
   const [query,     setQuery]     = useState('')
@@ -52,6 +59,7 @@ export default function Kiosk() {
   // the full roster; we query /members?q= as the visitor types. Results
   // + whether a search is in flight live here.
   const [matches,   setMatches]   = useState([])
+  const [searchFailed, setSearchFailed] = useState(false)
   const [searching, setSearching] = useState(false)
   // Monotonic request id so a slow earlier response can't overwrite a
   // newer one when someone types fast (belt to the AbortController).
@@ -74,14 +82,26 @@ export default function Kiosk() {
     try {
       const res = await fetch(apiUrl(`/api/kiosk/${token}`))
       if (!res.ok) {
-        setError("We couldn't find that kiosk. The link may have been rotated.")
+        // A 404 means this token really is not a kiosk — rotated, mistyped,
+        // or retired — and telling a volunteer to get a new link is the right
+        // advice. Anything else means WE could not answer, and blaming the
+        // link sends someone hunting for a replacement they do not need
+        // while a queue builds at the door.
+        setLinkIsGone(res.status === 404)
+        setError(res.status === 404
+          ? "We couldn't find that kiosk. The link may have been rotated."
+          : "We couldn't reach the kiosk just now. The link is fine — this is on our side. Try again in a moment.")
         setData(null); setLoading(false); return
       }
       const d = await res.json()
+      // The parish's language, from the endpoint. Nobody is signed in
+      // here, so this is the only thing that can make the page speak it.
+      setPublicLocale(d.org?.locale)
       setData(d)
       // One service → skip the picker.
       if (d.services?.length === 1) setServiceId(d.services[0].id)
     } catch (err) {
+      setLinkIsGone(false)
       setError("We couldn't reach the kiosk. Please check the connection and try again.")
     } finally {
       setLoading(false)
@@ -122,8 +142,16 @@ export default function Kiosk() {
         const d = await res.json().catch(() => ({}))
         // Ignore if a newer keystroke has superseded this request.
         if (seq !== searchSeq.current) return
-        setMatches(res.ok ? (d.members ?? []) : [])
-      } catch {
+        // A failed search is not an absent member. This used to set [], which
+        // renders "No members match — try the guest button below" — steering
+        // a volunteer into creating a DUPLICATE record for someone who is on
+        // the roster, because a request failed. The duplicate then outlives
+        // the outage.
+        if (!res.ok) { setSearchFailed(true); return }
+        setSearchFailed(false)
+        setMatches(d.members ?? [])
+      } catch (err) {
+        if (err?.name !== 'AbortError' && seq === searchSeq.current) setSearchFailed(true)
         // AbortError (superseded) or network hiccup — leave the last
         // good list alone; a stale empty flash would be worse.
       } finally {
@@ -185,7 +213,21 @@ export default function Kiosk() {
           <AlertTriangle className="mx-auto text-amber-600" size={40} />
           <h1 className="text-2xl font-bold text-ink-900 dark:text-parchment-50 font-display">Kiosk unavailable</h1>
           <p className="text-sm text-ink-700 dark:text-parchment-200">{error || "We couldn't find that kiosk."}</p>
-          <p className="text-xs text-ink-500 dark:text-parchment-300/70 mt-4">Ask a staff member for a fresh kiosk link.</p>
+          {/* The advice has to match the diagnosis. "Ask for a fresh link" is
+              right when the token is genuinely gone and actively unhelpful
+              when the server simply failed — it sends a volunteer away from a
+              queue to solve a problem that is not theirs. */}
+          {linkIsGone ? (
+            <p className="text-xs text-ink-500 dark:text-parchment-300/70 mt-4">Ask a staff member for a fresh kiosk link.</p>
+          ) : (
+            <button
+              type="button"
+              onClick={() => { setLoading(true); load() }}
+              className="tap mt-4 inline-flex items-center justify-center gap-1.5 px-5 py-2.5 text-sm font-semibold rounded-lg bg-church-900 text-parchment-50 hover:bg-church-800"
+            >
+              <RefreshCw size={15} aria-hidden="true" /> Try again
+            </button>
+          )}
         </div>
       </div>
     )
@@ -304,6 +346,11 @@ export default function Kiosk() {
                     <p className="text-sm text-ink-500 dark:text-parchment-300/70 py-3 text-center">Type at least 2 letters of your name.</p>
                   ) : searching && matches.length === 0 ? (
                     <p className="text-sm text-ink-500 dark:text-parchment-300/70 py-3 text-center">Searching…</p>
+                  ) : searchFailed ? (
+                    <p role="status" className="text-sm text-amber-700 dark:text-amber-400 py-3 text-center px-4 leading-relaxed">
+                      We couldn&apos;t search the roster just now — that&apos;s our side, not a
+                      missing name. Try again in a moment before checking anyone in as a guest.
+                    </p>
                   ) : matches.length === 0 ? (
                     <p className="text-sm text-ink-500 dark:text-parchment-300/70 py-3 text-center">No members match — try the guest button below.</p>
                   ) : matches.map(m => (

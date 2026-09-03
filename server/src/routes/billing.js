@@ -24,10 +24,21 @@ const CLIENT_URL = (process.env.CLIENT_URL || 'http://localhost:5202').replace(/
 export const publicRouter = Router()
 
 // POST /api/billing/webhook
-// Provider posts subscription lifecycle events here. We feed the raw
-// body + signature header to the provider module which verifies and
-// applies. Always returns 200 quickly so the provider doesn't retry —
-// real failures get logged for retry-from-our-side.
+// Provider posts subscription lifecycle events here (and completed giving
+// checkouts — see payments/index.js). We feed the raw body + signature
+// header to the provider module which verifies and applies.
+//
+// A failure to PROCESS a verified event is answered 5xx (1 Sep). This
+// route used to answer 200 to every non-signature error, on the stated
+// grounds that "real failures get logged for retry-from-our-side". There
+// is no such retry anywhere in this codebase: no stored events, no replay
+// job, nothing reads the log back. So a checkout.session.completed whose
+// donation INSERT failed — a parish deleting the fund between checkout
+// and webhook is enough (FK 23503) — meant money moved, no row, no
+// receipt, and the provider told "delivered". Stripe retries a non-2xx
+// with backoff for up to three days; that is the retry, and it costs a
+// log line. Every handler here is idempotent (uq_donations_org_payment_ref,
+// COALESCE updates), so a redelivery cannot double-apply.
 publicRouter.post(
   '/webhook',
   express.raw({ type: '*/*', limit: '1mb' }),
@@ -41,11 +52,9 @@ publicRouter.post(
       res.json(result)
     } catch (err) {
       console.error('billing webhook failed:', err)
-      // Bad signature = 400 (fail closed, provider should not consider
-      // it delivered). Anything else returns 200 — webhooks should be
-      // idempotent on the provider side, and a 5xx makes them retry
-      // which spams logs. Real failures are visible in monitoring.
-      res.status(err.statusCode === 400 ? 400 : 200).json({ received: false, error: err.message })
+      // Bad signature = 400 (fail closed; a retry would carry the same
+      // bad signature). Anything else = 500 so the provider redelivers.
+      res.status(err.statusCode === 400 ? 400 : 500).json({ received: false, error: err.message })
     }
   }
 )

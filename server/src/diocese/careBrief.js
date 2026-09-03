@@ -42,14 +42,30 @@ import { resolveLiturgicalContext } from '../routes/liturgical.js'
 
 import { leadershipFor } from '../traditions/index.js'
 
-// Diocesan leadership (admin on the diocese org) may see contact details on
-// a printed page. Diocesan support staff may not — not because they are
-// less trusted, but because the paper outlives the reason it was printed.
-export function mayPrintContacts(role) {
-  return role === 'admin'
+// Who may see what the office keeps to itself.
+//
+// This used to be `role === 'admin'`, and that was wrong in both
+// directions at once. Org-admin is the OWNERSHIP role — billing, users,
+// the account. In a chancery that is often an operations or IT person, and
+// often NOT the canon who conducts visitations. Using it as a proxy handed
+// a parish's confidences to whoever administers the account and withheld
+// them from the person whose job is to care for that parish.
+//
+// `pastoral_lead` (migration 076) says what it means and nothing else. It
+// is not a role: a canon can be `staff` and hold it; an admin can be
+// neither. Contact details on paper follow the same gate, because the
+// paper outlives the reason it was printed.
+export function isPastoralLead(user) {
+  return user?.pastoral_lead === true
 }
 
-export async function buildCareBrief({ dioceseOrgId, parishOrgId, role, includeInternal = false }) {
+// Kept as a named concept because the printed page is a different question
+// from the screen — but it now resolves through the same permission.
+export function mayPrintContacts(user) {
+  return isPastoralLead(user)
+}
+
+export async function buildCareBrief({ dioceseOrgId, parishOrgId, user, includeInternal = false }) {
   const { rows: aff } = await pool.query(
     `SELECT a.grant_level, a.status AS affiliation_status,
             r.name AS region_name,
@@ -139,7 +155,7 @@ export async function buildCareBrief({ dioceseOrgId, parishOrgId, role, includeI
   // visit falls in Lent or in Ordinary Time changes the conversation.
   const liturgical = await resolveLiturgicalContext(today, parishOrgId)
 
-  const showContacts = mayPrintContacts(role)
+  const showContacts = mayPrintContacts(user)
   const people = contacts.rows.map(c => ({
     name: c.name,
     role: c.role,

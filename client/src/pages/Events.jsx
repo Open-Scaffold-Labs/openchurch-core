@@ -1,7 +1,7 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Search, Plus, X, Pencil, Trash2, Feather, CheckCircle2, Clock, Circle, Link2, Users, Upload } from 'lucide-react'
+import { Search, Plus, X, Pencil, Trash2, Feather, CheckCircle2, Clock, Circle, Link2, Users, Upload, AlertCircle, Loader2 } from 'lucide-react'
 import PageWrapper, { itemVariants } from '../components/PageWrapper'
 import AnimatedButton from '../components/AnimatedButton'
 import EmptyState from '../components/EmptyState'
@@ -12,6 +12,7 @@ import AttendanceSection from '../components/AttendanceSection'
 import MemberPicker from '../components/MemberPicker'
 import { useAuth } from '../context/AuthContext'
 import { useToast } from '../components/ToastProvider'
+import { mutate, loadList } from '../utils/format'
 import { apiUrl } from '../api'
 import { celebrateFirstAction } from '../utils/firstActionToast'
 import { initials } from '../utils/format'
@@ -54,22 +55,34 @@ async function enrichEventWithLiturgical(eventDate) {
 // ── Linked Tasks (auto-synced by shared member) ──────────────
 function LinkedTasks({ eventId }) {
   const [tasks, setTasks] = useState(null)
+  // null = still asking · tasksFailed = we asked and failed · [] = genuinely none.
+  const [tasksFailed, setTasksFailed] = useState(false)
 
   useEffect(() => {
     let alive = true
     if (!eventId) { setTasks([]); return }
-    fetch(apiUrl(`/api/events/${eventId}/tasks`))
-      .then(r => r.json())
-      .then(data => { if (alive) setTasks(Array.isArray(data) ? data : []) })
-      .catch(err => {
-        console.error(`Failed to load linked tasks for event ${eventId}:`, err)
-        if (alive) setTasks([])
-      })
+    loadList(apiUrl(`/api/events/${eventId}/tasks`)).then(({ ok, data }) => {
+      if (!alive) return
+      setTasks(data)
+      // "No tasks linked to this event" and "we could not find out" are
+      // different sentences. console.error was only ever telling the developer.
+      setTasksFailed(!ok)
+    })
     return () => { alive = false }
   }, [eventId])
 
   if (tasks === null) {
     return <p className="text-xs text-ink-500 dark:text-parchment-300/70">Loading linked tasks…</p>
+  }
+  if (tasksFailed) {
+    // Without this branch a failed lookup rendered "No tasks are assigned",
+    // which is a claim about the parish's data made on the strength of a
+    // request that never came back.
+    return (
+      <p role="status" className="text-xs text-amber-700 dark:text-amber-400">
+        Linked tasks didn't load — this isn't a sign there are none.
+      </p>
+    )
   }
   if (tasks.length === 0) {
     return (
@@ -101,6 +114,12 @@ function LinkedTasks({ eventId }) {
 
 export default function Events() {
   const [events, setEvents] = useState([])
+  const [eventsFailed, setEventsFailed] = useState(false)
+  // Starts true. Until the first response lands we do not know whether this
+  // parish has events, and "No events yet — Add your first event" is a claim
+  // we are not yet entitled to make. Tasks and Clients both guarded this;
+  // this page did not, so it asserted emptiness for the whole round trip.
+  const [initialLoading, setInitialLoading] = useState(true)
   const [search, setSearch] = useState('')
   const [showForm, setShowForm] = useState(false)
   const [editing, setEditing] = useState(null)
@@ -108,6 +127,7 @@ export default function Events() {
   const [loading, setLoading] = useState(false)
   const [saveError, setSaveError] = useState('')
   const [members, setMembers] = useState([])
+  const [membersFailed, setMembersFailed] = useState(false)
   const [showImport, setShowImport] = useState(false)
   const [searchParams, setSearchParams] = useSearchParams()
   // Pagination (mirrors Clients). The list fetches a page at a time;
@@ -122,25 +142,38 @@ export default function Events() {
   const PAGE_SIZE = 50
 
   useEffect(() => { fetchEvents() }, [])
-  useEffect(() => {
-    fetch(apiUrl('/api/clients'))
-      .then(r => r.json())
-      .then(setMembers)
-      .catch(err => console.error('Failed to load members for picker:', err))
+  // An empty picker reads as "this parish has no members". A failed roster
+  // call is not that fact, so it is not allowed to look like it.
+  //
+  // Extracted from the mount effect so the modal can retry: with a `[]`-dep
+  // effect the warning was permanent for the life of the page, and nothing
+  // ever refetched the roster.
+  const loadMembers = useCallback(() => {
+    loadList(apiUrl('/api/clients')).then(({ ok, data }) => {
+      setMembers(data)
+      setMembersFailed(!ok)
+    })
   }, [])
+
+  useEffect(() => { loadMembers() }, [loadMembers])
 
   // Fetch the first page. Replaces the list and recomputes hasMore. The
   // list endpoint clamps to a safety cap, so we page explicitly.
+  // Observed 27 Aug: a 500 here assigned the error BODY to `events`, so
+  // `events.map` threw and the whole page was replaced by the error
+  // boundary reading "events.map is not a function". loadList refuses to
+  // hand back a non-array, and the failure becomes a sentence instead.
   async function fetchEvents() {
     const params = new URLSearchParams()
     if (search) params.set('search', search)
     params.set('limit', String(PAGE_SIZE))
     params.set('offset', '0')
-    const res = await fetch(apiUrl(`/api/events?${params}`))
-    const data = await res.json()
+    const { ok, data } = await loadList(apiUrl(`/api/events?${params}`))
     setEvents(data)
+    setEventsFailed(!ok)
+    setInitialLoading(false)
     // A full page implies there may be more; a short page is the end.
-    setHasMore(Array.isArray(data) && data.length === PAGE_SIZE)
+    setHasMore(ok && data.length === PAGE_SIZE)
   }
 
   // Fetch the next page and APPEND. Offset is the current row count so it
@@ -148,21 +181,18 @@ export default function Events() {
   async function loadMoreEvents() {
     if (loadingMore) return
     setLoadingMore(true)
-    try {
-      const params = new URLSearchParams()
-      if (search) params.set('search', search)
-      params.set('limit', String(PAGE_SIZE))
-      params.set('offset', String(events.length))
-      const res = await fetch(apiUrl(`/api/events?${params}`))
-      if (!res.ok) return
-      const data = await res.json()
-      setEvents(prev => [...prev, ...data])
-      setHasMore(Array.isArray(data) && data.length === PAGE_SIZE)
-    } catch (err) {
-      console.error(err)
-    } finally {
-      setLoadingMore(false)
-    }
+    const params = new URLSearchParams()
+    if (search) params.set('search', search)
+    params.set('limit', String(PAGE_SIZE))
+    params.set('offset', String(events.length))
+    const { ok, data } = await loadList(apiUrl(`/api/events?${params}`))
+    // A silent return here is FAILED presented as NONE: the spinner
+    // stops, no rows appear, and the person concludes they have reached
+    // the end of their own records. Say it instead.
+    if (!ok) { toast.error("Couldn't load more events. Nothing was lost — try again."); setLoadingMore(false); return }
+    setEvents(prev => [...prev, ...data])
+    setHasMore(data.length === PAGE_SIZE)
+    setLoadingMore(false)
   }
 
   useEffect(() => {
@@ -250,7 +280,8 @@ export default function Events() {
 
   async function remove(id) {
     if (!(await ask({ title: 'Remove this event?', confirmLabel: 'Remove event' }))) return
-    await fetch(apiUrl(`/api/events/${id}`), { method: 'DELETE' })
+    const { ok, error } = await mutate(apiUrl(`/api/events/${id}`), { method: 'DELETE' })
+    if (!ok) { toast.error(error); return }
     fetchEvents()
   }
 
@@ -285,7 +316,22 @@ export default function Events() {
 
       {/* Table or empty state — "no matches" during a search stays a
           minimalist row inside the table; truly-empty shows the big card. */}
-      {!search && events.length === 0 ? (
+      {eventsFailed && (
+        <motion.div variants={itemVariants} role="status" className="mb-5 flex items-start gap-3 rounded-2xl border border-amber-300/70 dark:border-amber-700/40 bg-amber-50/70 dark:bg-amber-900/15 px-5 py-4">
+          <AlertCircle size={18} className="shrink-0 mt-0.5 text-amber-700 dark:text-amber-400" aria-hidden="true" />
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-semibold text-ink-900 dark:text-parchment-50">Some events didn't load.</p>
+            <p className="text-sm text-ink-600 dark:text-parchment-300/80 mt-0.5">
+              Nothing was lost — this is a connection problem, not your parish's calendar. What's shown below may be incomplete.
+            </p>
+          </div>
+          <button onClick={fetchEvents} className="shrink-0 text-sm font-medium text-church-700 dark:text-brass-300 underline min-h-[32px]">Try again</button>
+        </motion.div>
+      )}
+
+      {initialLoading ? (
+        <div className="flex justify-center py-16"><Loader2 size={22} className="animate-spin text-brass-600" aria-label="Loading events" /></div>
+      ) : !eventsFailed && !search && events.length === 0 ? (
         <EmptyState
           illustration={EventsIllustration}
           title="No events yet"
@@ -305,7 +351,9 @@ export default function Events() {
           </thead>
           <tbody className="divide-y divide-parchment-200/60 dark:divide-brass-900/30">
             {events.length === 0 && (
-              <tr><td colSpan={8} className="px-4 py-10 text-center text-ink-500 dark:text-parchment-300/70">No events found.</td></tr>
+              <tr><td colSpan={8} className="px-4 py-10 text-center text-ink-500 dark:text-parchment-300/70">
+                {eventsFailed ? "We couldn't load the calendar just now." : 'No events found.'}
+              </td></tr>
             )}
             <AnimatePresence>
               {events.map((ev, i) => {
@@ -430,8 +478,15 @@ export default function Events() {
                   <label className="flex items-center gap-1.5 text-xs font-medium text-ink-700 dark:text-parchment-200 mb-1.5">
                     <Users size={12} /> Assigned Members
                   </label>
+                  {membersFailed && (
+                    <p role="status" className="mb-1.5 text-[11px] text-amber-700 dark:text-amber-400">
+                      The member list didn't load, so this may be incomplete. It is not a sign that your parish has no members.{' '}
+                      <button type="button" onClick={loadMembers} className="underline font-medium">Try again</button>
+                    </p>
+                  )}
                   <MemberPicker
                     members={members}
+                    failed={membersFailed}
                     value={form.member_ids}
                     onChange={(ids) => setForm(f => ({ ...f, member_ids: ids }))}
                   />

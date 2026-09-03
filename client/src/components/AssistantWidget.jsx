@@ -14,6 +14,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Feather, X, Send, Loader2, ThumbsUp, ThumbsDown } from 'lucide-react'
 import { apiUrl } from '../api'
 import { useLocale } from '../i18n'
+import { mutate } from '../utils/format'
 
 // ── Page-aware starter questions (bilingual via keys) ───────────────────────
 const PAGE_STARTERS = [
@@ -108,15 +109,16 @@ export default function AssistantWidget() {
     }
   }
 
+  // The thumb lights up immediately, then stands down again if the write
+  // did not land. A thumb that stays lit on a failed POST tells the person
+  // their feedback reached us when it did not.
   async function sendFeedback(turn, feedback) {
+    const prior = turn.feedback ?? null
     setTurns(prev => prev.map(x => (x === turn ? { ...x, feedback } : x)))
-    try {
-      await fetch(apiUrl(`/api/assistant/${turn.id}/feedback`), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ feedback }),
-      })
-    } catch { /* best-effort */ }
+    const { ok } = await mutate(apiUrl(`/api/assistant/${turn.id}/feedback`), { body: { feedback } })
+    if (!ok) {
+      setTurns(prev => prev.map(x => (x.id === turn.id ? { ...x, feedback: prior } : x)))
+    }
   }
 
   const starters = starterKeysFor(window.location.pathname).map(k => t(k))

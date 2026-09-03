@@ -27,6 +27,7 @@ import { parseCSVToObjects } from '../utils/csv.js'
 import { monitor } from '../monitoring/index.js'
 import { computePeriodTotals } from '../finance/periodTotals.js'
 import { EFFECTIVE_COA } from '../finance/effectiveCoa.js'
+import { findOverlappingSubmission, overlapMessage } from '../finance/fiscalPeriod.js'
 
 const router = Router()
 
@@ -72,7 +73,31 @@ router.get('/mappings', async (req, res) => {
          FROM ochr_donations WHERE organization_id = $1 ORDER BY 1 LIMIT 100`,
       [req.organizationId]
     )
-    res.json({ mappings: rows, donation_categories: cats.map(c => c.category) })
+    // …and the funds, which are the STRONGER signal about a gift and the
+    // one the ledger now prefers (migration 086). A fund is a real record
+    // with a real id; a category is a string somebody typed. Sent with
+    // how many gifts each fund carries, so the screen can say what is
+    // actually at stake in mapping it.
+    const { rows: funds } = await pool.query(
+      `SELECT f.id, f.name, f.active,
+              COUNT(d.id)::int AS gift_count,
+              COALESCE(SUM(d.amount), 0)::NUMERIC(12,2) AS gift_total
+         FROM ochr_funds f
+         LEFT JOIN ochr_donations d
+                ON d.fund_id = f.id AND d.organization_id = f.organization_id
+               -- "what is at stake in mapping this fund" must not count
+               -- money the parish already gave back.
+               AND d.payment_status IS DISTINCT FROM 'refunded'
+        WHERE f.organization_id = $1
+        GROUP BY f.id, f.name, f.active
+        ORDER BY f.sort_order, f.name`,
+      [req.organizationId]
+    )
+    res.json({
+      mappings: rows,
+      donation_categories: cats.map(c => c.category),
+      funds,
+    })
   } catch (err) {
     monitor.error('finance.mappings.get', err, { orgId: req.organizationId })
     res.status(500).json({ error: 'Failed to load mappings' })
@@ -93,7 +118,7 @@ router.put('/mappings', async (req, res) => {
       const type = m?.source_type
       const key  = typeof m?.source_key === 'string' ? m.source_key.trim() : ''
       const code = typeof m?.account_code === 'string' ? m.account_code.trim() : ''
-      if (!['donation_category', 'payroll'].includes(type) || !key) {
+      if (!['donation_category', 'payroll', 'fund'].includes(type) || !key) {
         return res.status(400).json({ error: 'Each mapping needs a valid source_type and source_key' })
       }
       if (code && !codes.has(code)) {
@@ -317,6 +342,23 @@ router.post('/submissions', async (req, res) => {
     if (!aff.length) return res.status(400).json({ error: 'This parish has no active diocese affiliation' })
     const dioceseId = aff[0].diocese_org_id
 
+    // A parish's live periods must not overlap (1 Sep). The UNIQUE below
+    // only catches the IDENTICAL period; FY + H2 + Q1 of one year all
+    // passed it, all got approved, and the assessment summed them — see
+    // findOverlappingSubmission for the reproduction. Refused here, with
+    // the other period named, so the parish can ask for the right one to
+    // be returned. Which one that is, is not this route's decision.
+    const overlap = await findOverlappingSubmission(pool, {
+      organizationId: req.organizationId, dioceseOrgId: dioceseId, periodStart: start, periodEnd: end,
+    })
+    if (overlap) {
+      return res.status(409).json({
+        error: overlapMessage(overlap, 'ask the chancery to return that period first.'),
+        code: 'period_overlap',
+        overlaps: { id: overlap.id, period_start: overlap.period_start, period_end: overlap.period_end, status: overlap.status },
+      })
+    }
+
     const totals = await computePeriodTotals(req.organizationId, start, end)
 
     // New period → insert. Returned period → resubmit in place with
@@ -342,6 +384,17 @@ router.post('/submissions', async (req, res) => {
     }
     res.status(201).json({ id: rows[0].id, status: rows[0].status, totals: totals.totals })
   } catch (err) {
+    // 23P01 — the 097 exclusion constraint caught an overlap the
+    // check-then-write above raced past. Two concurrent requests both read
+    // "no overlap" on separate pooled connections and both wrote; the
+    // database refused the second. That is the guard working, so it must
+    // read as the same 409 the application check produces, not as "we broke".
+    if (err?.code === '23P01') {
+      return res.status(409).json({
+        error: "This period overlaps another of this parish's live periods. A parish's periods must not overlap.",
+        code: 'period_overlap',
+      })
+    }
     monitor.error('finance.submissions.create', err, { orgId: req.organizationId })
     res.status(500).json({ error: 'Failed to submit the period' })
   }

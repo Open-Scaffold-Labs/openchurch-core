@@ -98,14 +98,14 @@ export default function SundayPacket() {
           {date && (
             <>
               <button onClick={() => setParams({ date: addDays(date, -7) })} aria-label={t('pkt.prevWeek')}
-                className="p-2 rounded-lg border border-parchment-300/70 dark:border-brass-900/40 text-ink-600 dark:text-parchment-200 hover:bg-parchment-100 dark:hover:bg-ink-800">
+                className="tap shrink-0 inline-flex items-center justify-center p-2 rounded-lg border border-parchment-300/70 dark:border-brass-900/40 text-ink-600 dark:text-parchment-200 hover:bg-parchment-100 dark:hover:bg-ink-800">
                 <ChevronLeft size={16} />
               </button>
               <span className="text-sm text-ink-600 dark:text-parchment-300/80 min-w-[11rem] text-center">
                 {localDate(date).toLocaleDateString(dateLocale, { weekday: 'long', month: 'long', day: 'numeric' })}
               </span>
               <button onClick={() => setParams({ date: addDays(date, 7) })} aria-label={t('pkt.nextWeek')}
-                className="p-2 rounded-lg border border-parchment-300/70 dark:border-brass-900/40 text-ink-600 dark:text-parchment-200 hover:bg-parchment-100 dark:hover:bg-ink-800">
+                className="tap shrink-0 inline-flex items-center justify-center p-2 rounded-lg border border-parchment-300/70 dark:border-brass-900/40 text-ink-600 dark:text-parchment-200 hover:bg-parchment-100 dark:hover:bg-ink-800">
                 <ChevronRight size={16} />
               </button>
             </>

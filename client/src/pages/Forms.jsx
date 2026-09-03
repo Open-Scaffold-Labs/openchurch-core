@@ -470,6 +470,10 @@ export default function Forms() {
   const isAdmin = user?.role === 'admin'
   const orgSlug = user?.organization?.slug ?? null
   const toast   = useToast()
+  // `ask` was referenced by removeForm() and never declared in this component
+  // — the confirm dialog threw a ReferenceError instead of opening. Found by
+  // client-scope 27 Aug once it became function-scoped.
+  const ask     = useConfirm()
 
   const [forms, setForms]   = useState(null)
   const [loading, setLoad]  = useState(true)
@@ -490,9 +494,14 @@ export default function Forms() {
 
   async function removeForm(f) {
     if (!(await ask({
-      title: `Delete “${f.title}”?`,
-      body: `All ${f.response_count} response${f.response_count === 1 ? '' : 's'} will be removed with it.`,
-      confirmLabel: 'Delete form',
+      // The old copy said the responses "will be removed with it" and
+      // stopped there, which was the whole truth right up until the
+      // Continuity Vault shipped. They are removed AND kept, and the
+      // person about to click is exactly who needs to know that.
+      title: `Remove “${f.title}”?`,
+      body: `The ${f.response_count} response${f.response_count === 1 ? '' : 's'} people have sent come off the form with it.`,
+      confirmLabel: 'Remove form',
+      recoverable: true,
     }))) return
     try {
       const res = await fetch(apiUrl(`/api/forms/${f.id}`), { method: 'DELETE' })

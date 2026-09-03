@@ -10,6 +10,7 @@
 import { Router } from 'express'
 import rateLimit from 'express-rate-limit'
 import pool from '../db.js'
+import { DISTINCT_PEOPLE } from '../reporting/definitions.js'
 import { requireIntParam, parseDays } from '../utils/params.js'
 import { genSecurityCode, hashSecurityCode, verifySecurityCode } from '../utils/pickupCode.js'
 import { monitor } from '../monitoring/index.js'
@@ -32,15 +33,16 @@ const checkoutLimiter = rateLimit({
 
 // GET /api/checkins/recent?days=N (CHK.4)
 // Recent services with their attendance count — the org-level
-// attendance report. Default 30 days, newest first.
+// attendance report. Default 30 days, newest first. "Attendance" is people,
+// not rows: see DISTINCT_PEOPLE for why a checkout-and-return is one person.
 router.get('/recent', async (req, res) => {
   const days = parseDays(req.query.days, 30)
   try {
     const { rows } = await pool.query(
       `SELECT e.id AS event_id, e.title, e.date,
-              COUNT(ci.id)::int AS attendance
+              ${DISTINCT_PEOPLE}::int AS attendance
          FROM ochr_calendar_events e
-         JOIN ochr_checkins ci ON ci.calendar_event_id = e.id AND ci.organization_id = $1
+         JOIN ochr_checkins ck ON ck.calendar_event_id = e.id AND ck.organization_id = $1
         WHERE e.organization_id = $1
           AND e.date >= CURRENT_DATE - ($2 || ' days')::interval
         GROUP BY e.id, e.title, e.date

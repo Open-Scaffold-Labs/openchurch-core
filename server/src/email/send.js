@@ -27,7 +27,24 @@
 // Optional `attachments`: [{ filename, content }] where content is a
 // base64 string — passed through to Resend verbatim; the stub logs
 // names and sizes only.
-export async function sendEmail({ to, subject, html, text, attachments }) {
+// Optional `headers`: { 'Header-Name': 'value' } — extra RFC 5322 headers
+// passed through verbatim. This is how List-Unsubscribe reaches the
+// message; it has to be a real header, not body text, because that is
+// the only place a mail client looks for it.
+// Is there a real transport behind sendEmail, or only the console stub?
+//
+// Exported because a caller sometimes needs to know BEFORE it does the
+// work. The weekly backup digest is the case that forced this: it built
+// a gzipped export of every parish, attached it to an email, watched the
+// stub print it to a log, and returned success. The artifact was
+// produced and discarded, weekly, and the run reported that it had
+// worked. A backup that reports success while delivering nothing is
+// worse than one that fails loudly, because it stops anybody looking.
+export function emailTransportIsLive() {
+  return Boolean(process.env.RESEND_API_KEY)
+}
+
+export async function sendEmail({ to, subject, html, text, attachments, headers }) {
   if (!to)      throw new Error('sendEmail: missing `to`')
   if (!subject) throw new Error('sendEmail: missing `subject`')
   if (!html && !text) throw new Error('sendEmail: missing both `html` and `text`')
@@ -52,6 +69,7 @@ export async function sendEmail({ to, subject, html, text, attachments }) {
         ...(html ? { html } : {}),
         ...(text ? { text } : {}),
         ...(Array.isArray(attachments) && attachments.length ? { attachments } : {}),
+        ...(headers && Object.keys(headers).length ? { headers } : {}),
       }),
     })
 
@@ -77,6 +95,10 @@ export async function sendEmail({ to, subject, html, text, attachments }) {
   if (text) {
     console.log('│ TEXT:')
     text.split('\n').forEach(line => console.log(`│   ${line}`))
+  }
+  if (headers && Object.keys(headers).length) {
+    console.log('│ HEADERS:')
+    for (const [k, v] of Object.entries(headers)) console.log(`│   ${k}: ${v}`)
   }
   if (Array.isArray(attachments) && attachments.length) {
     console.log('│ ATTACHMENTS:')

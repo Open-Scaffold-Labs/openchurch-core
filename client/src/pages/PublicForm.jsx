@@ -3,6 +3,7 @@ import { useParams } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import { Loader2, AlertTriangle, CheckCircle2 } from 'lucide-react'
 import { apiUrl } from '../api'
+import { useLocale } from '../i18n'
 
 // Parishioner-facing public form page (Sprint Forms / F.3).
 // Unauthenticated, outside the app shell. Visual shape mirrors
@@ -193,6 +194,10 @@ function Field({ field, value, onChange }) {
 }
 
 export default function PublicForm() {
+  // Not for t() — these pages are still English (the string pass is
+  // separate work). This is the switch that lets the parish's language
+  // reach a page nobody signs in to.
+  const { setPublicLocale } = useLocale()
   const { slug, formSlug } = useParams()
   const [form, setForm]       = useState(null)
   const [loading, setLoad]    = useState(true)
@@ -219,7 +224,13 @@ export default function PublicForm() {
         if (!r.ok) throw new Error(`Failed (${r.status})`)
         return r.json()
       })
-      .then((data) => { if (!cancelled) setForm(data) })
+      .then((data) => {
+        if (cancelled) return
+      // The parish's language, from the endpoint. Nobody is signed in
+      // here, so this is the only thing that can make the page speak it.
+        setPublicLocale(data.org?.locale)
+        setForm(data)
+      })
       .catch((e) => { if (!cancelled) setErr(e.message) })
       .finally(() => { if (!cancelled) setLoad(false) })
     return () => { cancelled = true }
@@ -432,7 +443,7 @@ export default function PublicForm() {
           </>
         )}
 
-        <p className="mt-12 text-center text-[11px] text-ink-500 dark:text-parchment-300/50">
+        <p className="mt-12 text-center text-[11px] text-ink-500 dark:text-parchment-300/70">
           Powered by OpenChurch
         </p>
       </motion.div>

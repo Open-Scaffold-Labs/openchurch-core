@@ -170,6 +170,12 @@ export default function Team() {
                         <select
                           value={u.role}
                           onChange={e => changeRole(u.id, e.target.value)}
+                          /* A role picker with no accessible name is announced
+                             as just "combo box" — in a table of people, with
+                             no way to hear WHOSE role is about to change. The
+                             visible pill carries the value, not the subject,
+                             so the name has to say the person. */
+                          aria-label={`Role for ${u.name || u.email}`}
                           className={`appearance-none px-3 py-1.5 rounded-lg text-xs font-semibold border-0 cursor-pointer focus:outline-none focus:ring-2 focus:ring-brass-400 ${ROLE_PILL[u.role] ?? ROLE_PILL.viewer}`}
                         >
                           {ROLES.map(r => (

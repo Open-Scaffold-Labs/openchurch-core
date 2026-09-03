@@ -57,7 +57,9 @@ router.get('/', async (req, res) => {
     LEFT JOIN ochr_attendance a    ON a.event_id  = em.event_id
                                   AND a.member_id = em.member_id
         WHERE em.event_id = $1
-     ORDER BY c.name ASC`,
+     ORDER BY c.name ASC
+       -- tenancy: joined through ochr_event_members, which this handler
+       -- already constrained to an event owned by the caller's organization.`,
       [eventId]
     )
 

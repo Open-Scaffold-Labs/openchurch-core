@@ -106,6 +106,22 @@ const run = async () => {
   await affiliate(cruz, HOLYCROSS.email, 'summary', 'Holy Cross')
   console.log('  ✓ both parishes affiliated')
 
+  // Name the tradition (TRAD.1). Without this every demo org is 'general',
+  // which means neutral vocabulary, no lectionary line, and no leadership
+  // allowlist — so the whole tradition layer is invisible in the one place
+  // it is meant to be shown. A Diocese of Santa Clara is Catholic, and so
+  // are both its parishes.
+  for (const [tok, who] of [[dio, 'the diocese'], [anne, 'St. Anne'], [cruz, 'Holy Cross']]) {
+    await must(api('/api/organization', { method: 'PATCH', token: tok,
+      // PILOT.4 — is_demo is a fact on the org, so the interface can say so
+      // on every screen. "(Demo)" in the name is invisible in a cropped
+      // screenshot and gone the moment somebody renames the org for a
+      // demonstration, which the run-sheet tells them to do.
+      body: { tradition: 'catholic', is_demo: true } }),
+      `tradition ${who}`)
+  }
+  console.log('  ✓ diocese and both parishes are Catholic — Register, Intentions, Roman lectionary')
+
   const m1 = monthWindow(2) // two months ago
   const m2 = monthWindow(1) // last month
 
@@ -172,6 +188,9 @@ const run = async () => {
   // (when DATABASE_URL is provided) backdated history so Insights has a
   // past to chart and the pastoral-care list has someone to care about.
   await seedParishDepth(anne, parishMembers)
+
+  // The way back down (DIO.6) and the chancery's working view (CARE.1).
+  await seedDioceseCare(dio, anne, cruz)
 
   console.log(`\nDone. Sign in to the chancery app (client-diocese, port 5204):`)
   console.log(`  ${DIOCESE.email} / ${PASSWORD}`)
@@ -240,6 +259,14 @@ async function seedParishLife(anne) {
     memberIds[name] = r.data.id
     return r.data.id
   }
+  // Leadership first. These are the people the care brief is allowed to
+  // print; everyone below them is the roster it must not. Roles are drawn
+  // from the Catholic leadership allowlist in traditions/index.js.
+  await member('Fr. Michael Doyle', { role: 'pastor', email: 'frdoyle@stanne.demo', phone: '(925) 555-0100' })
+  await member('Fr. Peter Nguyen',  { role: 'parochial vicar', email: 'frpeter@stanne.demo' })
+  await member('Dcn. Luis Ramos',   { role: 'deacon', email: 'dcnluis@stanne.demo', phone: '(925) 555-0104' })
+  await member('Angela Ruiz',       { role: 'trustee', email: 'aruiz@stanne.demo' })
+
   await member('Carmen Alvarez',  { email: 'carmen.alvz@example.com', phone: '(925) 555-0163' })
   await member('Sofia Alvarez Keller', { email: 'sofia.ak@example.com' })
   await member('Robert Keller',   { phone: '(925) 555-0117' })
@@ -611,6 +638,118 @@ async function seedParishDepth(anne, memberIds) {
     console.log('  ✓ time machine: joins aged, six Sundays of attendance, the Pipers quietly lapsed')
   } finally {
     await db.end()
+  }
+}
+
+// ── DIO.6 / CARE.1 staging ───────────────────────────────────
+//
+// Added because the seed built the whole trickle-UP story and then left
+// every screen that shows the way BACK DOWN empty. A demo of Parish Care
+// that reads "Awaiting update × 2" and a parish Diocese page that reads
+// "Nothing outstanding" describe a product that does nothing, which is the
+// opposite of what shipped.
+//
+// The point is CONTRAST. Two parishes in visibly different states, one
+// assessment part-paid and one untouched, and a note the chancery kept to
+// itself sitting beside one it chose to share — so the wall between them
+// is a thing you can point at rather than a claim.
+//
+// Everything goes through the public API, like the rest of this file.
+async function seedDioceseCare(dio, anne, cruz) {
+  console.log('\nParish Care + the parish’s own view (CARE.1, DIO.6):')
+
+  const parishes = await api('/api/diocese/parishes', { token: dio })
+  const rows = parishes.data.parishes ?? parishes.data ?? []
+  const idOf = (needle) => rows.find(p => (p.parish_name ?? p.name ?? '').includes(needle))?.parish_org_id
+                        ?? rows.find(p => (p.parish_name ?? p.name ?? '').includes(needle))?.id
+  const anneId = idOf('St. Anne'), cruzId = idOf('Holy Cross')
+  if (!anneId || !cruzId) { console.log('  ○ parishes not resolvable — skipping care staging'); return }
+
+  // ── The assessment, published ──────────────────────────────
+  // Published, not draft: a draft is invisible to a parish by design, and
+  // a demo of the parish page needs something on it.
+  const year = String(new Date().getFullYear())
+  let list = await api('/api/diocese/assessments', { token: dio })
+  let assessment = (list.data.assessments ?? []).find(a => a.fiscal_year === year)
+  if (!assessment) {
+    const created = await must(api('/api/diocese/assessments', {
+      method: 'POST', token: dio, body: { fiscal_year: year, rate_bps: 725,
+        notes: 'Rate held flat from last year at the request of the deanery.' },
+    }), `assessment ${year}`)
+    assessment = created.data.assessment ?? created.data
+    console.log(`  ✓ ${year} assessment created at 7.25%`)
+  } else {
+    console.log(`  ↺ ${year} assessment already exists`)
+  }
+  const aid = assessment.id
+
+  const detail = await api(`/api/diocese/assessments/${aid}`, { token: dio })
+  const lines = detail.data.lines ?? detail.data.assessment?.lines ?? []
+
+  // A part-payment on one parish only. "Part paid" is a more useful thing
+  // to look at than either extreme, and the contrast with the untouched
+  // line is what makes the balance column mean anything.
+  const anneLine = lines.find(l => Number(l.parish_org_id) === Number(anneId))
+  if (anneLine && Number(anneLine.paid) === 0 && Number(anneLine.assessed) > 0) {
+    const part = Math.round(Number(anneLine.assessed) * 0.4 * 100) / 100
+    await must(api(`/api/diocese/assessments/${aid}/lines/${anneLine.id}`, {
+      method: 'PATCH', token: dio, body: { record_payment: part },
+    }), 'record part payment')
+    console.log(`  ✓ St. Anne part-paid ${part}`)
+  }
+
+  if (assessment.status !== 'published' && assessment.status !== 'closed') {
+    await must(api(`/api/diocese/assessments/${aid}`, {
+      method: 'PATCH', token: dio, body: { status: 'published' },
+    }), 'publish assessment')
+    console.log('  ✓ published — the parishes can now see their own line')
+  }
+
+  // ── A parish that asked for help ───────────────────────────
+  // This is what moves Holy Cross out of "Awaiting update" and into
+  // "Offer support", so the dashboard shows two different states rather
+  // than one repeated twice.
+  const tickets = await api('/api/support-tickets', { token: cruz })
+  if (!(tickets.data.tickets ?? []).length) {
+    await must(api('/api/support-tickets', { method: 'POST', token: cruz, body: {
+      description: 'Our trial-balance import is dropping the building fund line. Could someone look with us?',
+    } }), 'Holy Cross asks for help')
+    console.log('  ✓ Holy Cross has asked for help → Offer support')
+  }
+
+  // ── The record ─────────────────────────────────────────────
+  // Two shared, one internal. The internal one is the demo: it is visible
+  // on the chancery's parish page and provably absent from the parish's
+  // own Diocese page and from the printed brief.
+  const timeline = await api(`/api/diocese/care/${anneId}`, { token: dio })
+  if (!(timeline.data.timeline ?? []).length) {
+    for (const [id, entry] of [
+      [anneId, { kind: 'visit', summary: 'Visited the office and met the new administrator. The register backlog is smaller than reported.', visibility: 'shared' }],
+      [anneId, { kind: 'note',  summary: 'Thank you for the prompt return this period — it made the deanery roll-up easy.', visibility: 'shared' }],
+      [anneId, { kind: 'note',  summary: 'Internal: the treasurer has been unwell since the spring. Be gentle about the deadline.' }],
+      [cruzId, { kind: 'support_request', summary: 'Asked for help with the trial-balance import. Call booked for next week.', visibility: 'shared' }],
+      [cruzId, { kind: 'note',  summary: 'Internal: rector transition still unsettled; hold the assessment conversation until it lands.' }],
+    ]) {
+      await must(api(`/api/diocese/care/${id}/timeline`, { method: 'POST', token: dio, body: entry }),
+        `timeline ${entry.kind}`)
+    }
+    console.log('  ✓ record written — 3 shared, 2 kept in the office')
+  } else {
+    console.log('  ↺ record already written')
+  }
+
+  // ── One agreed next step ───────────────────────────────────
+  const fups = await api('/api/diocese/care/followups', { token: dio })
+  if (!(fups.data.followups ?? []).length) {
+    await must(api(`/api/diocese/care/${anneId}/followups`, { method: 'POST', token: dio, body: {
+      context: 'Rector transition last spring',
+      next_action: 'Ask whether register continuity support would be useful',
+    } }), 'follow-up')
+    await must(api(`/api/diocese/care/${cruzId}/followups`, { method: 'POST', token: dio, body: {
+      context: 'Trial-balance import',
+      next_action: 'Sit with the bookkeeper and walk one import through together',
+    } }), 'follow-up')
+    console.log('  ✓ two follow-ups noted — the office’s own, never the parish’s')
   }
 }
 

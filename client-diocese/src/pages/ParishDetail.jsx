@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { Loader2, ChevronLeft, FileText, Plus } from 'lucide-react'
 import { apiUrl } from '../api'
+import { postJson } from '../utils/format'
 import { StatusChip } from './ParishCare'
 
 // The parish detail page (CARE.1) — the diocesan office's durable memory of
@@ -26,6 +27,13 @@ export default function ParishDetail() {
   const [form, setForm] = useState({ context: '', next_action: '', due_on: '' })
   const [note, setNote] = useState('')
   const [busy, setBusy] = useState(false)
+  // Write failures used to be invisible here. Both forms below fired their
+  // POST, ignored the response, and cleared themselves — so a 500 looked
+  // exactly like a save: the textarea emptied, the panel closed, and the
+  // entry was simply never written. On a page whose entire purpose is the
+  // office's durable memory, a note a canon typed and watched disappear is
+  // the worst failure this app has. The text now survives, and says so.
+  const [writeError, setWriteError] = useState('')
 
   const load = () => fetch(apiUrl(`/api/diocese/care/${parishId}`))
     .then(r => r.ok ? r.json() : Promise.reject(new Error('not found')))
@@ -34,15 +42,24 @@ export default function ParishDetail() {
 
   useEffect(() => { load() }, [parishId]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Returns true only when the server actually accepted it. A thrown
+  // fetch, a non-2xx, anything else — false, and the caller keeps the text.
+  const post = async (path, body) => {
+    setWriteError('')
+    const { ok, error } = await postJson(apiUrl(path), body)
+    if (!ok) setWriteError(`${error} Your words are still here.`)
+    return ok
+  }
+
   const addFollowUp = async (e) => {
     e.preventDefault()
     if (!form.context.trim() || !form.next_action.trim()) return
     setBusy(true)
     try {
-      await fetch(apiUrl(`/api/diocese/care/${parishId}/followups`), {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...form, due_on: form.due_on || undefined }),
+      const ok = await post(`/api/diocese/care/${parishId}/followups`, {
+        ...form, due_on: form.due_on || undefined,
       })
+      if (!ok) return                       // form stays open, fields intact
       setForm({ context: '', next_action: '', due_on: '' }); setAdding(false); await load()
     } finally { setBusy(false) }
   }
@@ -52,10 +69,10 @@ export default function ParishDetail() {
     if (note.trim().length < 3) return
     setBusy(true)
     try {
-      await fetch(apiUrl(`/api/diocese/care/${parishId}/timeline`), {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ kind: 'note', summary: note.trim() }),
+      const ok = await post(`/api/diocese/care/${parishId}/timeline`, {
+        kind: 'note', summary: note.trim(),
       })
+      if (!ok) return                       // the note stays in the textarea
       setNote(''); await load()
     } finally { setBusy(false) }
   }
@@ -107,8 +124,14 @@ export default function ParishDetail() {
                 body={String(t.kind).replaceAll('_', ' ')}
                 foot={t.continuity_needs || (t.began_on ? `Began ${t.began_on}` : null)} />
             ))}
+            {/* CARE.3 — a report waiting to be read is now something you
+                can open, not just a line saying it exists. */}
             {work.submissions.filter(s => s.status === 'submitted').map(s => (
-              <Card key={`r${s.id}`} label="Prepared for review" body={`${s.period_start} to ${s.period_end}`} foot="Waiting on a shared review" />
+              <Link key={`r${s.id}`} to={`/review/${s.id}`} className="block rounded-lg border border-parchment-300/70 bg-parchment-50 p-3 hover:bg-parchment-100 transition-colors">
+                <p className="text-[10.5px] font-semibold uppercase tracking-widest text-brass-600 mb-1">Prepared for review</p>
+                <p className="text-[13.5px] text-ink-800 leading-snug">{s.period_start} to {s.period_end}</p>
+                <p className="text-[11.5px] text-ink-500 mt-1 leading-snug">Read it together →</p>
+              </Link>
             ))}
             {work.followups.map(f => (
               <Card key={`f${f.id}`} label="Agreed next action" body={f.next_action}
@@ -136,6 +159,7 @@ export default function ParishDetail() {
               <p className="text-[11px] text-ink-400">
                 This is the office’s own memory. The parish never sees it, and nothing chases you about it.
               </p>
+              {writeError && <p className="text-[12px] text-amber-800">{writeError}</p>}
               <div className="flex gap-2">
                 <button type="submit" disabled={busy}
                   className="px-3 py-1.5 rounded-lg bg-church-600 text-parchment-50 text-[13px] font-semibold disabled:opacity-60">Keep it</button>
@@ -155,6 +179,7 @@ export default function ParishDetail() {
               className="mt-2 px-3 py-1.5 rounded-lg bg-parchment-200 text-ink-700 text-[13px] font-semibold disabled:opacity-50">
               Add to the record
             </button>
+            {writeError && <p className="mt-2 text-[12px] text-amber-800">{writeError}</p>}
           </form>
 
           {timeline.length === 0 ? (

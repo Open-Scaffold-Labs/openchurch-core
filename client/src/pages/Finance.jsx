@@ -1,7 +1,9 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { Landmark, Loader2, Plus, Upload, RefreshCw } from 'lucide-react'
 import PageWrapper from '../components/PageWrapper'
 import EmptyState from '../components/EmptyState'
+import LoadFailure from '../components/LoadFailure'
+import { useLoad } from '../hooks/useLoad'
 import { useAuth } from '../context/AuthContext'
 import { useToast } from '../components/ToastProvider'
 import { useLocale } from '../i18n'
@@ -44,12 +46,6 @@ export default function Finance() {
   const canWrite = user?.role === 'admin' || user?.role === 'staff'
 
   const [{ start, end }, setPeriod] = useState(monthBounds)
-  const [summary, setSummary]   = useState(null)
-  const [entries, setEntries]   = useState([])
-  const [coa, setCoa]           = useState([])
-  const [mappings, setMappings] = useState([])
-  const [categories, setCategories] = useState([])
-  const [loading, setLoading]   = useState(true)
   const [busy, setBusy]         = useState(false)
 
   const [manual, setManual] = useState({ entry_date: '', account_code: '', amount: '', memo: '' })
@@ -59,6 +55,10 @@ export default function Finance() {
   // Diocese submissions (DIO.2) — present only when affiliated.
   const [aff, setAff] = useState(null)
   const [subs, setSubs] = useState([])
+  // NOT migrated, deliberately. This block has the same shape —
+  // `r.ok ? r.json() : { submissions: [] }` — and so the same defect, but
+  // Pass 7 pilots the load contract where it proves the semantics and does
+  // not rewrite Finance. Carried forward in the report.
   const loadDiocese = useCallback(() => {
     fetch(apiUrl('/api/affiliation'))
       .then(r => (r.ok ? r.json() : { affiliation: null }))
@@ -96,31 +96,49 @@ export default function Finance() {
     } catch (err) { toast.error(err.message) } finally { setBusy(false) }
   }
 
-  const load = useCallback(async () => {
-    setLoading(true)
-    try {
-      const qs = `start=${start}&end=${end}`
-      const [s, l, c, m] = await Promise.all([
-        fetch(apiUrl(`/api/finance/summary?${qs}`)),
-        fetch(apiUrl(`/api/finance/ledger?${qs}&limit=50`)),
-        fetch(apiUrl('/api/finance/coa')),
-        fetch(apiUrl('/api/finance/mappings')),
-      ])
-      if (!s.ok || !l.ok || !c.ok || !m.ok) throw new Error()
-      setSummary(await s.json())
-      setEntries((await l.json()).entries ?? [])
-      setCoa((await c.json()).accounts ?? [])
-      const md = await m.json()
-      setMappings(md.mappings ?? [])
-      setCategories(md.donation_categories ?? [])
-    } catch {
-      toast.error(t('fin.loadError'))
-    } finally {
-      setLoading(false)
-    }
-  }, [start, end]) // eslint-disable-line react-hooks/exhaustive-deps
+  // Four requests used to ride one Promise.all with `if (!s.ok || !l.ok ||
+  // !c.ok || !m.ok) throw`. One failure blanked all four: summary went null,
+  // the ledger went to [], and the rollup card rendered
+  // "Nothing recorded in this period" — a parish shown an empty set of books
+  // because the chart of accounts 404'd. The only other signal was a toast,
+  // which is gone in four seconds.
+  //
+  // Three independent reads now, because they answer three different
+  // questions. The money tiles already read `—` for an unknown value
+  // (fmtMoney returns a dash for anything non-finite) and that was already
+  // right; what was wrong was everything around them.
+  const readJson = (path) => async () => {
+    const res = await fetch(apiUrl(path))
+    if (!res.ok) throw new Error(`Failed (${res.status})`)
+    return res.json()
+  }
+  const qs = `start=${start}&end=${end}`
 
-  useEffect(() => { load() }, [load])
+  // A period with no activity is a real answer, and $0.00 is its honest
+  // rendering — so this load is NEVER empty. Emptiness here belongs to the
+  // groups list, not to the summary itself.
+  const summaryLoad = useLoad(readJson(`/api/finance/summary?${qs}`), [start, end], { isEmpty: () => false })
+  const ledgerLoad  = useLoad(
+    async () => (await readJson(`/api/finance/ledger?${qs}&limit=50`)())?.entries ?? [],
+    [start, end])
+  // Chart of accounts + mappings feed the forms below. They are one read
+  // because they populate the same controls and are useless apart.
+  const settingsLoad = useLoad(async () => {
+    const [c, m] = await Promise.all([readJson('/api/finance/coa')(), readJson('/api/finance/mappings')()])
+    return { accounts: c.accounts ?? [], mappings: m.mappings ?? [],
+             categories: m.donation_categories ?? [], funds: m.funds ?? [] }
+  }, [], { isEmpty: () => false })
+
+  const summary   = summaryLoad.data
+  const entries   = ledgerLoad.data ?? []
+  const coa        = settingsLoad.data?.accounts ?? []
+  const mappings   = settingsLoad.data?.mappings ?? []
+  const categories = settingsLoad.data?.categories ?? []
+  const funds      = settingsLoad.data?.funds ?? []
+  const loading = summaryLoad.state === 'loading' && ledgerLoad.state === 'loading'
+  const load = async () => {
+    await Promise.all([summaryLoad.reload(), ledgerLoad.reload(), settingsLoad.reload()])
+  }
 
   const revenueAccounts = coa.filter(a => a.acct_type === 'revenue' && a.active)
   const expenseAccounts = coa.filter(a => a.acct_type === 'expense' && a.active)
@@ -197,7 +215,7 @@ export default function Finance() {
           <span className="text-ink-400">–</span>
           <input type="date" value={end} onChange={e => setPeriod(p => ({ ...p, end: e.target.value }))} className={inputCls} aria-label={t('fin.to')} />
           <button type="button" onClick={load} aria-label={t('fin.refresh')}
-            className="p-2 rounded-lg border border-parchment-300/70 dark:border-brass-900/40 text-ink-500 dark:text-parchment-300/70 hover:text-church-700 dark:hover:text-brass-300">
+            className="tap shrink-0 inline-flex items-center justify-center px-3 py-2 rounded-lg border border-parchment-300/70 dark:border-brass-900/40 text-ink-500 dark:text-parchment-300/70 hover:text-church-700 dark:hover:text-brass-300">
             <RefreshCw size={15} />
           </button>
         </div>
@@ -207,6 +225,19 @@ export default function Finance() {
         <div className="flex justify-center py-16"><Loader2 size={22} className="animate-spin text-brass-600" /></div>
       ) : (
         <div className="space-y-5">
+          {/* A failed read is announced where the money is, not in a toast
+              that has already gone. The tiles themselves were always honest —
+              fmtMoney returns a dash for anything non-finite — but a dash
+              with no explanation reads as "we have none". */}
+          {summaryLoad.state === 'failed' && (
+            <LoadFailure variant="strip" body={t('fin.summaryFailedBody')} cause={summaryLoad.error}
+              onRetry={summaryLoad.reload} retrying={summaryLoad.retrying} />
+          )}
+          {summaryLoad.isStale && (
+            <LoadFailure variant="strip" body={t('load.staleBody')} cause={summaryLoad.error}
+              onRetry={summaryLoad.reload} retrying={summaryLoad.retrying} />
+          )}
+
           {/* Summary tiles */}
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
             {[
@@ -225,7 +256,13 @@ export default function Finance() {
           {/* Rollup groups */}
           <div className={cardCls}>
             <p className="text-[11px] font-semibold uppercase tracking-widest text-brass-700 dark:text-brass-300 mb-2">{t('fin.byGroup')}</p>
-            {(summary?.groups ?? []).length === 0 ? (
+            {summaryLoad.state === 'failed' ? (
+              /* NOT "nothing recorded in this period". We did not read the
+                 period. A parish looking at its own books must never be
+                 shown an empty set of them because a request failed. */
+              <LoadFailure variant="strip" body={t('fin.summaryFailedBody')} cause={summaryLoad.error}
+                onRetry={summaryLoad.reload} retrying={summaryLoad.retrying} />
+            ) : (summary?.groups ?? []).length === 0 ? (
               <EmptyState icon={Landmark} title={t('fin.emptyTitle')} body={t('fin.emptyBody')} />
             ) : (
               <table className="w-full text-sm">
@@ -234,7 +271,7 @@ export default function Finance() {
                     <tr key={i} className="border-t first:border-t-0 border-parchment-300/50 dark:border-brass-900/25 text-ink-800 dark:text-parchment-100">
                       <td className="py-1.5 pr-2">
                         {g.rollup_group}
-                        <span className="ml-2 text-[10px] uppercase tracking-wider text-ink-400 dark:text-parchment-400/60">{t(`fin.${g.acct_type}`)}</span>
+                        <span className="ml-2 text-[10px] uppercase tracking-wider text-ink-500 dark:text-parchment-300/70">{t(`fin.${g.acct_type}`)}</span>
                         {g.acct_type === 'revenue' && g.assessable && (
                           <span className="ml-1.5 text-[10px] font-semibold text-brass-700 dark:text-brass-300">{t('fin.assessableTag')}</span>
                         )}
@@ -246,6 +283,63 @@ export default function Finance() {
               </table>
             )}
           </div>
+
+          {/* Funds → accounts (086).
+              Placed ABOVE the category mappings on purpose: a fund is a
+              record the parish deliberately created and designates gifts
+              to; a category is a word somebody typed on one gift. The
+              fund is the stronger signal and the ledger now prefers it,
+              so it should be the first thing offered, not a footnote
+              under the weaker one.
+
+              The wording is the careful part. A parish must be able to
+              tell OpenChurch that the roof fund is restricted capital
+              WITHOUT the screen implying they are choosing what their
+              diocese assesses. They are classifying, not deciding — and
+              where a diocese is attached, the assessable column is the
+              diocese's and says so. */}
+          {canWrite && funds.length > 0 && (
+            <div className={cardCls}>
+              <p className="text-[11px] font-semibold uppercase tracking-widest text-brass-700 dark:text-brass-300 mb-1">{t('fin.fundMappings')}</p>
+              <p className="text-xs text-ink-500 dark:text-parchment-300/70 mb-1">{t('fin.fundMappingsSub')}</p>
+              <p className="text-xs text-ink-500 dark:text-parchment-300/70 mb-3">
+                {aff?.status === 'active'
+                  ? t('fin.fundMappingsDiocese', { diocese: aff.diocese_name })
+                  : t('fin.fundMappingsNoDiocese')}
+              </p>
+              <div className="space-y-2">
+                {funds.map(f => {
+                  const code = mappingFor('fund', String(f.id))
+                  const acct = revenueAccounts.find(a => a.code === code)
+                  return (
+                    <div key={f.id} className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+                      <span className="flex-1 min-w-[9rem] text-sm text-ink-800 dark:text-parchment-100 truncate">
+                        {f.name}
+                        <span className="ml-2 text-xs text-ink-500 dark:text-parchment-300/70 whitespace-nowrap">
+                          {f.gift_count === 1
+                            ? t('fin.fundOneGift', { total: fmtMoney(f.gift_total) })
+                            : t('fin.fundGifts', { n: f.gift_count, total: fmtMoney(f.gift_total) })}
+                        </span>
+                      </span>
+                      <select value={code} aria-label={`${t('fin.account')} — ${f.name}`} className={`${inputCls} !w-56`}
+                        onChange={e => saveMapping('fund', String(f.id), e.target.value)}>
+                        <option value="">{t('fin.defaultAccount')}</option>
+                        {revenueAccounts.map(a => <option key={a.code} value={a.code}>{a.code} — {a.name}</option>)}
+                      </select>
+                      {/* A fact about the account, not a switch. Stated in
+                          the ordinary muted type either way — nothing here
+                          is a warning, and "not counted" is not a prize. */}
+                      <span className="w-full sm:w-44 text-xs text-ink-500 dark:text-parchment-300/70">
+                        {acct
+                          ? (acct.assessable ? t('fin.fundCounted') : t('fin.fundNotCounted'))
+                          : t('fin.fundCountedDefault')}
+                      </span>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          )}
 
           {/* Category mappings */}
           {canWrite && (
@@ -353,10 +447,23 @@ export default function Finance() {
           {/* Recent entries */}
           <div className={cardCls}>
             <p className="text-[11px] font-semibold uppercase tracking-widest text-brass-700 dark:text-brass-300 mb-2">{t('fin.recent')}</p>
-            {entries.length === 0 ? (
+            {ledgerLoad.state === 'failed' ? (
+              <LoadFailure variant="strip" body={t('fin.ledgerFailedBody')} cause={ledgerLoad.error}
+                onRetry={ledgerLoad.reload} retrying={ledgerLoad.retrying} />
+            ) : entries.length === 0 ? (
               <p className="text-sm text-ink-500 dark:text-parchment-300/70 italic">{t('fin.noEntries')}</p>
             ) : (
-              <div className="overflow-x-auto">
+              // tabIndex + role: a horizontally scrolling region has to be
+              // reachable by keyboard, or the columns past the right edge are
+              // unreachable to anyone not using a mouse or a thumb. Only bites
+              // on narrow viewports — which is exactly where the ledger
+              // overflows, and exactly where it matters.
+              <div
+                className="overflow-x-auto"
+                tabIndex={0}
+                role="region"
+                aria-label="Ledger entries — scrolls horizontally"
+              >
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="text-left text-[11px] uppercase tracking-widest text-brass-700 dark:text-brass-300">
@@ -371,7 +478,7 @@ export default function Finance() {
                     {entries.map((e, i) => (
                       <tr key={`${e.source_type}-${e.source_id}-${i}`} className="border-t border-parchment-300/50 dark:border-brass-900/25 text-ink-800 dark:text-parchment-100">
                         <td className="py-1.5 pr-3 whitespace-nowrap">{e.entry_date}</td>
-                        <td className="py-1.5 pr-3">{e.account_code}<span className="block text-[11px] text-ink-400 dark:text-parchment-400/60">{e.account_name}</span></td>
+                        <td className="py-1.5 pr-3">{e.account_code}<span className="block text-[11px] text-ink-500 dark:text-parchment-300/70">{e.account_name}</span></td>
                         <td className="py-1.5 pr-3">{e.memo || '—'}</td>
                         <td className="py-1.5 pr-3">
                           <span className={`inline-block px-2 py-0.5 rounded-full text-[11px] font-semibold ${SOURCE_CLS[e.source_type] || ''}`}>

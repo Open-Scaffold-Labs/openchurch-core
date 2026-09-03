@@ -85,12 +85,19 @@ cd client && npm run dev
 
 Then visit http://localhost:5202.
 
-### Demo credentials
+### Demo credentials — local only
 
 A demo organization is seeded on first migration so you don't have to sign up just to look around:
 
 - **Email:** `demo@openchurch.app`
 - **Password:** `demo1234`
+
+**These are local development credentials and nothing else.** The seed runs
+only against a local target (or with an explicit `SEED_DEMO=true`), so a
+deployed environment neither creates this account nor honours this password.
+Do not treat the pair above as a way into any running deployment, and do not
+reuse it as a starting point for one — it is published in this file, which is
+the whole reason it is safe to put here.
 
 It ships with a handful of sample members, events, and tasks so the Dashboard isn't empty on first login. The Dashboard also surfaces a "Get started" checklist that auto-checks items as you wire up your workspace (add a real member, set your letterhead, invite a teammate, etc.). Clear the samples from the banner whenever you're ready.
 
@@ -179,7 +186,7 @@ OpenChurch deploys as a Vercel monorepo:
 | `CRON_SECRET` | Shared secret on `Authorization: Bearer …` for cron endpoints | required for cron |
 | `MONITORING_LEVEL` | `error` / `warn` / `info` / `debug` (default `info`) | optional |
 | `BILLING_PRICE_ID_PRO` | Provider-specific price id for Pro checkout | when billing is wired |
-| `DEMO_EMAIL` / `DEMO_PASSWORD` | Override the seeded demo creds | optional |
+| `DEMO_EMAIL` / `DEMO_PASSWORD` | Override the seeded demo creds. Read only when the seed runs — local target, or explicit `SEED_DEMO=true`. Inert on a deployed environment. | local only |
 | `PG_POOL_MAX` | Postgres connection pool size (default 5) | optional |
 
 `JWT_SECRET` and `CHECKIN_CODE_PEPPER` both fail closed at module load in production — a

@@ -85,6 +85,15 @@ export default function SacramentalRegister() {
           >
             <ClipboardPaste size={15} /> {t('register.digitize')}
           </Link>
+          {/* Prints the working register — which excludes voided entries,
+              because the list this page reads never sends include_voided.
+              That is the decision, not an accident: an ordinary parish-office
+              printout must not quietly acquire retired entries.
+              There is no archival print context yet. If one is ever built,
+              voided entries may appear in it only if they are marked VOID on
+              the page in a way that cannot be mistaken for an active record —
+              and it must be a separate, deliberate view, not this button with
+              a query parameter bolted on. */}
           <button
             type="button"
             onClick={() => window.print()}
@@ -124,13 +133,27 @@ export default function SacramentalRegister() {
       </div>
 
       {error && (
-        <p className="mb-3 text-sm text-rose-700 dark:text-rose-300">{error}</p>
+        <p role="status" className="mb-3 text-sm text-amber-700 dark:text-amber-400">
+          {t('register.loadFailedBody')} <span className="text-ink-500 dark:text-parchment-300/70">({error})</span>
+        </p>
       )}
 
       {loading ? (
         <div className="rounded-2xl border border-parchment-300/60 dark:border-brass-900/30 shadow-warm overflow-hidden">
           <SkeletonRowList count={6} withAvatar={false} />
         </div>
+      ) : error ? (
+        /* The register could not be read, so it is UNREAD — not empty.
+           Observed 27 Aug: a 500, a malformed body, an aborted request and a
+           403 all rendered "No sacraments recorded yet" beneath a raw
+           "Failed (500)". A parish with a baptism on file was told its
+           register was empty. NO RECORD and COULD NOT LOAD RECORD are
+           different sentences and this page was saying the wrong one. */
+        <EmptyState
+          icon={Church}
+          title={t('register.loadFailedTitle')}
+          body={t('register.loadFailedBody')}
+        />
       ) : records.length === 0 ? (
         <EmptyState
           icon={Church}
@@ -185,14 +208,20 @@ export default function SacramentalRegister() {
                         {r.member_name}
                       </Link>
                     ) : (
-                      <span className="text-ink-400 dark:text-parchment-300/60">{r.member_name || '—'}</span>
+                      /* An unlinked subject is not a lesser entry — it is
+                         most of a digitised register. It reads as ordinary
+                         text, not as missing data. */
+                      <span>{r.member_name || '—'}</span>
                     )}
                   </td>
                   <td className="px-4 py-3.5">{r.minister || '—'}</td>
                   <td className="px-4 py-3.5">{r.place || '—'}</td>
                   <td className="px-4 py-3.5 whitespace-nowrap">{r.certificate_no || '—'}</td>
                   <td className="px-4 py-3.5 whitespace-nowrap print:hidden">
-                    <Link to={`/register/${r.id}/certificate`} className="text-church-700 dark:text-brass-300 hover:underline text-[13px] font-semibold">
+                    <Link to={`/register/${r.id}`} className="tap text-church-700 dark:text-brass-300 hover:underline text-[13px] font-semibold mr-3">
+                      {t('register.open')}
+                    </Link>
+                    <Link to={`/register/${r.id}/certificate`} className="tap text-church-700 dark:text-brass-300 hover:underline text-[13px] font-semibold">
                       {t('register.certificate')}
                     </Link>
                   </td>

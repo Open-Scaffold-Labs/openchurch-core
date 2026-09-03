@@ -12,6 +12,10 @@ import {
 import { seedSampleData } from '../onboarding/sampleSeed.js'
 import { sendEmail } from '../email/send.js'
 import { welcomeEmail, passwordResetEmail } from '../email/templates.js'
+// Used by the accept-invite catch block. Its absence made that handler's
+// error path throw a ReferenceError of its own, so the real failure — on a
+// pre-authentication credential route — never reached monitoring.
+import { monitor } from '../monitoring/index.js'
 
 // Where the client lives — used to build links in emails. Falls back
 // to the local dev URL so dev "just works" without a env var set.
@@ -29,14 +33,20 @@ const MIN_PASSWORD = 8
 
 // Very light email validation — not exhaustive, just to reject obvious
 // garbage without pulling in a library. Server-side safety net only.
-function isEmail(s) {
+// Exported so the public giving route uses the SAME rule rather than a second
+// copy that drifts. Two validators for one concept is how "valid here, junk
+// there" happens.
+export function isEmail(s) {
   return typeof s === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s.trim())
 }
 
 // Normalize an org name into a URL-safe slug. Uniqueness is enforced by a
 // DB unique index; on collision we append a short timestamp suffix so the
 // user isn't bounced back to fix something trivial.
-function slugify(name) {
+// Exported so the provisioning route (routes/maintenance.js) uses THIS
+// function rather than a second copy of it — two slug rules that drift
+// apart is how one org gets a slug the other path would have rejected.
+export function slugify(name) {
   return (name || '')
     .toLowerCase()
     .trim()
@@ -56,12 +66,22 @@ function publicUser(user, org) {
     role:   user.role,
     avatar: user.avatar ?? null,
     // tradition drives the client's vocabulary overlay and season names
-    // (TRAD.1); locale is the parish default the i18n spine has always read
-    // for and never received.
+    // (TRAD.1); locale is the parish default the i18n spine reads.
+    //
+    // Migration 093 gave locale a column with a NOT NULL default, so the
+    // `?? 'en'` here is for a caller that built `org` from a query which
+    // forgot to select it — which is exactly what happened for the eleven
+    // months this field read `?? null` against a column that did not exist.
+    // Three paths build this object (signup, login, /me) and only signup
+    // gets new columns for free, via RETURNING *. The other two are listed
+    // out by hand and are where a field goes missing.
     organization: {
       id: org.id, name: org.name, slug: org.slug,
       tradition: org.tradition ?? 'general',
-      locale: org.locale ?? null,
+      locale: org.locale ?? 'en',
+      // PILOT.4 — carried through login and signup as well as /me, so a
+      // client never has to guess from the name.
+      is_demo: org.is_demo === true,
     },
   }
 }
@@ -71,9 +91,37 @@ function publicUser(user, org) {
 // Self-serve: no invite, no approval. The signer-up owns the new org.
 router.post('/signup', signupLimiter, async (req, res) => {
   const { organizationName, name, email, password } = req.body ?? {}
-  // DIO.1 — a diocese signs up through the same door as a parish; the
-  // only difference is the org_type stamp (and no parish sample seed).
-  const orgType = req.body?.organizationType === 'diocese' ? 'diocese' : 'parish'
+
+  // A DIOCESE IS NOT SELF-SERVICE. THE SERVER DECIDES, NOT THE BODY.
+  //
+  // DIO.1 gave a diocese the same door as a parish, distinguished only by
+  // organizationType in the request body. This endpoint is public and
+  // unauthenticated, so anyone could create a chancery: stamp a diocese,
+  // then invite any parish admin's address into it. The invitation reply
+  // discloses that parish's name, slug and id, and — because a parish holds
+  // at most one live affiliation (uq_affiliation_one_live_diocese, 058) —
+  // a pending squat also blocks the real diocese's invitation until
+  // somebody notices. A parish is a self-service customer; a diocese is a
+  // relationship with an organisation, and the founder direction is that it
+  // enters through a trusted path.
+  //
+  // Refused HERE rather than hidden in the client: the client is a
+  // suggestion, and the attack is a direct POST. The trusted path is the
+  // one that already exists — requireSuperAdmin / VENDOR_ADMIN_EMAILS,
+  // env-identified with no cross-tenant role row (middleware/superAdmin.js)
+  // — via POST /api/admin/maintenance/organizations below. Nothing new was
+  // invented for this.
+  //
+  // 403 and not 404: unlike /api/admin/*, the existence of dioceses is not
+  // a secret (the marketing site says so), and a would-be chancery
+  // deserves to be told how to proceed rather than shown a wall.
+  if (req.body?.organizationType != null && req.body.organizationType !== 'parish') {
+    return res.status(403).json({
+      error: 'Diocesan and chancery accounts are provisioned by OpenChurch rather than created here. Please contact us and we will set yours up.',
+      code: 'org_type_not_self_service',
+    })
+  }
+  const orgType = 'parish'
   // TRAD.1 — a congregation may name its tradition at signup. Anything
   // unrecognised becomes 'general' rather than an error: a bad value here
   // must not block someone creating an account, and 'general' is the one
@@ -91,7 +139,8 @@ router.post('/signup', signupLimiter, async (req, res) => {
 
   // Reject duplicates up front so the client can show a friendly error
   // rather than a generic 500 from the unique constraint.
-  const { rows: dupe } = await pool.query('SELECT 1 FROM ochr_users WHERE email = $1', [cleanEmail])
+  const { rows: dupe } = await pool.query(`SELECT 1 FROM ochr_users WHERE email = $1
+       -- tenancy: pre-authentication. Signup has no organization yet, and email is globally unique across the app, so this asks a question no org scope can express.`, [cleanEmail])
   if (dupe.length) return res.status(409).json({ error: 'An account with that email already exists' })
 
   const client = await pool.connect()
@@ -111,9 +160,18 @@ router.post('/signup', signupLimiter, async (req, res) => {
 
     const hash = await bcrypt.hash(password, 10)
     const { rows: userRows } = await client.query(
-      `INSERT INTO ochr_users (organization_id, email, password_hash, name, role)
-       VALUES ($1, $2, $3, $4, 'admin') RETURNING *`,
-      [org.id, cleanEmail, hash, name.trim()]
+      // CARE.3 — the founding user of a CHANCERY is pastoral leadership.
+      // A diocese whose first account cannot read its own pastoral notes is
+      // a chancery nobody can work in, and the alternative is telling a new
+      // customer to go grant themselves a permission before starting. They
+      // can withdraw it from themselves later; they cannot bootstrap it.
+      // Parish signups get nothing here — the permission is diocesan.
+      `INSERT INTO ochr_users (organization_id, email, password_hash, name, role, pastoral_lead)
+       VALUES ($1, $2, $3, $4, 'admin', $5) RETURNING *`,
+      // Always false on this route now — a diocese cannot be created here,
+      // and the founding-chancery pastoral_lead grant moved to the
+      // provisioning route with the rest of the diocese path.
+      [org.id, cleanEmail, hash, name.trim(), false]
     )
     const user = userRows[0]
 
@@ -178,7 +236,8 @@ router.post('/login', loginAccountLimiter, loginIpLimiter, async (req, res) => {
   try {
     const { rows } = await pool.query(
       `SELECT u.*, o.name AS organization_name, o.slug AS organization_slug,
-              o.tradition AS organization_tradition
+              o.tradition AS organization_tradition, o.is_demo AS organization_is_demo,
+              o.locale AS organization_locale
          FROM ochr_users u
          JOIN ochr_organizations o ON o.id = u.organization_id
         WHERE u.email = $1`,
@@ -193,6 +252,8 @@ router.post('/login', loginAccountLimiter, loginIpLimiter, async (req, res) => {
     const org = {
       id: user.organization_id, name: user.organization_name, slug: user.organization_slug,
       tradition: user.organization_tradition,
+      locale: user.organization_locale,
+      is_demo: user.organization_is_demo === true,
     }
     const token = signToken({
       userId: user.id,
@@ -246,8 +307,16 @@ router.post('/logout-all', requireAuth, async (req, res) => {
 // doing the changing stays in — signing yourself out everywhere is
 // /logout-all's job, deliberately separate.
 //
-// 401 on a wrong current password rather than 403: this is a credential
-// check, not an authorisation one.
+// 403 on a wrong current password, NOT 401 — and this reverses an earlier
+// decision that read "credential check, so 401". The client's fetch
+// interceptor treats a 401 from any non-login endpoint as a dead session and
+// signs the user out; that is the right universal rule and it must stay
+// universal. But the caller here IS authenticated — their token verified —
+// and simply typed the wrong current password. Answering 401 signed people
+// out of Preferences for a typo, and the inline "Current password is
+// incorrect" they were owed never rendered. The missing/invalid-token 401s
+// (requireAuth, the row-gone case below) are genuine session failures and
+// keep their status.
 router.patch('/password', requireAuth, changePasswordLimiter, async (req, res) => {
   const { currentPassword, password } = req.body ?? {}
 
@@ -273,7 +342,7 @@ router.patch('/password', requireAuth, changePasswordLimiter, async (req, res) =
     if (!user) return res.status(401).json({ error: 'Your account is no longer active' })
 
     const ok = await bcrypt.compare(currentPassword, user.password_hash)
-    if (!ok) return res.status(401).json({ error: 'Current password is incorrect' })
+    if (!ok) return res.status(403).json({ error: 'Current password is incorrect' })
 
     const hash = await bcrypt.hash(password, 10)
     const { rows: bumped } = await pool.query(
@@ -315,7 +384,8 @@ router.post('/forgot-password', forgotPasswordAccountLimiter, forgotPasswordIpLi
 
   try {
     const { rows } = await pool.query(
-      'SELECT id, name, email FROM ochr_users WHERE email = $1',
+      `SELECT id, name, email FROM ochr_users WHERE email = $1
+       -- tenancy: pre-authentication. Password reset is requested by someone who cannot sign in; email is the only identifier available and is globally unique.`,
       [cleanEmail]
     )
     const user = rows[0]
@@ -401,7 +471,8 @@ router.post('/reset-password', async (req, res) => {
     // that was signed in with the old password (audit H5) — the exact
     // moment a user resets is the moment a stolen token must die.
     await client.query(
-      'UPDATE ochr_users SET password_hash = $1, token_version = token_version + 1 WHERE id = $2',
+      `UPDATE ochr_users SET password_hash = $1, token_version = token_version + 1 WHERE id = $2
+       -- tenancy: the id comes from a verified reset token, not from the request body. An org filter would not tighten anything the token has not already decided.`,
       [hash, tok.user_id]
     )
     await client.query(
@@ -426,11 +497,98 @@ router.post('/reset-password', async (req, res) => {
 // Rehydrates the client's user object on page load / token refresh.
 // If the JWT is still valid but the row was since deleted (e.g. an admin
 // revoked the user), return 401 so the client logs out.
+// POST /api/auth/accept-invite (PILOT.2) — the invited person sets their
+// own password, and becomes the only holder of it.
+//
+// Pre-auth, like the reset flow, because there is nobody to authenticate
+// yet: the token hash IS the credential. Deliberately a separate route
+// from /reset-password even though the token table is shared — the two say
+// different things to the person on the other end, one of them marks an
+// invitation accepted, and collapsing them would mean a reset silently
+// counting as an acceptance.
+router.post('/accept-invite', async (req, res) => {
+  const { token, password } = req.body ?? {}
+  if (typeof token !== 'string' || !token.trim()) {
+    return res.status(400).json({ error: 'An invitation link is required' })
+  }
+  if (!password || password.length < MIN_PASSWORD) {
+    return res.status(400).json({ error: `Password must be at least ${MIN_PASSWORD} characters` })
+  }
+
+  const tokenHash = hashToken(token)
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const { rows } = await client.query(
+      `SELECT t.id AS token_id, t.expires_at, t.used_at,
+              u.id, u.email, u.name, u.role, u.organization_id, u.invite_accepted_at
+         /* tenancy: pre-auth — the token hash is the credential, and no
+            org context exists until it resolves to a user */
+         FROM ochr_password_reset_tokens t
+         JOIN ochr_users u ON u.id = t.user_id
+        WHERE t.token_hash = $1
+        FOR UPDATE`,
+      [tokenHash]
+    )
+    const row = rows[0]
+    if (!row || row.used_at || new Date(row.expires_at) < new Date()) {
+      await client.query('ROLLBACK')
+      // One message for every failure mode. Distinguishing "expired" from
+      // "never existed" tells an attacker which guesses were close.
+      return res.status(400).json({ error: 'That invitation link is no longer valid. Ask for a new one.' })
+    }
+    if (row.invite_accepted_at != null) {
+      await client.query('ROLLBACK')
+      return res.status(409).json({ error: 'That invitation has already been accepted.' })
+    }
+
+    const hash = await bcrypt.hash(password, 10)
+    await client.query(
+      `UPDATE ochr_users
+          SET password_hash = $1, invite_accepted_at = NOW(),
+              -- tenancy: row.id came from the verified invite token. Accepting an invitation is how a user JOINS an org, so no caller org exists to filter by yet.
+              -- Every token minted before this moment is void, and any
+              -- session that somehow exists is too.
+              token_version = token_version + 1
+        WHERE id = $2`,
+      [hash, row.id]
+    )
+    await client.query(
+      `UPDATE ochr_password_reset_tokens SET used_at = NOW() WHERE id = $1`,
+      [row.token_id]
+    )
+    await client.query('COMMIT')
+
+    const [{ rows: orgRows }, { rows: tvRows }] = await Promise.all([
+      pool.query('SELECT id, name, slug, org_type, tradition, locale, is_demo FROM ochr_organizations WHERE id = $1',
+        [row.organization_id]),
+      pool.query(`SELECT token_version FROM ochr_users WHERE id = $1
+       -- tenancy: id comes from the verified JWT. This read is what ENFORCES session revocation, so it must not depend on an org claim in the token it is validating.`, [row.id]),
+    ])
+    const user = { id: row.id, email: row.email, name: row.name, role: row.role }
+    // The token must carry the version we just incremented to, or the
+    // person is signed out by the very act of accepting.
+    const token = signToken({
+      userId: row.id, organizationId: row.organization_id,
+      email: row.email, name: row.name, role: row.role,
+      tv: tvRows[0]?.token_version ?? 1,
+    })
+    res.json({ token, user: { ...user, organization: orgRows[0] } })
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
+    monitor.error('auth.acceptInvite', err)
+    res.status(500).json({ error: 'Could not accept the invitation' })
+  } finally {
+    client.release()
+  }
+})
+
 router.get('/me', requireAuth, async (req, res) => {
   try {
     const { rows } = await pool.query(
       `SELECT u.*, o.name AS organization_name, o.slug AS organization_slug,
-              o.tradition AS organization_tradition
+              o.tradition AS organization_tradition, o.is_demo AS organization_is_demo,
+              o.locale AS organization_locale
          FROM ochr_users u
          JOIN ochr_organizations o ON o.id = u.organization_id
         WHERE u.id = $1 AND u.organization_id = $2`,
@@ -441,6 +599,10 @@ router.get('/me', requireAuth, async (req, res) => {
     const org = {
       id: u.organization_id, name: u.organization_name, slug: u.organization_slug,
       tradition: u.organization_tradition,
+      locale: u.organization_locale,
+      // PILOT.4 — a fact on the org, not a naming convention a screenshot
+      // can crop out or a rename can erase.
+      is_demo: u.organization_is_demo === true,
     }
     res.json({ user: publicUser(u, org) })
   } catch (err) {
@@ -477,7 +639,8 @@ router.patch('/avatar', requireAuth, async (req, res) => {
 
   try {
     await pool.query(
-      'UPDATE ochr_users SET avatar = $1 WHERE id = $2',
+      `UPDATE ochr_users SET avatar = $1 WHERE id = $2
+       -- tenancy: req.user.id comes from the verified JWT — a person editing their own avatar. There is no id here that a request could have chosen.`,
       [clearing ? null : avatar, req.user.id]
     )
     res.json({ avatar: clearing ? null : avatar })

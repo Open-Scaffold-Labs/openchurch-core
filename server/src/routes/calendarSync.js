@@ -3,6 +3,8 @@ import pool from '../db.js'
 import crypto from 'crypto'
 import ical from 'ical-generator'
 import { requireIntParam } from '../utils/params.js'
+import { apiBase } from '../utils/publicUrl.js'
+import { memberByEmail } from '../directory/memberIdentity.js'
 
 // Two sub-routers:
 // - publicRouter : the ICS subscription URL. Authenticated by the opaque
@@ -10,12 +12,28 @@ import { requireIntParam } from '../utils/params.js'
 //   apps can't send Authorization headers.
 // - authRouter   : staff-facing endpoint to generate/fetch a member's
 //   subscription URL. Requires a signed-in admin.
+// How far back a subscribed calendar reaches.
+//
+// The feed used to return every event a member had ever been assigned
+// to, from the parish's first day forward, on every poll — and a
+// calendar app polls a subscription every 15–60 minutes forever, whether
+// or not anybody is looking. A parish five years in was re-sending five
+// years of Sundays several times an hour, per subscriber.
+//
+// Ninety days is the window a calendar client renders backwards in any
+// useful way, and it keeps the feed a fixed size rather than one that
+// grows with the parish's age. Forward is deliberately unbounded: future
+// events are the entire point of subscribing, and there are never many —
+// the recurrence builder caps a series at 26 weeks.
+const FEED_LOOKBACK_DAYS = 90
+
 const publicRouter = Router()
 const authRouter   = Router()
 
 async function generateCalendarToken(clientId) {
   const token = crypto.randomBytes(24).toString('hex')
-  await pool.query('UPDATE ochr_clients SET calendar_token = $1 WHERE id = $2', [token, clientId])
+  await pool.query(`UPDATE ochr_clients SET calendar_token = $1 WHERE id = $2
+       -- tenancy: the member id was org-verified earlier in this handler before the token is rotated.`, [token, clientId])
   return token
 }
 
@@ -87,7 +105,8 @@ publicRouter.get('/:token.ics', async (req, res) => {
   try {
     const { token } = req.params
     const { rows: clientRows } = await pool.query(
-      'SELECT * FROM ochr_clients WHERE calendar_token = $1',
+      `SELECT * FROM ochr_clients WHERE calendar_token = $1
+       -- tenancy: the token IS the capability for the public ICS feed — there is no session to take an org from. calendar_token is unique and every downstream query in this handler is scoped to the org this row returns.`,
       [token]
     )
     if (!clientRows.length) return res.status(404).send('Calendar not found')
@@ -111,20 +130,40 @@ publicRouter.get('/:token.ics', async (req, res) => {
          FROM ochr_events e
          JOIN ochr_event_members em ON em.event_id = e.id
         WHERE em.member_id = $1 AND e.organization_id = $2
+          AND e.date >= CURRENT_DATE - $3::int
         ORDER BY e.date`,
-      [client.id, orgId]
+      [client.id, orgId, FEED_LOOKBACK_DAYS]
     )
 
     // Schedule page entries — JSONB containment matches when assigned_to
-    // contains this member's id. Cast both sides to jsonb so the index
-    // can apply.
+    // contains this member's id.
+    //
+    // The comment here used to say "cast both sides to jsonb so the index
+    // can apply", and there was no index. The obvious fix was to add a
+    // GIN one. MEASURED AT 120,000 EVENTS, THAT IS THE WRONG FIX:
+    //
+    //   unbounded, no GIN      80.71ms   1,847 buffers
+    //   unbounded, with GIN     5.00ms     448 buffers
+    //   bounded,   with GIN     4.80ms     448 buffers
+    //   bounded,   no GIN       1.84ms      71 buffers   ← this
+    //
+    // The date window is what makes this cheap. With it, the org+date
+    // btree is far more selective than a containment bitmap over 800
+    // members, and adding the GIN index makes the planner choose the
+    // worse arm — nearly three times slower and six times the buffers.
+    // So there is no index here on purpose, and the purpose is written
+    // down so nobody adds one back from first principles.
+    //
+    // The other containment query (swap.js) is already date-bounded and
+    // LIMITed, so it sits in the same regime.
     const { rows: scheduleEvents } = await pool.query(
       `SELECT title, date, start_time, end_time, type
          FROM ochr_calendar_events
         WHERE organization_id = $1
           AND assigned_to @> to_jsonb(ARRAY[$2::int])
+          AND date >= CURRENT_DATE - $3::int
         ORDER BY date, start_time`,
-      [orgId, client.id]
+      [orgId, client.id, FEED_LOOKBACK_DAYS]
     )
 
     const icsContent = generateICS(client, tasks, events, scheduleEvents)
@@ -139,15 +178,49 @@ publicRouter.get('/:token.ics', async (req, res) => {
 })
 
 // Build the public ICS URL for a token. Centralized so any route that
-// returns a calendar link uses the same shape (and the same fallback).
-function buildIcsUrl(token) {
-  const baseUrl = process.env.BASE_URL || `http://localhost:3034`
-  return `${baseUrl}/api/calendar-sync/${token}.ics`
+// returns a calendar link uses the same shape.
+//
+// The base comes from utils/publicUrl.js rather than being read inline,
+// because the value has to be ABSOLUTE and the inline version could not
+// tell. A calendar app given `/api/calendar-sync/abc.ics` has nothing to
+// resolve it against — it does not error in a way anyone sees, it just
+// never syncs, and the member reports months later that their roster
+// "stopped working". Same defect the List-Unsubscribe header had, from
+// the same env var: vitest sets BASE_URL="/", and the old
+// `process.env.BASE_URL || fallback` accepted it happily because "/" is
+// truthy.
+function buildIcsUrl(base, token) {
+  return `${base}/api/calendar-sync/${token}.ics`
+}
+
+// Guard for every route whose response payload IS a URL.
+//
+// Deliberately checked BEFORE the handler does its work, not after. The
+// rotate endpoints invalidate the old token as their first act, so
+// discovering afterwards that the new URL cannot be built would leave the
+// member with a dead subscription and nothing to replace it with.
+//
+// A 500 rather than a link to localhost: a subscription URL that resolves
+// to the operator's own machine is not a degraded answer, it is a wrong
+// one, and it fails quietly inside the member's calendar app where nobody
+// is looking.
+function requireApiBase(res) {
+  const base = apiBase()
+  if (!base) {
+    console.error('calendar-sync: BASE_URL is not an absolute http(s) URL; refusing to emit a relative subscription link')
+    res.status(500).json({
+      code: 'base_url_unconfigured',
+      error: 'Calendar links are unavailable because the server URL is not configured.',
+    })
+    return null
+  }
+  return base
 }
 
 // GET /api/calendar-sync/link/:clientId  — get or create calendar URL for a member
 authRouter.get('/link/:clientId', async (req, res) => {
   const clientId = requireIntParam(req, res, 'clientId'); if (clientId === null) return
+  const base = requireApiBase(res); if (base === null) return
   try {
     const { rows } = await pool.query(
       'SELECT id, name, calendar_token FROM ochr_clients WHERE id = $1 AND organization_id = $2',
@@ -160,7 +233,7 @@ authRouter.get('/link/:clientId', async (req, res) => {
       calendar_token = await generateCalendarToken(clientId)
     }
 
-    res.json({ url: buildIcsUrl(calendar_token), token: calendar_token })
+    res.json({ url: buildIcsUrl(base, calendar_token), token: calendar_token })
   } catch (err) {
     console.error(err)
     res.status(500).json({ error: 'Failed to generate calendar link' })
@@ -174,14 +247,11 @@ authRouter.get('/link/:clientId', async (req, res) => {
 // UI uses the code to silently hide the card instead of surfacing an
 // error toast for a non-error condition).
 authRouter.get('/my-link', async (req, res) => {
+  const base = requireApiBase(res); if (base === null) return
   try {
-    const { rows } = await pool.query(
-      `SELECT id, name, calendar_token
-         FROM ochr_clients
-        WHERE LOWER(email) = LOWER($1) AND organization_id = $2
-        LIMIT 1`,
-      [req.user.email, req.organizationId]
-    )
+    const member = await memberByEmail(req.organizationId, req.user.email,
+      ['id', 'name', 'calendar_token'])
+    const rows = member ? [member] : []
     if (!rows.length) {
       return res.status(404).json({
         code: 'no_member_match',
@@ -195,7 +265,7 @@ authRouter.get('/my-link', async (req, res) => {
       calendar_token = await generateCalendarToken(client.id)
     }
 
-    res.json({ url: buildIcsUrl(calendar_token), token: calendar_token })
+    res.json({ url: buildIcsUrl(base, calendar_token), token: calendar_token })
   } catch (err) {
     console.error(err)
     res.status(500).json({ error: 'Failed to generate calendar link' })
@@ -208,6 +278,7 @@ authRouter.get('/my-link', async (req, res) => {
 // wrong person.
 authRouter.post('/rotate/:clientId', async (req, res) => {
   const clientId = requireIntParam(req, res, 'clientId'); if (clientId === null) return
+  const base = requireApiBase(res); if (base === null) return
   try {
     const { rows } = await pool.query(
       'SELECT id FROM ochr_clients WHERE id = $1 AND organization_id = $2',
@@ -216,7 +287,7 @@ authRouter.post('/rotate/:clientId', async (req, res) => {
     if (!rows.length) return res.status(404).json({ error: 'Member not found' })
 
     const token = await generateCalendarToken(clientId)
-    res.json({ url: buildIcsUrl(token), token })
+    res.json({ url: buildIcsUrl(base, token), token })
   } catch (err) {
     console.error(err)
     res.status(500).json({ error: 'Failed to rotate calendar token' })
@@ -227,13 +298,10 @@ authRouter.post('/rotate/:clientId', async (req, res) => {
 // Same shape as /rotate/:clientId but the target client is resolved
 // from the authed user's email, matching /my-link.
 authRouter.post('/my-rotate', async (req, res) => {
+  const base = requireApiBase(res); if (base === null) return
   try {
-    const { rows } = await pool.query(
-      `SELECT id FROM ochr_clients
-        WHERE LOWER(email) = LOWER($1) AND organization_id = $2
-        LIMIT 1`,
-      [req.user.email, req.organizationId]
-    )
+    const member = await memberByEmail(req.organizationId, req.user.email)
+    const rows = member ? [member] : []
     if (!rows.length) {
       return res.status(404).json({
         code: 'no_member_match',
@@ -242,7 +310,7 @@ authRouter.post('/my-rotate', async (req, res) => {
     }
 
     const token = await generateCalendarToken(rows[0].id)
-    res.json({ url: buildIcsUrl(token), token })
+    res.json({ url: buildIcsUrl(base, token), token })
   } catch (err) {
     console.error(err)
     res.status(500).json({ error: 'Failed to rotate calendar token' })

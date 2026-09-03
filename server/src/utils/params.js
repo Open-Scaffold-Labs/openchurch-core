@@ -6,8 +6,33 @@
 // null to avoid surfacing raw Postgres cast errors to clients.
 export function parseIntId(raw) {
   if (raw === undefined || raw === null) return null
-  const n = Number(raw)
-  if (!Number.isInteger(n) || n <= 0) return null
+
+  // DIGITS ONLY, and this is the load-bearing line.
+  //
+  // `Number()` accepts a good deal that is not an id: '1e3' becomes 1000,
+  // '0x10' becomes 16, and — the one that matters —
+  // '999999999999999999999' becomes 1e+21, which IS an integer by
+  // Number.isInteger and sails straight through to Postgres as the literal
+  // "1e+21". Measured: SQLSTATE 22P02, invalid input syntax for type
+  // integer, caught by the route's catch-all and returned as a 500.
+  //
+  // So the guard whose entire job is to stop a bad id becoming a server
+  // fault had the fault in it, at all twenty-four call sites. Found on a
+  // second pass over a change that adopted this helper for exactly that
+  // reason.
+  //
+  // An id is a string of digits. Anything else is not an id, whatever
+  // Number() is willing to make of it.
+  const str = String(raw).trim()
+  if (!/^\d+$/.test(str)) return null
+
+  const n = Number(str)
+  // Safe-integer bound rather than INT4 max: several tables here are
+  // BIGSERIAL (ochr_diocese_affiliations among them), so capping at
+  // 2147483647 would reject ids those tables can legitimately issue. Beyond
+  // 2^53 the value cannot survive the round trip through a JS number at all,
+  // which makes it the honest ceiling.
+  if (!Number.isSafeInteger(n) || n <= 0) return null
   return n
 }
 

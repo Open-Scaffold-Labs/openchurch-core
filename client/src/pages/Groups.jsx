@@ -41,6 +41,8 @@ const EMPTY_FORM = {
 export default function Groups() {
   const [groups,    setGroups]    = useState([])
   const [members,   setMembers]   = useState([])
+  const [membersFailed, setMembersFailed] = useState(false)
+  const [groupsFailed, setGroupsFailed] = useState(false)
   const [interests, setInterests] = useState([]) // pending connect-card requests (CC.3)
   const [busyId,    setBusyId]    = useState(null) // interest id being approved/declined
   const [loading,   setLoading]   = useState(true)
@@ -59,8 +61,15 @@ export default function Groups() {
         fetch(apiUrl('/api/clients?limit=200')),
         fetch(apiUrl('/api/connect?status=pending')),
       ])
+      // A failed groups call left `groups` at [] and the page rendered
+      // "No groups yet — Create your first ministry team". The only signal
+      // was a toast, which is gone seconds later. Observed 27 Aug.
       const g = gRes.ok ? await gRes.json() : { groups: [] }
+      setGroupsFailed(!gRes.ok)
+      // An empty roster here feeds the same MemberPicker as Events. A failed
+      // call must not arrive there looking like a parish with no members.
       const m = mRes.ok ? await mRes.json() : []
+      setMembersFailed(!mRes.ok)
       const i = iRes.ok ? await iRes.json() : { interests: [] }
       setGroups(g.groups ?? [])
       setMembers(Array.isArray(m) ? m : (m.clients ?? []))
@@ -210,6 +219,16 @@ export default function Groups() {
           <div className="flex items-center justify-center py-12">
             <Loader2 className="animate-spin text-brass-600" size={28} />
           </div>
+        ) : groupsFailed ? (
+          <div role="status" className="flex items-start gap-3 rounded-2xl border border-amber-300/70 dark:border-amber-700/40 bg-amber-50/70 dark:bg-amber-900/15 px-5 py-4">
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-semibold text-ink-900 dark:text-parchment-50">We couldn't load your groups.</p>
+              <p className="text-sm text-ink-600 dark:text-parchment-300/80 mt-0.5">
+                This is a connection problem, not a parish without groups. Nothing has been removed.
+              </p>
+            </div>
+            <button onClick={load} className="shrink-0 text-sm font-medium text-church-700 dark:text-brass-300 underline min-h-[32px]">Try again</button>
+          </div>
         ) : groups.length === 0 ? (
           <EmptyState
             icon={Users2}
@@ -275,6 +294,7 @@ export default function Groups() {
           <GroupModal
             group={modal}
             members={members}
+            membersFailed={membersFailed}
             onClose={() => setModal(null)}
             onSaved={async () => { setModal(null); await load() }}
           />
@@ -284,7 +304,7 @@ export default function Groups() {
   )
 }
 
-function GroupModal({ group, members, onClose, onSaved }) {
+function GroupModal({ group, members, membersFailed, onClose, onSaved }) {
   const isEdit = !!group?.id
   const [form, setForm] = useState(() => {
     if (!isEdit) return EMPTY_FORM
@@ -371,9 +391,10 @@ function GroupModal({ group, members, onClose, onSaved }) {
   const handleDelete = async () => {
     if (!isEdit) return
     if (!(await ask({
-      title: `Delete “${group.name}”?`,
-      body: 'Members are removed from this group. They stay on your parish roster.',
-      confirmLabel: 'Delete group',
+      title: `Remove “${group.name}”?`,
+      body: 'The roster for this group goes with it. Everyone on it stays on your parish roster.',
+      confirmLabel: 'Remove group',
+      recoverable: true,
     }))) return
     setBusy(true)
     try {
@@ -475,6 +496,7 @@ function GroupModal({ group, members, onClose, onSaved }) {
               Members
             </label>
             <MemberPicker
+              failed={membersFailed}
               members={members}
               value={form.member_ids}
               onChange={ids => setForm(f => ({ ...f, member_ids: ids }))}

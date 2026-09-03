@@ -12,6 +12,7 @@
 
 import pool from '../db.js'
 import { computeEaster } from '../routes/liturgical.js'
+import { DISTINCT_PEOPLE } from './definitions.js'
 
 // Easter is a movable feast, so its query cannot live as a static string in
 // the definition. It is the one field that needs the liturgical calendar.
@@ -22,10 +23,14 @@ async function easterAttendance(orgId, start, end) {
     .filter(d => d >= start && d <= end)
   if (!dates.length) return 0
   const { rows } = await pool.query(
-    `SELECT count(*)::int AS value
-       FROM ochr_checkins ck
-       JOIN ochr_calendar_events e ON e.id = ck.calendar_event_id
-      WHERE ck.organization_id = $1 AND e.date = ANY($2::date[])`,
+    `SELECT COALESCE(SUM(n), 0)::int AS value
+       FROM (
+         SELECT e.id, ${DISTINCT_PEOPLE} AS n
+           FROM ochr_checkins ck
+           JOIN ochr_calendar_events e ON e.id = ck.calendar_event_id
+          WHERE ck.organization_id = $1 AND e.date = ANY($2::date[])
+          GROUP BY e.id
+       ) per_service`,
     [orgId, dates]
   )
   return rows[0]?.value ?? 0

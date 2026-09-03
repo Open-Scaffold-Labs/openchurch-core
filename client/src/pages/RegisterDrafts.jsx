@@ -14,6 +14,7 @@ import EmptyState from '../components/EmptyState'
 import { useToast } from '../components/ToastProvider'
 import { useLocale } from '../i18n'
 import { apiUrl } from '../api'
+import { loadList } from '../utils/format'
 
 const TYPES = ['baptism', 'reconciliation', 'first_communion', 'confirmation', 'marriage', 'holy_orders', 'anointing', 'burial']
 
@@ -62,6 +63,7 @@ export default function RegisterDrafts() {
   const { t } = useLocale()
   const [drafts,  setDrafts]  = useState([])
   const [members, setMembers] = useState([])
+  const [membersFailed, setMembersFailed] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error,   setError]   = useState('')
   const [csv,     setCsv]     = useState('')
@@ -82,10 +84,12 @@ export default function RegisterDrafts() {
 
   useEffect(() => { load() }, [])
   useEffect(() => {
-    fetch(apiUrl('/api/clients'))
-      .then(r => r.json())
-      .then(list => setMembers(Array.isArray(list) ? list : []))
-      .catch(() => {})
+    // `.catch(() => {})` — the roster failing to load was swallowed entirely,
+    // and a sacramental draft's member field silently offered nothing.
+    loadList(apiUrl('/api/clients')).then(({ ok, data }) => {
+      setMembers(data)
+      setMembersFailed(!ok)
+    })
   }, [])
 
   const memberOptions = useMemo(
@@ -208,6 +212,11 @@ export default function RegisterDrafts() {
       {/* Pending drafts */}
       {loading ? (
         <div className="flex justify-center py-16"><Loader2 size={22} className="animate-spin text-brass-600" /></div>
+      ) : error ? (
+        // The load failed, so the register is unread — not empty. Rendering
+        // "No pending drafts" underneath the error banner was the page
+        // answering a question it had not been able to ask.
+        null
       ) : drafts.length === 0 ? (
         <EmptyState title={t('drafts.emptyTitle')} body={t('drafts.emptyBody')} />
       ) : (
@@ -235,12 +244,36 @@ export default function RegisterDrafts() {
                     <label className={labelCls}>{t('register.date')}</label>
                     <input type="date" value={d.draft.date ?? ''} onChange={e => setField(d.id, 'date', e.target.value)} className={inputCls} />
                   </div>
+                  {/* The subject of the sacrament, as the register wrote it.
+                      This field did not exist, so a CSV or OCR import could
+                      stage the date, the minister, the place and the
+                      certificate number of a 1953 baptism but not the name of
+                      the person baptised — unless they happened to be a
+                      current member. Most of the people in a paper register
+                      are not. */}
+                  <div>
+                    <label className={labelCls}>{t('drafts.subject')}</label>
+                    <input
+                      value={d.draft.member_name ?? ''}
+                      onChange={e => setField(d.id, 'member_name', e.target.value || undefined)}
+                      placeholder={t('drafts.subjectPlaceholder')}
+                      className={inputCls}
+                    />
+                    <p className="mt-1 text-[11px] text-ink-500 dark:text-parchment-300/70">
+                      {t('drafts.subjectHelp')}
+                    </p>
+                  </div>
                   <div>
                     <label className={labelCls}>{t('drafts.memberOpt')}</label>
                     <select value={d.draft.client_id ?? ''} onChange={e => setField(d.id, 'client_id', e.target.value ? Number(e.target.value) : undefined)} className={inputCls}>
                       <option value="">{t('drafts.notLinked')}</option>
                       {memberOptions.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
                     </select>
+                    {membersFailed && (
+                      <p role="status" className="mt-1 text-[11px] text-amber-700 dark:text-amber-400">
+                        {t('drafts.membersFailed')}
+                      </p>
+                    )}
                   </div>
                   <div>
                     <label className={labelCls}>{t('register.minister')}</label>

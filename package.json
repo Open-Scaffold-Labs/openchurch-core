@@ -14,7 +14,13 @@
     "migrate": "node --env-file-if-exists=server/.env server/src/migrate-cli.js",
     "lint:operator": "node scripts/operator-lint.mjs",
     "lint:operator:list": "node scripts/operator-lint.mjs --list",
-    "lint:operator:baseline": "node scripts/operator-lint.mjs --baseline"
+    "lint:operator:baseline": "node scripts/operator-lint.mjs --baseline",
+    "lint:honest": "node scripts/honest-failure.mjs",
+    "lint:honest:list": "node scripts/honest-failure.mjs --list",
+    "lint:honest:baseline": "node scripts/honest-failure.mjs --baseline",
+    "lint:client-scope": "node scripts/client-scope.mjs",
+    "lint:api-shape": "node scripts/api-shape.mjs",
+    "lint:api-shape:baseline": "node scripts/api-shape.mjs --baseline"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.111.0",

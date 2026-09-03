@@ -1,0 +1,30 @@
+---
+description: Backend, server, and database safety — tenant scoping, validation of related tenant-owned entities, closed update allowlists, audit logging, exact money, and transaction boundaries.
+globs: server/src/**,api/**
+alwaysApply: false
+---
+
+# Backend & tenancy
+
+Applies to server and API code. `OPERATOR.md`'s "anything that runs against a database" bans
+also apply; this rule adds the request-time discipline.
+
+- **Every caller-controlled identifier is untrusted.** Body, params, query, and headers included.
+  Scope every query by `req.organizationId` (derived from the JWT, never from the request), and
+  validate that every related entity a write touches belongs to the same tenant before using it.
+- **Preserve the tenancy guarantees.** Keep composite tenant constraints (`REFERENCES parent(id,
+  organization_id)`) and the existing tenancy audits (`server/scripts/audit-tenancy.mjs`,
+  `scripts/tenant-fk-audit.mjs`) green. Do not weaken a constraint to make a write pass.
+- **Keep writes closed and accountable.** Preserve closed update allowlists (never spread
+  arbitrary request fields into a write), authorization gates, last-admin protection, and audit
+  logging on every mutation. Never `catch {}` a user-facing failure.
+- **Money is exact.** Handle amounts in integer minor units, keep refunds excluded from
+  aggregates (see `scripts/money-invariants.mjs`), and keep multi-step writes inside one
+  transaction with clear boundaries.
+- **Sacramental writes stay ceremonial.** Nothing writes `ochr_sacramental_records` except a
+  human commit through the drafts sandbox. Never add a bypass.
+- **Exposed surfaces need review.** Public, kiosk, token, webhook, cron, import, and export
+  paths bypass the normal JWT tenant scoping, so treat any change to them as security-sensitive
+  and call it out explicitly.
+- **Prove isolation.** A tenant-sensitive change is not done until a test shows same-tenant
+  success **and** cross-tenant rejection.

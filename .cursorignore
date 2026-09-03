@@ -1,0 +1,50 @@
+# Keep agents away from secrets, build output, and large binary dumps.
+# This blocks agent *access*, so it must never hide source, tests, public
+# fixtures, or the architecture documents agents are required to read
+# (CONSTITUTION.md, OPERATOR.md, docs/).
+
+# -- Secrets: real env files, never the committed templates --------------
+.env
+.env.*
+!.env.example
+!**/.env.example
+!.env.production
+!**/.env.production
+
+# Private keys, certificates, and secret material
+*.pem
+*.key
+*.crt
+*.cer
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+secrets/
+**/secrets/
+
+# -- Platform / deploy state ---------------------------------------------
+.vercel
+**/.vercel
+
+# -- Dependencies and build / coverage output ----------------------------
+node_modules
+**/node_modules
+dist
+**/dist
+build
+**/build
+coverage
+**/coverage
+.nyc_output
+client/dev-dist
+*.tsbuildinfo
+
+# -- Database dumps, backups, and private exports ------------------------
+*.dump
+*.sql.gz
+*.sqlite
+*.db
+*.bak
+backups/
+*.tar.gz

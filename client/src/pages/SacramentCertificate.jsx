@@ -54,6 +54,30 @@ export default function SacramentCertificate() {
     )
   }
 
+  // A 200 is not the same as a record. Observed 27 Aug: a 200 carrying `{}`
+  // rendered a complete, printable, letterheaded certificate — parish name,
+  // "This is to certify that", the rites language, a signature line and
+  // today's date — certifying no person, no sacrament, no date and no
+  // minister, offered with "Print / Save as PDF". A document that leaves the
+  // building attesting to nothing is worse than an error page.
+  //
+  // The bar is deliberately the two facts without which the sentence cannot
+  // be true: WHO and WHICH SACRAMENT. Date, place, minister and certificate
+  // number are genuinely absent from many historical entries and are already
+  // rendered conditionally — they are not required here.
+  const isText = v => typeof v === 'string' && v.trim().length > 0
+  if (record.id == null || !isText(record.type) || !isText(record.member_name)) {
+    return (
+      <div className="max-w-xl mx-auto py-16 text-center space-y-3">
+        <p className="font-display text-xl text-church-800 dark:text-brass-200">{t('cert.incompleteTitle')}</p>
+        <p className="text-sm text-ink-600 dark:text-parchment-300">{t('cert.incompleteBody')}</p>
+        <Link to="/register" className="inline-block text-sm text-church-700 dark:text-brass-300 hover:underline">
+          ← {t('cert.back')}
+        </Link>
+      </div>
+    )
+  }
+
   // REG.1 — a certificate is an extract from the register, so a void entry
   // must never produce one. Refusing here rather than watermarking: a
   // watermarked certificate still leaves the building, and the whole point
@@ -114,15 +138,20 @@ export default function SacramentCertificate() {
       </div>
 
       {/* The certificate itself */}
-      <article
-        className="relative bg-white text-ink-900 mx-auto p-10 sm:p-14 shadow-warm-lg print:shadow-none"
-        style={{ aspectRatio: '1 / 1.294' }}
-      >
+      {/* The page shape is a MINIMUM, not a cage.
+          Observed 27 Aug at 390px (iPhone): the hard aspect-ratio gave the
+          article a definite height, so the godparents, the signature line and
+          the issue line spilled out BELOW the ornamental border and sat on the
+          parchment — a certificate whose frame cuts across its own text, on
+          the exact screen a secretary is most likely to print from. The ratio
+          now applies from sm: up and on print, where it is page shape; below
+          that the box grows to hold the document. */}
+      <article className="relative bg-white text-ink-900 mx-auto p-6 sm:p-14 shadow-warm-lg print:shadow-none sm:aspect-[1/1.294] print:aspect-[1/1.294]">
         {/* Double ornamental border */}
         <div className="absolute inset-3 border-2 border-brass-700/70 pointer-events-none" />
         <div className="absolute inset-5 border border-brass-700/40 pointer-events-none" />
 
-        <div className="relative h-full flex flex-col items-center text-center">
+        <div className="relative sm:h-full print:h-full flex flex-col items-center text-center">
           <p className="font-display text-2xl sm:text-3xl font-semibold text-church-800 tracking-wide">{churchName}</p>
           <div className="mt-1 mb-6 h-px w-24 bg-brass-700/50" />
 

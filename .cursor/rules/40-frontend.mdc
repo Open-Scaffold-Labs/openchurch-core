@@ -1,0 +1,24 @@
+---
+description: Frontend conventions for the parish client and the chancery client — reuse existing tokens, primitives, icons, translations, and route/loading/empty/error patterns; never add a UI library or redesign unrelated surfaces.
+globs: client/**,client-diocese/**
+alwaysApply: false
+---
+
+# Frontend
+
+Applies to `client/` (parish app) and `client-diocese/` (chancery app). `OPERATOR.md` and the
+brand docs (`docs/BRAND.md`) own the visual bans — defer to them; do not re-litigate colors,
+shadows, motion, or typography here.
+
+- **Reuse what exists.** Build from the current design tokens, shared primitives (`EmptyState`,
+  `Skeleton`, toast/confirm providers), `lucide-react` icons, `t()` translation keys, and the
+  established route, loading, empty-state, and error patterns. Match the nearest neighbouring
+  page rather than inventing a variant.
+- **No new surface area.** Never add a UI, component, chart, or animation library, and never
+  redesign a surface the task did not name.
+- **Every fetch is honest.** A visible warm loading state, a surfaced failure state, and no
+  screen that invents data from a dropped response, an unchecked `.json()`, or a
+  `.catch(() => setRows([]))`. `npm run lint:honest` and `npm run lint:client-scope` gate this.
+- **Preserve behavior across the board.** Keep responsive layout, accessibility, English/Spanish
+  parity, role boundaries, `print:*` artifact rules, and liturgical context intact. Every static
+  `t()` key must exist in both locales.

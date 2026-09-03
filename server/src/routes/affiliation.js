@@ -6,6 +6,7 @@
 //   POST /api/affiliation/decline  → decline the pending invite
 //   PATCH /api/affiliation/grant   → change grant level while active
 //   POST /api/affiliation/leave    → end an active/suspended affiliation
+//   GET  /api/affiliation/standing → where we stand with the diocese (DIO.6)
 //
 // Mounted with gateMutations('admin'): staff/viewers can see the
 // affiliation state; only an admin can change the org's relationship
@@ -16,6 +17,7 @@
 import { Router } from 'express'
 import pool from '../db.js'
 import { monitor } from '../monitoring/index.js'
+import { standingFor } from '../affiliation/standing.js'
 
 const router = Router()
 
@@ -43,6 +45,36 @@ router.get('/', async (req, res) => {
   } catch (err) {
     monitor.error('affiliation.get', err, { orgId: req.organizationId })
     res.status(500).json({ error: 'Failed to load the diocese affiliation' })
+  }
+})
+
+// GET /api/affiliation/standing (DIO.6) — the trickle-down.
+//
+// Deliberately NOT under /:id. A parish has at most one live affiliation,
+// so there is no id to pass and therefore nothing to enumerate. The
+// diocese is read from the parish's own live row, never from the request.
+//
+// An unaffiliated parish gets an empty standing and a 200, not a 404: "you
+// are not affiliated" is a true and useful answer, and an error would make
+// the ordinary case look like a fault.
+router.get('/standing', async (req, res) => {
+  try {
+    const aff = await liveRow(req.organizationId)
+    if (!aff || aff.status !== 'active') {
+      return res.json({ affiliation: aff, standing: null })
+    }
+    const { rows } = await pool.query(
+      `SELECT diocese_org_id FROM ochr_diocese_affiliations WHERE id = $1`, [aff.id])
+    const dioceseOrgId = rows[0]?.diocese_org_id
+    if (!dioceseOrgId) return res.json({ affiliation: aff, standing: null })
+
+    res.json({
+      affiliation: aff,
+      standing: await standingFor(req.organizationId, dioceseOrgId),
+    })
+  } catch (err) {
+    monitor.error('affiliation.standing', err, { orgId: req.organizationId })
+    res.status(500).json({ error: 'Failed to load where things stand with the diocese' })
   }
 })
 

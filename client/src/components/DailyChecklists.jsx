@@ -5,6 +5,7 @@ import { useAuth } from '../context/AuthContext'
 import { useToast } from '../components/ToastProvider'
 import { useLocale } from '../i18n'
 import { useConfirm } from './ConfirmProvider'
+import { loadList } from '../utils/format'
 
 // Daily operational checklists (OPS.1) — the dashboard widget. Renders
 // nothing at all when the org has no active templates and the viewer
@@ -19,16 +20,22 @@ export default function DailyChecklists() {
   const canWrite = user?.role === 'admin' || user?.role === 'staff'
 
   const [runs, setRuns] = useState(null)
+  // A dropped request must not look like a day with nothing to do.
+  const [runsFailed, setRunsFailed] = useState(false)
   const [templates, setTemplates] = useState([])
   const [managing, setManaging] = useState(false)
   const [form, setForm] = useState({ title: '', items: '' })
   const [busy, setBusy] = useState(false)
 
   const load = useCallback(() => {
-    fetch(apiUrl('/api/checklists/today'))
-      .then(r => (r.ok ? r.json() : { runs: [] }))
-      .then(d => setRuns(d.runs ?? []))
-      .catch(() => setRuns([]))
+    // A failed load used to become an empty run list, and this card hides
+    // itself when the list is empty and you cannot write — so the checklist
+    // did not merely look empty, it VANISHED. A closing checklist that is
+    // not on screen is one nobody does.
+    loadList(apiUrl('/api/checklists/today'), d => d.runs ?? []).then(({ ok, data }) => {
+      setRuns(data)
+      setRunsFailed(!ok)
+    })
     if (canWrite) {
       fetch(apiUrl('/api/checklists/templates'))
         .then(r => (r.ok ? r.json() : { templates: [] }))
@@ -79,7 +86,7 @@ export default function DailyChecklists() {
   }
 
   const removeTemplate = async (id) => {
-    if (!(await ask({ title: t('chk.deleteConfirm'), confirmLabel: t('common.delete') || 'Delete' }))) return
+    if (!(await ask({ title: t('chk.deleteConfirm'), confirmLabel: t('chk.deleteAction') }))) return
     try {
       const res = await fetch(apiUrl(`/api/checklists/templates/${id}`), { method: 'DELETE' })
       if (!res.ok && res.status !== 204) throw new Error()
@@ -88,7 +95,9 @@ export default function DailyChecklists() {
   }
 
   if (runs === null) return null
-  if (runs.length === 0 && !canWrite) return null
+  // Only disappear when the list is genuinely empty. If it failed to load,
+  // stay on screen and say so — silence is the one answer that is never true.
+  if (runs.length === 0 && !canWrite && !runsFailed) return null
 
   const inputCls = 'w-full px-3 py-2 text-sm rounded-lg border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-100 dark:bg-ink-800 text-ink-900 dark:text-parchment-50 focus:outline-none focus:ring-2 focus:ring-church-500'
 
@@ -107,7 +116,12 @@ export default function DailyChecklists() {
         )}
       </div>
 
-      {runs.length === 0 && (
+      {runsFailed && (
+        <p className="text-[12px] text-amber-700 dark:text-amber-400 leading-snug">
+          Today’s checklists didn’t load — this isn’t a day with nothing on it.
+        </p>
+      )}
+      {runs.length === 0 && !runsFailed && (
         <p className="text-sm text-ink-500 dark:text-parchment-300/70">{t('chk.empty')}</p>
       )}
 

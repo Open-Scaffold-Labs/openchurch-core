@@ -1,12 +1,12 @@
 import { useEffect, useState, useCallback } from 'react'
 import { Loader2, Download, RefreshCw } from 'lucide-react'
 import { apiUrl } from '../api'
+import { fmtMoney, loadOne } from '../utils/format'
+import LoadError from '../components/LoadError'
 
 // The roll-up (DIO.2): consolidated financials across every affiliated
 // parish, from approved submissions only. CSV export honors the Pledge —
 // the diocese's data leaves freely too.
-
-const fmtMoney = v => Number(v ?? 0).toLocaleString('en-US', { style: 'currency', currency: 'USD' })
 
 function yearBounds() {
   const y = new Date().getFullYear()
@@ -16,15 +16,18 @@ function yearBounds() {
 export default function Financials() {
   const [{ start, end }, setPeriod] = useState(yearBounds)
   const [data, setData] = useState(null)
+  // A failed roll-up used to `setData({})`, which this page renders as "no
+  // approved submissions in this range yet" — the diocese told its parishes
+  // filed nothing, by a dropped connection.
+  const [failed, setFailed] = useState(false)
 
-  const load = useCallback(() => {
-    setData(null)
-    fetch(apiUrl(`/api/diocese/financials?start=${start}&end=${end}`))
-      .then(r => r.json())
-      .then(setData)
-      .catch(() => setData({}))
+  const load = useCallback(async () => {
+    setData(null); setFailed(false)
+    const { ok, data } = await loadOne(apiUrl(`/api/diocese/financials?start=${start}&end=${end}`))
+    if (!ok) { setFailed(true); setData({}); return }
+    setData(data)
   }, [start, end])
-  useEffect(load, [load])
+  useEffect(() => { load() }, [load])
 
   const exportCsv = () => {
     if (!data?.parishes) return
@@ -64,6 +67,12 @@ export default function Financials() {
 
       {data === null ? (
         <div className="flex justify-center py-24"><Loader2 size={22} className="animate-spin text-brass-500" /></div>
+      ) : failed ? (
+        <LoadError
+          title="The roll-up didn't load."
+          body="This is a connection problem, not an empty range. No parish submission was lost, and nothing here was changed."
+          onRetry={load}
+        />
       ) : !data.parishes?.length ? (
         <div className="bg-parchment-50 rounded-2xl border border-parchment-300/70 p-8 text-center text-sm text-ink-500">
           No approved submissions in this range yet. Approve parish periods

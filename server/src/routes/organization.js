@@ -27,6 +27,15 @@ const PATCHABLE = new Set([
   // org sees. Validated against a closed set, not free text, because a
   // typo here would silently drop the org back to 'general'.
   'tradition',
+  // The parish's language (migration 093). Same shape as tradition and for
+  // the same reason: a closed set, because an unrecognised value renders
+  // English while claiming to be something else, which is the failure mode
+  // hardest for the person affected to report.
+  'locale',
+  // PILOT.4 — a workspace may declare itself fictional. ONE WAY ONLY: see
+  // the guard below. Turning it on is a promise about the data; turning it
+  // off would be a claim that fictional pastoral notes are real ones.
+  'is_demo',
   'address',
   'tax_id',
   'signatory_name',
@@ -62,6 +71,11 @@ function isValidTimeZone(tz) {
 // PATCH loop (the string trim/length path would reject them).
 const BOOLEAN_FIELDS = new Set(['page_published'])
 const TRADITIONS_ALLOWED = new Set(['catholic', 'episcopal', 'lutheran', 'anglican', 'general'])
+// Matches the CHECK constraint in migration 093. Kept as a literal rather
+// than imported from the migration: route validation and schema validation
+// are two independent statements of the same rule, and a route that imports
+// its rule from the thing it is guarding is not a second opinion.
+const LOCALES_ALLOWED = new Set(['en', 'es'])
 
 // Integer fields, clamped to a sane inclusive range so a typo can't
 // queue reminders a year out (or in the past).
@@ -88,7 +102,7 @@ router.get('/', async (req, res) => {
       `SELECT id, name, slug, address, tax_id,
               signatory_name, signatory_title, statement_letterhead,
               tagline, about, service_times, page_published,
-              reminder_lead_hours, timezone, tradition,
+              reminder_lead_hours, timezone, tradition, locale,
               created_at
          FROM ochr_organizations
         WHERE id = $1`,
@@ -147,6 +161,33 @@ router.patch('/', async (req, res) => {
 
     // Tradition is a closed set, and it is NOT nullable — clearing it
     // means 'general', which is a real tier rather than an absence.
+    if (k === 'is_demo') {
+      // Declaring a workspace fictional is allowed at any time. Declaring a
+      // fictional one real is not, from here — it would take demo parishes,
+      // demo clergy and invented pastoral notes and quietly present them as
+      // records about actual people. If a workspace was flagged in error,
+      // that is a conversation with support, not a checkbox.
+      // Read req.body directly: `v` is declared with `let` further down
+      // this loop body, so touching it here is a temporal-dead-zone
+      // ReferenceError, which surfaces as a 500 rather than as a mistake.
+      if (req.body[k] !== true) {
+        return res.status(400).json({
+          error: 'A demonstration workspace cannot be marked as real from here. Ask support.',
+        })
+      }
+      updates[k] = true
+      continue
+    }
+    // Locale is NOT nullable — clearing it means English, which is a real
+    // answer rather than an absence, exactly like tradition → 'general'.
+    if (k === 'locale') {
+      const v = String(req.body[k] ?? '').trim() || 'en'
+      if (!LOCALES_ALLOWED.has(v)) {
+        return res.status(400).json({ error: `locale must be one of: ${[...LOCALES_ALLOWED].join(', ')}` })
+      }
+      updates[k] = v
+      continue
+    }
     if (k === 'tradition') {
       const v = String(req.body[k] ?? '').trim() || 'general'
       if (!TRADITIONS_ALLOWED.has(v)) {
@@ -190,7 +231,7 @@ router.patch('/', async (req, res) => {
         RETURNING id, name, slug, address, tax_id,
                   signatory_name, signatory_title, statement_letterhead,
                   tagline, about, service_times, page_published,
-                  reminder_lead_hours, timezone, tradition,
+                  reminder_lead_hours, timezone, tradition, locale, locale,
                   created_at`,
       params
     )

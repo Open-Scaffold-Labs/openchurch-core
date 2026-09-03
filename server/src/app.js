@@ -15,7 +15,9 @@ import express from 'express'
 import cors from 'cors'
 
 import pool from './db.js'
-import { paymentsProvider } from './payments/index.js'
+import { paymentsProvider, paymentsConfigured, paymentsCanMoveMoney, stubWouldFakeMoney } from './payments/index.js'
+import { EXPECTED_MIGRATION } from './migrations/names.js'
+import { appliedMigration } from './migrations/applied.js'
 import { requireSuperAdmin } from './middleware/superAdmin.js'
 import { requireAuth, gateMutations, requireRole, requireOrgType } from './middleware/auth.js'
 import { auditLog } from './middleware/auditLog.js'
@@ -43,12 +45,15 @@ import {
 } from './routes/calendarSync.js'
 import searchRouter from './routes/search.js'
 import onboardingRouter from './routes/onboarding.js'
+import { recordRelease, releaseInfo } from './release/log.js'
+import setupRouter from './routes/setup.js'
 import usersRouter from './routes/users.js'
 import {
   publicRouter as billingPublicRouter,
   authRouter   as billingAuthRouter,
 } from './routes/billing.js'
 import auditLogRouter from './routes/auditLog.js'
+import vaultRouter from './routes/vault.js'
 import givingStatementsRouter from './routes/givingStatements.js'
 import organizationRouter from './routes/organization.js'
 import insightsRouter from './routes/insights.js'
@@ -61,6 +66,7 @@ import financeRouter from './routes/finance.js'
 import dioceseRouter from './routes/diocese.js'
 import reportsRouter from './routes/reports.js'
 import dioceseCareRouter from './routes/dioceseCare.js'
+import dioceseRegionsRouter from './routes/dioceseRegions.js'
 import affiliationRouter from './routes/affiliation.js'
 import assessmentsRouter from './routes/assessments.js'
 import checklistsRouter from './routes/checklists.js'
@@ -68,6 +74,8 @@ import feedbackRouter, { adminRouter as feedbackAdminRouter } from './routes/fee
 import supportTicketsRouter from './routes/supportTickets.js'
 import assistantRouter from './routes/assistant.js'
 import notificationPrefsRouter from './routes/notificationPrefs.js'
+import unsubscribeRouter from './routes/unsubscribe.js'
+import emailWebhookRouter from './routes/emailWebhook.js'
 import pushRouter from './routes/push.js'
 import notificationsAdminRouter from './routes/notificationsAdmin.js'
 import dailyVerseRouter from './routes/dailyVerse.js'
@@ -82,6 +90,7 @@ import fundsRouter from './routes/funds.js'
 import { kioskAdminRouter, kioskPublicRouter } from './routes/kiosk.js'
 import feeSchedulesRouter from './routes/feeSchedules.js'
 import invoicesRouter from './routes/invoices.js'
+import importsRouter from './routes/imports.js'
 
 const app = express()
 
@@ -131,6 +140,11 @@ app.use((_req, res, next) => {
 // express.raw() to capture the body as a Buffer.
 app.use('/api/billing', billingPublicRouter)
 
+// Email delivery events (bounces, complaints). Mounts here for the same
+// reason the billing webhook does: the provider signs the raw bytes, so
+// this router must see them before express.json() consumes the stream.
+app.use('/api/email', emailWebhookRouter)
+
 // 10 MB is generous for JSON bodies but necessary for CSV-member-import
 // payloads, which can run several MB for big churches. Tenant routes
 // are authed so there's no unauth'd DoS vector through this limit.
@@ -139,10 +153,47 @@ app.use(express.json({ limit: '10mb' }))
 // Health check (H.1) — a real probe: ping the DB and report which
 // payments provider is live (stub vs a real one). 503 if the DB is
 // unreachable so a load balancer / uptime monitor can react.
+//
+// It also answers the release-truth question (RELIABILITY 1.1): which
+// commit is running, in which environment, with which migrations
+// applied. Before this, "what version is in production?" could only be
+// answered from somebody's memory of a deploy, and a claim nobody can
+// check is a claim that quietly goes stale.
+//
+// `commit` is whatever the platform put in the environment — Vercel sets
+// VERCEL_GIT_COMMIT_SHA on every build. When nothing set it, this
+// reports the string 'unknown' rather than omitting the field or
+// inventing a value: a build that cannot say what it is must say so.
+//
+// Nothing here is a secret. The commit is public (the snapshot repo is
+// public), the environment name is not sensitive, and the migration name
+// is already visible in the repository.
+// Defined in release/log.js and imported here, not copied. index.js needs
+// the same three values to write the release row, and two copies of "how
+// this build names itself" is two places to drift — one of which would
+// then be silently logging a different commit than /health reports.
+
+
 async function healthHandler(_req, res) {
   let db = 'ok'
+  let migration = 'unknown'
   try {
     await pool.query('SELECT 1')
+    // Serverless never calls runAllMigrations(), so this is where a
+    // Vercel cold start gets itself into the release log. Once per
+    // process, fire-and-forget, and every failure swallowed inside —
+    // bookkeeping about deploys must never be why a health check answers
+    // 503.
+    recordRelease(releaseInfo()).catch(() => {})
+    // The applied migration is the other half of "what is running": the
+    // code and the schema can disagree, and that disagreement is exactly
+    // what a bad deploy looks like.
+    //
+    // Bounded to the migrations THIS BUILD ships — see
+    // migrations/applied.js for why, and for the `999-race-sim` row in
+    // production that made it necessary. The same function answers for
+    // release/log.js, so the two can no longer drift apart.
+    migration = (await appliedMigration()) ?? migration
   } catch {
     db = 'error'
   }
@@ -150,6 +201,41 @@ async function healthHandler(_req, res) {
     status:            db === 'ok' ? 'ok' : 'degraded',
     db,
     payments_provider: paymentsProvider(),
+    // 'stub' above means two different things: somebody chose the stub, or
+    // nobody chose anything — and production is the latter (the public
+    // give page reports giving_enabled:false). This is the one that says
+    // which. Same predicate the public route refuses on.
+    payments_configured: paymentsConfigured(),
+    // SELECTED → CONFIGURED → CAPABLE → SAFE. Four different questions, and
+    // the first two were the only ones answerable from this payload.
+    //
+    //   payments_provider   — what was selected. 'stripe' here means
+    //                         somebody typed stripe, nothing more.
+    //   payments_configured — whether anybody chose at all.
+    //   payments_capable    — whether THIS deployment could actually move
+    //                         money right now: a real provider AND the
+    //                         credentials it needs. Stripe without
+    //                         PAYMENTS_PROVIDER_SECRET is selected and
+    //                         configured and cannot charge anything.
+    //   payments_safe       — whether a synthetic charge could be recorded
+    //                         as a received gift here. False is the alarm:
+    //                         it means the stub is running on a deployment
+    //                         that is real, and the public give route is
+    //                         refusing for that reason.
+    //
+    // Giving is ENABLED per parish, not per deployment (ochr_funds.active +
+    // the org's own configuration), so it is deliberately absent here — the
+    // per-parish answer lives on /api/public/:slug/funds as giving_enabled.
+    // A deployment-wide "giving enabled" would be a fifth thing that is not
+    // true of any particular church.
+    payments_capable: paymentsCanMoveMoney(),
+    payments_safe: !stubWouldFakeMoney(),
+    ...releaseInfo(),
+    migration,
+    // What the code expects to be applied. Reporting only the applied name
+    // makes a reader hold the repo in their head to judge it; reporting both
+    // makes a schema-behind-code deploy visible in the payload itself.
+    migration_expected: EXPECTED_MIGRATION,
   })
 }
 app.get('/health', healthHandler)
@@ -182,6 +268,13 @@ app.use('/api/swap',          swapPublicRouter)
 // The router resolves the org from the token, 404s on a bad one, and
 // rate-limits the check-in endpoint per-IP.
 app.use('/api/kiosk',         kioskPublicRouter)
+// One-click unsubscribe (RFC 8058). Public — the List-Unsubscribe header
+// in every notification points here, and a mail client acting on it has
+// no session to present. Authorisation is the HMAC in the path, which
+// authorises exactly one thing: turning off one notification type for
+// one user. Mounted before requireAuth for the same reason the calendar
+// feed is.
+app.use('/api/unsubscribe',   unsubscribeRouter)
 
 // Every tenant-scoped route requires a valid JWT. The middleware attaches
 // req.user and req.organizationId so handlers can filter queries by org.
@@ -240,6 +333,7 @@ app.use('/api/reports',       requireAuth, reportsRouter)
 // /api/diocese/care/* resolves here, and behind the same requireOrgType
 // gate: a parish token gets 403 on every path, reads included.
 app.use('/api/diocese/care', requireAuth, requireOrgType('diocese'), writeGate, auditLog('parish_care'), dioceseCareRouter)
+app.use('/api/diocese/regions', requireAuth, requireOrgType('diocese'), writeGate, auditLog('diocese_region'), dioceseRegionsRouter)
 
 app.use('/api/diocese/assessments', requireAuth, requireOrgType('diocese'), writeGate, auditLog('assessment'), assessmentsRouter)
 app.use('/api/diocese',       requireAuth, requireOrgType('diocese'), writeGate, auditLog('diocese'), dioceseRouter)
@@ -254,6 +348,10 @@ app.use('/api/admin/feedback', requireAuth, requireSuperAdmin, feedbackAdminRout
 // able to report a problem. Triage mutations are role-checked in-handler
 // (parish admin / vendor); every 2xx mutation is audited.
 app.use('/api/support-tickets', requireAuth, auditLog('support_ticket'), supportTicketsRouter)
+// Migration Studio (MIG.1) — staged, human-reviewed imports. writeGate:
+// staff prepare and review; the COMMIT is admin-only inside the router.
+// Every upload, mapping, decision, and commit is audited.
+app.use('/api/imports',       requireAuth, writeGate, auditLog('import_batch'), importsRouter)
 // In-app assistant (SUP.3) — every signed-in role may ask (viewers get
 // stuck too). Per-org daily cap inside the route; no writeGate because
 // the only "mutation" is the assistant's own usage log.
@@ -278,6 +376,24 @@ app.use('/api/service-plans', requireAuth, writeGate, auditLog('service_plan'), 
 app.use('/api/calendar-sync', requireAuth, writeGate, calendarSyncAuthRouter)
 app.use('/api/search',        requireAuth, searchRouter)
 app.use('/api/onboarding',    requireAuth, adminGate, onboardingRouter)
+
+// Getting settled. NOT adminGate, and deliberately NOT writeGate either.
+//
+// The orientation is for whoever just arrived, and the treasurer invited
+// in March is exactly the reader it was written for. writeGate allows
+// only admin and staff to make a non-GET request — which meant a VIEWER
+// could see the card and be refused 403 when she tried to put it away.
+// "Come back to this later" is a personal preference about one person's
+// own dashboard, not a change to parish data, and the least-privileged
+// user is precisely the one most likely to want it.
+//
+// Authority is enforced inside the router instead, where it can be
+// specific: /later and /record are admin-only and say so, and GET /
+// filters its own payload by role so a viewer is never sent an
+// invitation action to hide. auditLog stays, because noting an item
+// "left for later" is a decision taken on the parish's behalf and should
+// have a name on it.
+app.use('/api/setup',         requireAuth, auditLog('parish_setup'), setupRouter)
 // Users router is admin-only across the board (read + write) — no
 // gateMutations split, since even listing the team is privileged.
 app.use('/api/users',         requireAuth, requireRole('admin'), auditLog('user'), usersRouter)
@@ -288,6 +404,9 @@ app.use('/api/billing',       requireAuth, gateMutations('admin'), billingAuthRo
 // Audit log is read-only and admin-only — non-admins should not be
 // able to enumerate the high-trust history of who-did-what.
 app.use('/api/audit-log',     requireAuth, requireRole('admin'), auditLogRouter)
+// Reading the archive needs no special role; restoring is gated inside
+// the router, so a volunteer can see that their mistake is recoverable.
+app.use('/api/vault',         requireAuth, writeGate, auditLog('vault'), vaultRouter)
 // Year-end giving statements — bookkeeping surface, admin-only. The
 // /preview list and per-donor breakdown both filter by organization_id
 // at the SQL layer; the role gate is the second line of defense against

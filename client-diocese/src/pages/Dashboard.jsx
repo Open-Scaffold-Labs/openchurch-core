@@ -1,11 +1,11 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { Loader2 } from 'lucide-react'
 import { apiUrl } from '../api'
+import { fmtMoney, fmtCount, loadAll } from '../utils/format'
+import LoadError from '../components/LoadError'
 
 // Chancery dashboard (DIO.2): the year at a glance — roster health,
 // review queue, and the consolidated totals from approved submissions.
-
-const fmtMoney = v => Number(v ?? 0).toLocaleString('en-US', { style: 'currency', currency: 'USD' })
 
 function yearBounds() {
   const y = new Date().getFullYear()
@@ -17,16 +17,34 @@ export default function Dashboard() {
   const [queue, setQueue] = useState(null)
   const [rollup, setRollup] = useState(null)
   const [health, setHealth] = useState(null)
+  // Which parts did not load. Previously a failed request became an empty
+  // array or an empty object, which this page renders as "no parishes yet"
+  // and "$0.00" — a diocese with forty parishes told it has none, and a
+  // consolidated revenue figure of zero that nothing measured.
+  const [failed, setFailed] = useState([])
+  const [reloading, setReloading] = useState(false)
 
-  useEffect(() => {
+  const load = useCallback(async () => {
     const { start, end } = yearBounds()
-    fetch(apiUrl('/api/diocese/parishes')).then(r => r.json()).then(d => setParishes(d.parishes ?? [])).catch(() => setParishes([]))
-    fetch(apiUrl('/api/diocese/submissions?status=submitted')).then(r => r.json()).then(d => setQueue(d.submissions ?? [])).catch(() => setQueue([]))
-    fetch(apiUrl(`/api/diocese/financials?start=${start}&end=${end}`)).then(r => r.json()).then(setRollup).catch(() => setRollup({}))
-    fetch(apiUrl('/api/diocese/observations')).then(r => r.json()).then(d => setHealth(d.parishes ?? [])).catch(() => setHealth([]))
+    const { data, failed } = await loadAll({
+      parishes: { url: apiUrl('/api/diocese/parishes'), pick: d => d.parishes ?? [] },
+      queue:    { url: apiUrl('/api/diocese/submissions?status=submitted'), pick: d => d.submissions ?? [] },
+      rollup:   { url: apiUrl(`/api/diocese/financials?start=${start}&end=${end}`) },
+      health:   { url: apiUrl('/api/diocese/observations'), pick: d => d.parishes ?? [] },
+    })
+    setParishes(data.parishes ?? [])
+    setQueue(data.queue ?? [])
+    // undefined, NOT {} — so fmtMoney renders an em dash rather than $0.00.
+    setRollup(data.rollup)
+    setHealth(data.health ?? [])
+    setFailed(failed)
   }, [])
 
-  if (parishes === null || queue === null || rollup === null) {
+  useEffect(() => { load() }, [load])
+
+  const retry = async () => { setReloading(true); await load(); setReloading(false) }
+
+  if (parishes === null) {
     return <div className="flex justify-center py-24"><Loader2 size={22} className="animate-spin text-brass-500" /></div>
   }
 
@@ -35,16 +53,33 @@ export default function Dashboard() {
   const year = new Date().getFullYear()
 
   const tiles = [
-    ['Affiliated parishes', active, invited ? `${invited} invitation${invited > 1 ? 's' : ''} pending` : 'roster settled'],
-    ['Awaiting review', queue.length, queue.length ? 'submissions in the queue' : 'queue is clear'],
-    [`Revenue · ${year}`, fmtMoney(rollup.totals?.revenue), `${rollup.submission_count ?? 0} approved period${rollup.submission_count === 1 ? '' : 's'}`],
-    [`Assessable base · ${year}`, fmtMoney(rollup.totals?.assessable_base), 'from approved submissions'],
+    ['Affiliated parishes',
+      failed.includes('parishes') ? '—' : fmtCount(active),
+      failed.includes('parishes') ? "couldn't be loaded"
+        : invited ? `${invited} invitation${invited > 1 ? 's' : ''} pending` : 'roster settled'],
+    ['Awaiting review',
+      failed.includes('queue') ? '—' : fmtCount(queue.length),
+      failed.includes('queue') ? "couldn't be loaded"
+        : queue.length ? 'submissions in the queue' : 'queue is clear'],
+    [`Revenue · ${year}`, fmtMoney(rollup?.totals?.revenue),
+      failed.includes('rollup') ? "couldn't be loaded"
+        : `${rollup?.submission_count ?? 0} approved period${rollup?.submission_count === 1 ? '' : 's'}`],
+    [`Assessable base · ${year}`, fmtMoney(rollup?.totals?.assessable_base),
+      failed.includes('rollup') ? "couldn't be loaded" : 'from approved submissions'],
   ]
 
   return (
     <div className="max-w-5xl">
       <h1 className="font-serif text-3xl font-bold text-church-600 mb-1">Dashboard</h1>
       <p className="text-sm text-ink-500 mb-8">Consolidated view across the diocese — approved submissions only, so these numbers never shift beneath you.</p>
+
+      {/* Said plainly, and only about the part that failed. A dash in a tile
+          means "we could not load this", which is a different thing from a
+          measured zero — and on a page a chancery uses to judge whether a
+          parish is in trouble, those two must never look alike. */}
+      {failed.length > 0 && (
+        <LoadError variant="partial" onRetry={retry} retrying={reloading} />
+      )}
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
         {tiles.map(([label, value, sub]) => (

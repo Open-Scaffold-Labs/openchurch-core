@@ -13,6 +13,7 @@
 import { Router } from 'express'
 import pool from '../db.js'
 import { monitor } from '../monitoring/index.js'
+import { memberByEmail } from '../directory/memberIdentity.js'
 
 const router = Router()
 
@@ -82,11 +83,10 @@ router.post('/:id/approve', async (req, res) => {
     // the org), else create one.
     let clientId = null
     if (interest.email) {
-      const { rows: match } = await client.query(
-        'SELECT id FROM ochr_clients WHERE organization_id = $1 AND lower(email) = lower($2) LIMIT 1',
-        [req.organizationId, interest.email]
-      )
-      if (match.length) clientId = match[0].id
+      // Same predicate as everywhere else, but on the TRANSACTION client —
+      // this read and the insert below must see the same snapshot.
+      const match = await memberByEmail(req.organizationId, interest.email, ['id'], client)
+      if (match) clientId = match.id
     }
     if (!clientId) {
       const { rows: created } = await client.query(

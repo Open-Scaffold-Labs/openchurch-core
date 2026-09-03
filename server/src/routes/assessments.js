@@ -8,8 +8,20 @@
 //   PATCH  /:id             → publish / close / edit notes (draft rate too)
 //   PATCH  /:id/lines/:lineId → per-parish override, payment, waive
 //
+// RATES (087). A rate can be flat (`rate_bps`) or a marginal ladder
+// (`bands`), because real diocesan formulas are usually a ladder: Maine
+// charges 5% on the first $10,000 and 15% above it, and the churchwide
+// assessment exempts the first $200,000 then charges 15% — which is the
+// same mechanism with a zero on the bottom rung. Every line keeps the
+// slice-by-slice working, so a parish adding the bands up by hand arrives
+// at the number on the invoice.
+//
+// BASE YEAR (087). The base need not come from the assessment's own year.
+// Maine assesses on the parochial report "submitted two years prior", so
+// `base_year` is stored per assessment and defaults to `fiscal_year`.
+//
 // The base is arithmetic, not entry: SUM of assessable_base across the
-// parish's APPROVED submissions that CLOSE within the assessment year —
+// parish's APPROVED submissions that CLOSE within the BASE year —
 // a submission is assessed in the calendar year its period_end falls in.
 // Anchoring on the end date (not full containment) means a report period
 // that straddles a year boundary, or a parish on a non-calendar fiscal
@@ -22,6 +34,7 @@ import { Router } from 'express'
 import pool from '../db.js'
 import { requireIntParam } from '../utils/params.js'
 import { monitor } from '../monitoring/index.js'
+import { endsInYear } from '../finance/fiscalPeriod.js'
 
 const router = Router()
 
@@ -29,11 +42,87 @@ const YEAR_RE = /^\d{4}$/
 const money = v => (Math.round(Number(v) * 100) / 100).toFixed(2)
 const assessedFor = (base, bps) => money((Number(base) * bps) / 10000)
 
+// A marginal ladder, and its working.
+//
+// Each slice is rounded to cents and the slices are summed — rather than
+// summing exactly and rounding once — so the breakdown a parish is shown
+// adds up to the amount it is billed. Rounding the total separately
+// produces an invoice that is a penny away from its own explanation, and
+// the phone call that follows costs more than the penny.
+export function assessedForBands(base, bands) {
+  const total = Number(base) || 0
+  let floor = 0, sum = 0
+  const breakdown = []
+  for (const band of bands) {
+    const ceiling = band.upto === null || band.upto === undefined ? Infinity : Number(band.upto)
+    if (total <= floor) break
+    const slice = Math.min(total, ceiling) - floor
+    if (slice > 0) {
+      const amount = Number(money((slice * band.rate_bps) / 10000))
+      sum += amount
+      breakdown.push({
+        from: money(floor),
+        to: ceiling === Infinity ? null : money(ceiling),
+        amount_in_band: money(slice),
+        rate_bps: band.rate_bps,
+        assessed: money(amount),
+      })
+    }
+    floor = ceiling
+    if (floor === Infinity) break
+  }
+  return { assessed: money(sum), breakdown }
+}
+
+// Bands in, or a clear sentence about why not.
+//
+// The top rung must be open. A ladder that stops leaves income above the
+// last rung silently unassessed — a bill quietly too small, which nobody
+// notices until an auditor does.
+export function validateBands(raw) {
+  if (raw === undefined || raw === null) return { bands: null }
+  if (!Array.isArray(raw) || raw.length === 0) return { error: 'bands must be a non-empty list' }
+  if (raw.length > 8) return { error: 'An assessment can have at most 8 bands' }
+  const bands = []
+  let previous = 0
+  for (let i = 0; i < raw.length; i++) {
+    const b = raw[i] ?? {}
+    const bps = Number(b.rate_bps)
+    if (!Number.isInteger(bps) || bps < 0 || bps > 3000) {
+      return { error: `Band ${i + 1}: rate_bps must be an integer between 0 and 3000 (0–30%)` }
+    }
+    const last = i === raw.length - 1
+    const upto = b.upto === null || b.upto === undefined ? null : Number(b.upto)
+    if (last) {
+      if (upto !== null) return { error: 'The last band must have no upper limit, so income above it is still assessed' }
+    } else {
+      if (!Number.isFinite(upto) || upto <= previous) {
+        return { error: `Band ${i + 1}: each upper limit must be a number larger than the one before it` }
+      }
+      previous = upto
+    }
+    bands.push({ upto, rate_bps: bps })
+  }
+  return { bands }
+}
+
+// One place that answers "what does this parish owe", whichever shape the
+// diocese's formula takes. A per-line override is always flat: an
+// override is a negotiated rate for one parish, not a second ladder.
+function assessFor(base, { bands, rate_bps }) {
+  if (Array.isArray(bands) && bands.length) return assessedForBands(base, bands)
+  return { assessed: assessedFor(base, rate_bps), breakdown: null }
+}
+
 // Per-parish assessable base for a calendar year, from approved
 // submissions of ACTIVE/SUSPENDED affiliations. A submission is anchored
 // to the year its period_end falls in (the year it closes), so every
 // approved period is counted in exactly one assessment year — a period
 // spanning a year boundary is no longer dropped from both.
+//
+// `year` here is the BASE year, which is not always the assessment's own
+// fiscal year: a diocese assessing on the parochial report from two years
+// prior passes 2024 while billing for 2026.
 async function computeBases(dioceseOrgId, year) {
   const { rows } = await pool.query(
     `SELECT s.organization_id AS parish_org_id,
@@ -44,8 +133,7 @@ async function computeBases(dioceseOrgId, year) {
         AND a.diocese_org_id = s.diocese_org_id
         AND a.status IN ('active', 'suspended')
       WHERE s.diocese_org_id = $1 AND s.status = 'approved'
-        AND s.period_end >= ($2 || '-01-01')::date
-        AND s.period_end <= ($2 || '-12-31')::date
+        AND ${endsInYear('$2')}
       GROUP BY s.organization_id`,
     [dioceseOrgId, year]
   )
@@ -54,7 +142,8 @@ async function computeBases(dioceseOrgId, year) {
 
 async function loadAssessment(id, dioceseOrgId) {
   const { rows } = await pool.query(
-    `SELECT id, fiscal_year, rate_bps, basis, status, notes, created_at
+    `SELECT id, fiscal_year, rate_bps, basis, status, notes, created_at,
+            bands, COALESCE(base_year, fiscal_year) AS base_year
        FROM ochr_assessments WHERE id = $1 AND diocese_org_id = $2`,
     [id, dioceseOrgId]
   )
@@ -66,7 +155,7 @@ async function detail(id, dioceseOrgId) {
   if (!a) return null
   const { rows: lines } = await pool.query(
     `SELECT l.id, l.parish_org_id, p.name AS parish_name, l.base, l.rate_bps,
-            l.assessed, l.paid, l.status, l.note
+            l.assessed, l.paid, l.status, l.note, l.breakdown
        FROM ochr_assessment_lines l
        JOIN ochr_organizations p ON p.id = l.parish_org_id
       WHERE l.assessment_id = $1
@@ -90,6 +179,7 @@ router.get('/', async (req, res) => {
   try {
     const { rows } = await pool.query(
       `SELECT a.id, a.fiscal_year, a.rate_bps, a.status, a.notes,
+              a.bands, COALESCE(a.base_year, a.fiscal_year) AS base_year,
               COUNT(l.id)::INT AS parish_count,
               COALESCE(SUM(l.assessed) FILTER (WHERE l.status <> 'waived'), 0)::NUMERIC(12,2) AS total_assessed,
               COALESCE(SUM(l.paid), 0)::NUMERIC(12,2) AS total_paid
@@ -107,30 +197,47 @@ router.get('/', async (req, res) => {
   }
 })
 
-// POST /api/diocese/assessments — { fiscal_year, rate_bps, notes? }
+// POST /api/diocese/assessments
+//   { fiscal_year, rate_bps | bands, base_year?, notes? }
 router.post('/', async (req, res) => {
   const year = String(req.body?.fiscal_year ?? '')
-  const bps = Number(req.body?.rate_bps)
   if (!YEAR_RE.test(year)) return res.status(400).json({ error: 'fiscal_year must be a four-digit year' })
+
+  const v = validateBands(req.body?.bands)
+  if (v.error) return res.status(400).json({ error: v.error })
+  const bands = v.bands
+
+  // A flat rate is still required when there are no bands, and is kept
+  // alongside them when there are: it is what a per-parish override
+  // resets to, and what the year is described as when somebody asks for
+  // one number.
+  const bps = bands ? Number(req.body?.rate_bps ?? bands[bands.length - 1].rate_bps) : Number(req.body?.rate_bps)
   if (!Number.isInteger(bps) || bps < 0 || bps > 3000) {
     return res.status(400).json({ error: 'rate_bps must be an integer between 0 and 3000 (0–30%)' })
   }
+
+  // The year the base is drawn from. Defaults to the assessment's own
+  // year, which is what every assessment meant before this existed.
+  const baseYear = req.body?.base_year != null ? String(req.body.base_year) : year
+  if (!YEAR_RE.test(baseYear)) return res.status(400).json({ error: 'base_year must be a four-digit year' })
+
   const notes = req.body?.notes != null ? String(req.body.notes).trim() || null : null
 
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
     const { rows } = await client.query(
-      `INSERT INTO ochr_assessments (diocese_org_id, fiscal_year, rate_bps, notes)
-       VALUES ($1, $2, $3, $4) RETURNING id`,
-      [req.organizationId, year, bps, notes]
+      `INSERT INTO ochr_assessments (diocese_org_id, fiscal_year, rate_bps, notes, bands, base_year)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+      [req.organizationId, year, bps, notes, bands ? JSON.stringify(bands) : null, baseYear]
     )
     const id = rows[0].id
-    for (const b of await computeBases(req.organizationId, year)) {
+    for (const b of await computeBases(req.organizationId, baseYear)) {
+      const { assessed, breakdown } = assessFor(b.base, { bands, rate_bps: bps })
       await client.query(
-        `INSERT INTO ochr_assessment_lines (assessment_id, parish_org_id, base, rate_bps, assessed)
-         VALUES ($1, $2, $3, $4, $5)`,
-        [id, b.parish_org_id, b.base, bps, assessedFor(b.base, bps)]
+        `INSERT INTO ochr_assessment_lines (assessment_id, parish_org_id, base, rate_bps, assessed, breakdown)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [id, b.parish_org_id, b.base, bps, assessed, breakdown ? JSON.stringify(breakdown) : null]
       )
     }
     await client.query('COMMIT')
@@ -169,23 +276,38 @@ router.post('/:id/recompute', async (req, res) => {
   try {
     await client.query('BEGIN')
     const { rows: a } = await client.query(
-      `SELECT fiscal_year, rate_bps, status FROM ochr_assessments
+      `SELECT fiscal_year, rate_bps, status, bands,
+              COALESCE(base_year, fiscal_year) AS base_year
+         FROM ochr_assessments
         WHERE id = $1 AND diocese_org_id = $2 FOR UPDATE`,
       [id, req.organizationId]
     )
     if (!a.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Not found' }) }
     if (a[0].status !== 'draft') { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Only a draft assessment can be recomputed' }) }
 
-    const bases = await computeBases(req.organizationId, a[0].fiscal_year)
+    const bases = await computeBases(req.organizationId, a[0].base_year)
     for (const b of bases) {
+      // A line that carries a per-parish override keeps it: the DO UPDATE
+      // re-derives at the LINE's own rate, not the year's. A line with no
+      // override follows the year's ladder, so `breakdown` is recomputed
+      // from the new base and stays true to the number beside it.
+      const fresh = assessFor(b.base, { bands: a[0].bands, rate_bps: a[0].rate_bps })
       await client.query(
-        `INSERT INTO ochr_assessment_lines (assessment_id, parish_org_id, base, rate_bps, assessed)
-         VALUES ($1, $2, $3, $4, $5)
+        `INSERT INTO ochr_assessment_lines (assessment_id, parish_org_id, base, rate_bps, assessed, breakdown)
+         VALUES ($1, $2, $3, $4, $5, $6)
          ON CONFLICT (assessment_id, parish_org_id) DO UPDATE SET
            base = EXCLUDED.base,
-           assessed = ROUND(EXCLUDED.base * ochr_assessment_lines.rate_bps / 10000.0, 2),
+           assessed = CASE
+             WHEN ochr_assessment_lines.rate_bps IS DISTINCT FROM $4
+               THEN ROUND(EXCLUDED.base * ochr_assessment_lines.rate_bps / 10000.0, 2)
+             ELSE EXCLUDED.assessed END,
+           breakdown = CASE
+             WHEN ochr_assessment_lines.rate_bps IS DISTINCT FROM $4
+               THEN NULL
+             ELSE EXCLUDED.breakdown END,
            updated_at = NOW()`,
-        [id, b.parish_org_id, b.base, a[0].rate_bps, assessedFor(b.base, a[0].rate_bps)]
+        [id, b.parish_org_id, b.base, a[0].rate_bps, fresh.assessed,
+         fresh.breakdown ? JSON.stringify(fresh.breakdown) : null]
       )
     }
 
@@ -313,6 +435,10 @@ router.patch('/:id/lines/:lineId', async (req, res) => {
     if (overrideBps !== null) {
       params.push(overrideBps); sets.push(`rate_bps = $${params.length}`)
       params.push(assessedFor(line.base, overrideBps)); sets.push(`assessed = $${params.length}`)
+      // An override is one negotiated flat rate for one parish, not a
+      // second ladder. Leaving the old breakdown would explain the bill
+      // with arithmetic that no longer produces it.
+      sets.push('breakdown = NULL')
     }
 
     let newPaid = Number(line.paid)

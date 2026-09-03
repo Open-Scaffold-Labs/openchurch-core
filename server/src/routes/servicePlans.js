@@ -176,7 +176,8 @@ router.post('/:id/elements', async (req, res) => {
     const assigned = await ownedId('ochr_clients', req.body?.assigned_client_id, req.organizationId)
     // Append: position = current max + 1.
     const { rows: posRows } = await pool.query(
-      'SELECT COALESCE(MAX(position), -1) + 1 AS next FROM ochr_service_elements WHERE plan_id = $1',
+      `SELECT COALESCE(MAX(position), -1) + 1 AS next FROM ochr_service_elements WHERE plan_id = $1
+       -- tenancy: plan_id was org-verified earlier in this handler. Scoped transitively through the parent plan.`,
       [id]
     )
     const position = posRows[0].next

@@ -175,7 +175,7 @@ export default function Login() {
                 <button
                   type="button"
                   onClick={() => setShowPw(s => !s)}
-                  className="text-ink-400 dark:text-parchment-400/60 hover:text-ink-600 dark:hover:text-parchment-200 transition-colors"
+                  className="tap-reach text-ink-400 dark:text-parchment-400/60 hover:text-ink-600 dark:hover:text-parchment-200 transition-colors"
                   tabIndex={-1}
                   aria-label={showPw ? 'Hide password' : 'Show password'}
                 >
@@ -193,7 +193,7 @@ export default function Login() {
             <button
               type="submit"
               disabled={loading || !email || !password}
-              className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-church-900 dark:bg-church-700 text-parchment-50 text-sm font-semibold shadow-warm hover:bg-church-800 dark:hover:bg-church-600 transition-colors disabled:opacity-50"
+              className="tap w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-church-900 dark:bg-church-700 text-parchment-50 text-sm font-semibold shadow-warm hover:bg-church-800 dark:hover:bg-church-600 transition-colors disabled:opacity-50"
             >
               {loading ? <Loader2 size={15} className="animate-spin" /> : null}
               {loading ? t('login.signingIn') : t('login.signIn')}
@@ -202,7 +202,7 @@ export default function Login() {
             <div className="text-center">
               <Link
                 to="/forgot"
-                className="text-xs font-medium text-ink-500 hover:text-church-800 dark:text-parchment-300/70 dark:hover:text-brass-200 transition-colors"
+                className="tap-reach inline-block text-xs font-medium text-ink-500 hover:text-church-800 dark:text-parchment-300/70 dark:hover:text-brass-200 transition-colors"
               >
                 {t('login.forgot')}
               </Link>
@@ -215,7 +215,7 @@ export default function Login() {
               type="button"
               onClick={useDemo}
               disabled={loading}
-              className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-parchment-50 dark:bg-ink-800 border border-brass-500/40 dark:border-brass-500/30 text-church-900 dark:text-brass-200 text-sm font-semibold hover:bg-brass-50 dark:hover:bg-ink-800/70 transition-colors disabled:opacity-50"
+              className="tap w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-parchment-50 dark:bg-ink-800 border border-brass-500/40 dark:border-brass-500/30 text-church-900 dark:text-brass-200 text-sm font-semibold hover:bg-brass-50 dark:hover:bg-ink-800/70 transition-colors disabled:opacity-50"
             >
               <Church size={14} /> {t('login.demo')}
             </button>
@@ -229,7 +229,7 @@ export default function Login() {
           {t('login.newTo')}{' '}
           <Link
             to="/signup"
-            className="font-semibold text-church-700 hover:text-church-900 dark:text-brass-300 dark:hover:text-brass-200 transition-colors"
+            className="tap-reach inline-block font-semibold text-church-700 hover:text-church-900 dark:text-brass-300 dark:hover:text-brass-200 transition-colors"
           >
             {t('login.start')}
           </Link>
@@ -241,7 +241,7 @@ export default function Login() {
           <button
             type="button"
             onClick={() => setLocale('en')}
-            className={`px-1 transition-colors ${locale === 'en' ? 'text-church-800 dark:text-brass-300 font-semibold' : 'hover:text-ink-600 dark:hover:text-parchment-200'}`}
+            className={`tap-reach inline-block px-1 transition-colors ${locale === 'en' ? 'text-church-800 dark:text-brass-300 font-semibold' : 'hover:text-ink-600 dark:hover:text-parchment-200'}`}
           >
             English
           </button>
@@ -249,7 +249,7 @@ export default function Login() {
           <button
             type="button"
             onClick={() => setLocale('es')}
-            className={`px-1 transition-colors ${locale === 'es' ? 'text-church-800 dark:text-brass-300 font-semibold' : 'hover:text-ink-600 dark:hover:text-parchment-200'}`}
+            className={`tap-reach inline-block px-1 transition-colors ${locale === 'es' ? 'text-church-800 dark:text-brass-300 font-semibold' : 'hover:text-ink-600 dark:hover:text-parchment-200'}`}
           >
             Español
           </button>

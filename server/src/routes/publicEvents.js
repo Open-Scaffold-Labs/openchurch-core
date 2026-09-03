@@ -15,14 +15,22 @@
 // helping parishioners). 404 stays uncached.
 
 import { Router } from 'express'
+import { isEmail } from './auth.js'
 import rateLimit from 'express-rate-limit'
 import ical from 'ical-generator'
 import pool from '../db.js'
-import { createCharge, createDonationCheckout, paymentsProvider } from '../payments/index.js'
+import { normalizeDonorEmail } from '../finance/donorIdentity.js'
+import { createCharge, createDonationCheckout, paymentsConfigured, paymentsProvider, stubWouldFakeMoney } from '../payments/index.js'
 import { notify } from '../notifications/transport.js'
+import { monitor } from '../monitoring/index.js'
 import { resolveLiturgicalContext } from './liturgical.js'
 
 const router = Router()
+
+// This router predates the i18n message helper and returns bare { error }
+// objects everywhere. Keeping that shape rather than introducing a second
+// one for a single response.
+const msgOrPlain = text => ({ error: text })
 
 // Online-giving submit limiter (GIV.1) — 15 per IP per 10 min. Covers a
 // donor correcting a typo and re-submitting without letting a card-
@@ -52,7 +60,7 @@ const connectLimiter = rateLimit({
 async function findOrgBySlug(slug) {
   if (!slug || typeof slug !== 'string') return null
   const { rows } = await pool.query(
-    'SELECT id, name, slug FROM ochr_organizations WHERE slug = $1 LIMIT 1',
+    'SELECT id, name, slug, locale FROM ochr_organizations WHERE slug = $1 LIMIT 1',
     [slug]
   )
   return rows[0] ?? null
@@ -104,7 +112,12 @@ router.get('/:slug', async (req, res) => {
 router.get('/:slug/page', async (req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT name, slug, tagline, about, service_times, address, page_published
+      // THIRD hand-listed org column list in this file — the two helpers
+      // above are the other two. That is exactly how a field goes missing:
+      // `locale` was added to both helpers and this query still returned
+      // English, and the test that asserts the class caught it rather than
+      // a reviewer noticing a third query fifteen lines further down.
+      `SELECT name, slug, tagline, about, service_times, address, page_published, locale
          FROM ochr_organizations
         WHERE slug = $1
         LIMIT 1`,
@@ -117,7 +130,7 @@ router.get('/:slug/page', async (req, res) => {
 
     res.set('Cache-Control', 'public, max-age=300')
     res.json({
-      church: { name: org.name, slug: org.slug },
+      church: { name: org.name, slug: org.slug, locale: org.locale ?? 'en' },
       page: {
         tagline:       org.tagline,
         about:         org.about,
@@ -137,7 +150,7 @@ router.get('/:slug/page', async (req, res) => {
 async function findPublishedOrg(slug) {
   if (!slug || typeof slug !== 'string') return null
   const { rows } = await pool.query(
-    'SELECT id, name, slug FROM ochr_organizations WHERE slug = $1 AND page_published = TRUE LIMIT 1',
+    'SELECT id, name, slug, locale FROM ochr_organizations WHERE slug = $1 AND page_published = TRUE LIMIT 1',
     [slug]
   )
   return rows[0] ?? null
@@ -160,7 +173,7 @@ router.get('/:slug/groups', async (req, res) => {
       [org.id]
     )
     res.set('Cache-Control', 'public, max-age=300')
-    res.json({ church: { name: org.name, slug: org.slug }, groups: rows })
+    res.json({ church: { name: org.name, slug: org.slug, locale: org.locale ?? 'en' }, groups: rows })
   } catch (err) {
     console.error('public groups failed:', err)
     res.status(500).json({ error: 'Failed to load groups' })
@@ -231,8 +244,16 @@ router.get('/:slug/funds', async (req, res) => {
         ORDER BY sort_order ASC, name ASC`,
       [org.id]
     )
+    // `giving_enabled` so the page can show its existing "not set up yet"
+    // state instead of rendering a form whose submit will be refused. The
+    // refusal in POST /give is the guard; this is so a parishioner never
+    // meets it.
     res.set('Cache-Control', 'public, max-age=120')
-    res.json({ church: { name: org.name, slug: org.slug }, funds: rows })
+    res.json({
+      church: { name: org.name, slug: org.slug, locale: org.locale ?? 'en' },
+      funds: rows,
+      giving_enabled: paymentsConfigured(),
+    })
   } catch (err) {
     console.error('public funds failed:', err)
     res.status(500).json({ error: 'Failed to load funds' })
@@ -251,7 +272,11 @@ router.post('/:slug/give', giveLimiter, async (req, res) => {
     if (!org) return res.status(404).json({ error: 'Church not found' })
 
     const donorName  = typeof req.body?.donor_name === 'string' ? req.body.donor_name.trim() : ''
-    const donorEmail = typeof req.body?.donor_email === 'string' ? req.body.donor_email.trim() : ''
+    // Normalised at the boundary, so the address this donor is known by
+    // does not depend on whether they capitalised it. isEmail() below
+    // validates the normalised form, which is also what gets stored and
+    // what the year-end statement will group on.
+    const donorEmail = normalizeDonorEmail(req.body?.donor_email) ?? ''
     const message    = typeof req.body?.message === 'string' ? req.body.message.trim() : ''
     const amount     = Number(req.body?.amount)
     const fundId     = Number(req.body?.fund_id)
@@ -259,10 +284,24 @@ router.post('/:slug/give', giveLimiter, async (req, res) => {
     // is treated as a one-time gift.
     const frequency  = ['weekly', 'monthly'].includes(req.body?.frequency) ? req.body.frequency : null
 
+    // Every text field is bounded. The /connect route in this same file has
+    // always capped its fields; this one capped only the email's LENGTH and
+    // let name and message through unbounded — 200,000 characters of each
+    // were stored from a single unauthenticated request on 23 Aug.
     if (!donorName) return res.status(400).json({ error: 'Name is required' })
+    if (donorName.length > 120) return res.status(400).json({ error: 'Name is too long' })
+    if (message.length > 1000) return res.status(400).json({ error: 'Note is too long' })
     if (!Number.isFinite(amount) || amount <= 0) return res.status(400).json({ error: 'Enter a valid amount' })
     if (amount > 100000) return res.status(400).json({ error: 'Amount exceeds the online limit' })
     if (donorEmail.length > 200) return res.status(400).json({ error: 'Email is too long' })
+    // An address, not just a short string. This value is handed to notify()
+    // as the recipient of the receipt, so the day an email provider is
+    // configured an unvalidated value here chooses who receives mail from the
+    // parish's own verified domain. Optional — a donor may give without one —
+    // but if given it has to be an address.
+    if (donorEmail && !isEmail(donorEmail)) {
+      return res.status(400).json({ error: 'That email address does not look right' })
+    }
 
     const { rows: funds } = await pool.query(
       'SELECT id, name FROM ochr_funds WHERE id = $1 AND organization_id = $2 AND active = TRUE',
@@ -300,6 +339,47 @@ router.post('/:slug/give', giveLimiter, async (req, res) => {
       } catch {
         return res.status(502).json({ error: 'Payment could not be started. No charge was made.' })
       }
+    }
+
+    // No provider configured means no money can actually move — and a
+    // donation row written on the strength of a synthetic "succeeded" is a
+    // record of a gift nobody made. It reaches the dashboard, the finance
+    // summary, the diocesan assessable base, and the donor's year-end tax
+    // statement, and it does all of that from ONE unauthenticated request to
+    // a slug that is just the parish's name. This route is public by design;
+    // that is the point of a giving page. What it must not be is a way to
+    // write into a parish's books for free.
+    //
+    // The stub stays exactly as it is for tests and for the recurring cron,
+    // which call createCharge() directly. It is this route — the public,
+    // unauthenticated one — that refuses.
+    if (!paymentsConfigured()) {
+      return res.status(503).json(msgOrPlain(
+        'Online giving is not set up for this church yet. Nothing was charged.'))
+    }
+
+    // AND a chosen stub is still not money, on a deployment that is real.
+    //
+    // paymentsConfigured() above answers "did anybody choose?". Somebody
+    // choosing the stub on production is a choice, and it would sail
+    // through — chargeStub() returns a synthetic succeeded charge, the row
+    // below is written, and this page thanks a stranger for a gift the
+    // parish will never receive. The deployment, not the caller, decides
+    // whether that is allowed; see deploymentIsProductionLike() for what
+    // "real" is read from, which is deliberately not NODE_ENV.
+    //
+    // The message is the unconfigured one on purpose. To the visitor those
+    // two states are the same fact — this parish cannot take a gift here
+    // right now — and the difference between them is an operator's problem,
+    // not something to explain on a giving page. The operator's channel is
+    // the monitor line and /api/health's payments_safe.
+    if (stubWouldFakeMoney()) {
+      monitor.error('payments.stub_on_production', new Error(
+        'PAYMENTS_PROVIDER=stub on a production-like deployment: the public give route refused. '
+        + 'A stub charge must never be recorded as a received gift.'
+      ), { slug: req.params.slug })
+      return res.status(503).json(msgOrPlain(
+        'Online giving is not set up for this church yet. Nothing was charged.'))
     }
 
     let charge
@@ -392,7 +472,7 @@ router.get('/:slug/events', async (req, res) => {
 
     res.set('Cache-Control', 'public, max-age=300')
     res.json({
-      church: { name: org.name, slug: org.slug },
+      church: { name: org.name, slug: org.slug, locale: org.locale ?? 'en' },
       events: rows,
     })
   } catch (err) {
@@ -475,7 +555,7 @@ router.get('/:slug/bulletin', async (req, res) => {
     const liturgical = await resolveLiturgicalContext(bulletin.date, org.id)
 
     res.set('Cache-Control', 'public, max-age=300')
-    res.json({ org: { name: org.name, slug: org.slug }, bulletin, liturgical })
+    res.json({ org: { name: org.name, slug: org.slug, locale: org.locale ?? 'en' }, bulletin, liturgical })
   } catch (err) {
     console.error('public bulletin failed:', err)
     res.status(500).json({ error: 'Failed to load bulletin' })

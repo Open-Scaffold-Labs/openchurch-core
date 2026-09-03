@@ -118,7 +118,12 @@ export default function AvatarUploader({ value, name, onChange, busy = false }) 
             <Trash2 size={12} /> Remove
           </button>
         )}
-        <p className="text-[11px] text-ink-400 dark:text-parchment-400/60 leading-snug max-w-[12rem]">
+        {/* ink-500, not ink-400. At 11px on parchment, ink-400 measures
+              3.62:1 — under the 4.5:1 AA floor for body text. Found by axe
+              while reviewing the language card on this page; the helper text
+              beside it already used ink-500 and passed, which is what made
+              the difference visible. */}
+          <p className="text-[11px] text-ink-500 dark:text-parchment-300/70 leading-snug max-w-[12rem]">
           Square works best. Large photos are automatically resized.
         </p>
       </div>

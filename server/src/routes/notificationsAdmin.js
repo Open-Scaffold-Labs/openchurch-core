@@ -1,18 +1,24 @@
-// Admin-only operational endpoints for the notification queue.
+// Operational endpoints for the notification queue, with two DIFFERENT
+// authorization scopes.
 //
-// POST /api/admin/notifications/drain
-//   Picks up to ?batchSize= due rows from ochr_scheduled_notifications,
-//   runs each through notify() via the scheduler, and returns counts.
-//   Manual today; once Vercel cron lands, the cron config flips this
-//   from operator-poked to scheduled (1-5 minute interval).
+//   GET  /scheduled, /log  — tenant-admin. Scoped to the caller's own
+//     organization_id: what is queued / what went out for THIS parish.
 //
-// Mounted under requireRole('admin') in app.js so non-admins can't
-// trigger an unbounded drain.
+//   POST /enqueue-birthdays, /drain — GLOBAL operator actions. The services
+//     they invoke are NOT tenant-scoped: enqueue walks every organization,
+//     and drain claims and sends any organization's pending mail. An ordinary
+//     parish or diocesan admin must not reach across tenants that way, so
+//     these two are gated by requireSuperAdmin — the env-identified operator
+//     boundary, fail-closed to a route-hiding 404 — on top of the
+//     requireAuth + requireRole('admin') the router is mounted behind in
+//     app.js (OC-OP-1 / OC-OP-2 containment). The same underlying functions
+//     also run behind CRON_SECRET on /api/cron/* for the scheduled path.
 
 import { Router } from 'express'
 import pool from '../db.js'
 import { processDueNotifications } from '../notifications/scheduler.js'
 import { enqueueDailyBirthdayReminders } from '../notifications/birthdays.js'
+import { requireSuperAdmin } from '../middleware/superAdmin.js'
 import { monitor } from '../monitoring/index.js'
 
 const router = Router()
@@ -62,7 +68,8 @@ router.get('/log', async (req, res) => {
 //   Vercel cron will hit this once a day when wired; manual today.
 //
 // Returns { orgs_scanned, birthdays_enqueued, anniversaries_enqueued }.
-router.post('/enqueue-birthdays', async (req, res) => {
+// Global (walks every org) → requireSuperAdmin. See header (OC-OP-1).
+router.post('/enqueue-birthdays', requireSuperAdmin, async (req, res) => {
   try {
     const result = await enqueueDailyBirthdayReminders()
     res.json(result)
@@ -72,7 +79,8 @@ router.post('/enqueue-birthdays', async (req, res) => {
   }
 })
 
-router.post('/drain', async (req, res) => {
+// Global (claims/sends any org's pending) → requireSuperAdmin. See header (OC-OP-2).
+router.post('/drain', requireSuperAdmin, async (req, res) => {
   const requested = Number(req.query.batchSize)
   const batchSize = Number.isInteger(requested) && requested > 0 && requested <= 500
     ? requested

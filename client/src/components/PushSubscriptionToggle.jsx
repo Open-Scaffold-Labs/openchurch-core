@@ -140,11 +140,15 @@ export default function PushSubscriptionToggle() {
         // If the server rejects we leave the device subscribed so the
         // two stay in sync. Only after the server ack do we unsubscribe
         // locally.
-        await fetch(apiUrl('/api/push/subscribe'), {
+        // This block's own comment says the local unsubscribe happens only
+        // after the server acknowledges — it did not check, so the two could
+        // and did drift apart. Now it actually waits for the ack.
+        const res = await fetch(apiUrl('/api/push/subscribe'), {
           method: 'DELETE',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ endpoint: sub.endpoint }),
         })
+        if (!res.ok) throw new Error('Could not disable push just now')
         await sub.unsubscribe().catch(() => {})
       }
       setSubscribed(false)

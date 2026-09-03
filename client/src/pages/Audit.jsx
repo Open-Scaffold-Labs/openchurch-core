@@ -51,6 +51,7 @@ const ENTITY_TYPES = [
   { value: 'support_ticket', label: 'Support ticket' },
   { value: 'fee_schedule', label: 'Fee schedule' },
   { value: 'invoice', label: 'Invoice' },
+  { value: 'import_batch', label: 'Import' },
   { value: 'user',           label: 'Team member' },
   { value: 'organization',   label: 'Org settings' },
 ]
@@ -100,6 +101,9 @@ export default function Audit() {
   }))
   const [rows,     setRows]     = useState([])
   const [total,    setTotal]    = useState(0)
+  // The server stops counting past its cap and says so. Rendering that as a
+  // plain number would claim a precision it isn't offering.
+  const [totalCapped, setTotalCapped] = useState(false)
   const [hasMore,  setHasMore]  = useState(false)
   const [offset,   setOffset]   = useState(0)
   const [loading,  setLoading]  = useState(true)
@@ -130,11 +134,12 @@ export default function Audit() {
     setForbidden(false)
     try {
       const res = await fetch(apiUrl(`/api/audit-log?${buildQuery(0)}`))
-      if (res.status === 403) { setForbidden(true); setRows([]); setTotal(0); return }
+      if (res.status === 403) { setForbidden(true); setRows([]); setTotal(0); setTotalCapped(false); return }
       if (!res.ok) throw new Error(`Failed to load audit log (${res.status})`)
       const data = await res.json()
       setRows(data.rows ?? [])
       setTotal(data.total ?? 0)
+      setTotalCapped(!!data.total_capped)
       setHasMore(!!data.hasMore)
       setOffset(data.rows?.length ?? 0)
     } catch (e) {
@@ -393,7 +398,7 @@ export default function Audit() {
             {/* Footer: load more + count */}
             <div className="flex items-center justify-between px-4 py-3 border-t border-parchment-300/60 dark:border-brass-900/30 bg-parchment-100/40 dark:bg-ink-800/20">
               <span className="text-xs text-ink-500 dark:text-parchment-300/70">
-                Showing {rows.length} of {total}
+                Showing {rows.length.toLocaleString()} of {total.toLocaleString()}{totalCapped ? '+' : ''}
               </span>
               {hasMore && (
                 <button

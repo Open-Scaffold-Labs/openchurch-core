@@ -16,6 +16,7 @@ import { Router } from 'express'
 import pool from '../db.js'
 import { requireIntParam } from '../utils/params.js'
 import { monitor } from '../monitoring/index.js'
+import { protectedDelete } from '../vault/deleteRoute.js'
 
 const router = Router()
 
@@ -135,19 +136,8 @@ router.patch('/:id', async (req, res) => {
   }
 })
 
-router.delete('/:id', async (req, res) => {
-  const id = requireIntParam(req, res); if (id === null) return
-  try {
-    const { rowCount } = await pool.query(
-      'DELETE FROM ochr_bulletins WHERE id = $1 AND organization_id = $2',
-      [id, req.organizationId]
-    )
-    if (!rowCount) return res.status(404).json({ error: 'Not found' })
-    res.status(204).end()
-  } catch (err) {
-    monitor.error('bulletins.delete', err, { orgId: req.organizationId, id })
-    res.status(500).json({ error: 'Failed to delete bulletin' })
-  }
-})
+// Protected by the Continuity Vault — a bulletin is a written artifact of
+// a particular Sunday, and nobody rewrites one from memory.
+router.delete('/:id', protectedDelete('bulletin', { failure: 'Failed to delete bulletin' }))
 
 export default router

@@ -63,6 +63,10 @@ jobs:
         working-directory: server
         run: node scripts/audit-tenancy.mjs
 
+      - name: Env documented (every process.env read is in .env.example)
+        working-directory: server
+        run: node scripts/env-documented.mjs
+
       - name: Run smoke tests
         working-directory: server
         # runAllMigrations() builds the schema against the fresh service DB
@@ -97,6 +101,22 @@ jobs:
       - name: Tenant-FK audit (composite cross-tenant FKs)
         run: node scripts/tenant-fk-audit.mjs
 
+      - name: Money invariants — no donation aggregate counts refunded gifts
+        # A refunded gift is not a gift. This predicate was applied correctly
+        # in nine aggregates and missed in five, and the five included both
+        # documents that leave the building: the donor's year-end tax
+        # statement, and the ledger view that feeds the diocesan assessable
+        # base — so a parish was billed on money it had given back.
+        #
+        # A sweep finds instances; the class survives and reappears. This runs
+        # on every commit so a new aggregate over ochr_donations has to make a
+        # decision about refunds before it can land. Deliberate exceptions go
+        # in the script's EXPECTED list with a written reason.
+        #
+        # NOT working-directory: server — the script walks 'server/src' from
+        # the repository root. It needs no dependencies, so it is free here.
+        run: node scripts/money-invariants.mjs
+
   client-build:
     name: Client build
     runs-on: ubuntu-latest
@@ -120,9 +140,70 @@ jobs:
       - name: OPERATOR lint (design-system bans)
         run: npm run lint:operator
 
+      # A screen may not invent a fact it did not receive.
+      #
+      # Three ways this codebase kept breaking that rule, all the same shape:
+      # a discarded write response (a 500 looks exactly like a save), a
+      # `.json()` with no status check (an error body renders as data), and
+      # `.catch(() => setRows([]))` (every list page renders an empty array
+      # as its first-run welcome state — so a dropped connection told a
+      # diocese of forty parishes to invite its first one).
+      #
+      # The diocese app had all three on nearly every page because it was
+      # written after the parish app and copied the pattern before the
+      # pattern was fixed. Fixing instances does not stop that; the next
+      # page copies whatever is next to it. So this runs on every commit.
+      #
+      # A RATCHET, like the OPERATOR lint above:
+      # scripts/honest-failure-baseline.json records the reviewed backlog and
+      # this fails only on a NEW site. Needs no dependencies.
+      - name: Honest failure (no screen invents an answer)
+        run: npm run lint:honest
+
+      # A database row is not an API response. ochr_donations carries a
+      # GENERATED tsvector — the stemmed tokens of donor_name, category and
+      # NOTES — and on 2026-08-27 `RETURNING *` was shipping it from the
+      # create and refund paths, while the list route twelve lines above used
+      # the DONATION_PUBLIC_COLUMNS allowlist correctly. Same leak found on
+      # ochr_events and ochr_tasks.
+      #
+      # A RATCHET: the 13 remaining star-queries are RECORDED, not reviewed.
+      # Blocking the build on a 13-site cleanup gets a gate switched off;
+      # letting a NEW one appear silently is what created this.
+      - name: API shape (no route returns * from a table with internal columns)
+        run: npm run lint:api-shape
+
       - name: Install client dependencies
         working-directory: client
         run: npm install --no-audit --no-fund
+
+      # Two things `vite build` does not check, and both fail at runtime:
+      #   1. a free identifier — Tasks.jsx shipped a green build on
+      #      2026-08-26 with `setTasksFailed` never declared, and Events.jsx
+      #      used `AlertCircle` without importing it on 2026-08-27;
+      #   2. a t() key present in one locale only — it renders as the raw
+      #      key, because t() falls back to returning the key itself.
+      #
+      # Not a ratchet: both are always defects, so there is no backlog to
+      # record and this starts and stays at zero.
+      #
+      # Runs AFTER the client install, not before. The first version of this
+      # gate was regex-based and failed open three ways (file-scoped instead
+      # of function-scoped; `accept="image/*"` read as the start of a block
+      # comment; locale blocks located by literal whitespace). It is now
+      # built on @babel/parser, which lives in client/node_modules — so the
+      # install has to happen first. A gate that fails open is worse than no
+      # gate, because it is also a claim. If the parser is missing this step
+      # FAILS rather than skipping.
+      - name: Client scope (every identifier resolves, every key in both locales)
+        run: npm run lint:client-scope
+
+      # The client suite was added on 2026-08-26 and run by no job until an
+      # audit found it on 2026-08-27. It pins mutate(), which every converted
+      # write on every page now depends on.
+      - name: Client tests
+        working-directory: client
+        run: npm test
 
       - name: Build client
         working-directory: client

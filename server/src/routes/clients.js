@@ -1,7 +1,9 @@
 import { Router } from 'express'
 import pool from '../db.js'
+import { normalizeDonorEmail } from '../finance/donorIdentity.js'
 import { requireIntParam, parsePagination } from '../utils/params.js'
 import { parseCSVToObjects } from '../utils/csv.js'
+import { protectedDelete } from '../vault/deleteRoute.js'
 
 const router = Router()
 
@@ -9,6 +11,39 @@ const router = Router()
 // (notes, company, status, calendar_token, timestamps) is out of scope
 // for a spreadsheet round-trip — those are app-managed fields.
 const IMPORT_COLUMNS = ['name', 'email', 'phone', 'role', 'tags']
+
+// Columns a member row is allowed to leave the server with. This is an
+// ALLOWLIST on purpose. The router used to say `SELECT *`, which shipped
+// every column the table had ever grown — including two bearer credentials:
+//
+//   calendar_token — gates the personal .ics feed at /api/calendar-sync/:token.ics
+//   swap_token     — gates the public swap page at /api/swap/by-token/:token
+//
+// Both are unauthenticated by design, so the roster was handing every
+// signed-in user (viewers included — this router has no role gate) a working
+// key to every member's private feed and swap form. search_vec rode along
+// too: a tsvector no screen renders, on every row of every page.
+//
+// A denylist would have fixed today and leaked the next secret column
+// somebody adds. Adding a column here is a deliberate act; forgetting to add
+// one is a missing field in the UI, which is loud. The reverse — forgetting
+// to deny — is silent. Guarded by "list endpoints do not leak per-member
+// credentials (LEAK.1)".
+//
+// Measured on a 300-member parish, one 100-row page: 37 kB with SELECT *,
+// 24 kB with the allowlist — 37% of every roster page was the tsvector.
+//
+// 27 Aug: this closed the LIST path only. POST and PATCH still said
+// `RETURNING *`, so creating or editing a member handed the caller the whole
+// row — and PATCH on a member whose calendar link had been generated
+// returned the LIVE calendar_token. Verified against the running server:
+// PATCH /api/clients/20013 came back with the same token the .ics feed is
+// gated on. The allowlist now governs every path that returns a member.
+const CLIENT_PUBLIC_COLUMNS = [
+  'id', 'organization_id', 'name', 'company', 'email', 'phone', 'notes',
+  'status', 'role', 'tags', 'preferred_language', 'birth_date', 'joined_date',
+  'avatar', 'reminders_opt_out', 'created_at', 'updated_at',
+].join(', ')
 
 // Every query in this router filters by `organization_id = $orgId` so the
 // signed-in user only ever sees their own church's members. The FK cascade
@@ -60,7 +95,7 @@ router.get('/', async (req, res) => {
     // array — clients/tests depend on that shape.
     const { limit, offset } = parsePagination(req.query)
     params.push(limit, offset)
-    const sql = `SELECT * FROM ochr_clients WHERE ${where.join(' AND ')} ORDER BY name LIMIT $${params.length - 1} OFFSET $${params.length}`
+    const sql = `SELECT ${CLIENT_PUBLIC_COLUMNS} FROM ochr_clients WHERE ${where.join(' AND ')} ORDER BY name LIMIT $${params.length - 1} OFFSET $${params.length}`
     const { rows } = await pool.query(sql, params)
     res.json(rows)
   } catch (err) {
@@ -74,7 +109,7 @@ router.get('/:id', async (req, res) => {
   const id = requireIntParam(req, res); if (id === null) return
   try {
     const { rows } = await pool.query(
-      'SELECT * FROM ochr_clients WHERE id = $1 AND organization_id = $2',
+      `SELECT ${CLIENT_PUBLIC_COLUMNS} FROM ochr_clients WHERE id = $1 AND organization_id = $2`,
       [id, req.organizationId]
     )
     if (!rows.length) return res.status(404).json({ error: 'Not found' })
@@ -110,10 +145,16 @@ router.get('/:id/donations', async (req, res) => {
     // key and survives donor_name typos. Name match is the fallback
     // for members without an email on file.
     const useEmail = Boolean(member.email)
+    // Case-insensitive on email — the same identity rule members are matched
+    // by everywhere else (migration 095's lower(email) index). Exact-match
+    // here dropped a member's own gifts recorded under a different casing of
+    // their address from their lifetime history (F5).
     const filter = useEmail
-      ? 'donor_email = $2'
+      ? 'lower(donor_email) = lower($2)'
       : 'donor_name  = $2 AND donor_email IS NULL'
-    const matchKey = useEmail ? member.email : member.name
+    // The member's own address is normalised too: a member recorded as
+    // Jose@example.com would otherwise not match their own gifts.
+    const matchKey = useEmail ? normalizeDonorEmail(member.email) : member.name
 
     const { rows } = await pool.query(
       `SELECT id, donor_name, donor_email, donor_address,
@@ -179,7 +220,8 @@ router.post('/', async (req, res) => {
     if (!name?.trim()) return res.status(400).json({ error: 'Name is required' })
     const { rows } = await pool.query(
       `INSERT INTO ochr_clients (organization_id, name, company, email, phone, notes, status, role, tags, birth_date, joined_date, avatar)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+       RETURNING ${CLIENT_PUBLIC_COLUMNS}`,
       [req.organizationId, name, company, email, phone, notes, status || 'active', role || 'Member', tags,
        birth_date || null, joined_date || null, avatar || null]
     )
@@ -302,7 +344,8 @@ router.patch('/:id', async (req, res) => {
     const { rows } = await pool.query(
       `UPDATE ochr_clients
           SET ${sets.join(', ')}, updated_at = NOW()
-        WHERE id = $${vals.length + 1} AND organization_id = $${vals.length + 2} RETURNING *`,
+        WHERE id = $${vals.length + 1} AND organization_id = $${vals.length + 2}
+        RETURNING ${CLIENT_PUBLIC_COLUMNS}`,
       [...vals, id, req.organizationId]
     )
     if (!rows.length) return res.status(404).json({ error: 'Not found' })
@@ -313,20 +356,13 @@ router.patch('/:id', async (req, res) => {
   }
 })
 
-// DELETE /api/clients/:id
-router.delete('/:id', async (req, res) => {
-  const id = requireIntParam(req, res); if (id === null) return
-  try {
-    const result = await pool.query(
-      'DELETE FROM ochr_clients WHERE id = $1 AND organization_id = $2',
-      [id, req.organizationId]
-    )
-    if (result.rowCount === 0) return res.status(404).json({ error: 'Not found' })
-    res.status(204).end()
-  } catch (err) {
-    console.error(err)
-    res.status(500).json({ error: 'Failed to delete client' })
-  }
-})
+// DELETE /api/clients/:id — protected by the Continuity Vault.
+//
+// This is the delete the vault was built for. Postgres would cascade away
+// attendance, group membership, unavailability and notifications, and
+// null out the link on her baptism, her pledge and her invoices. The
+// capture holds all of it, and a restore reconnects the ones that
+// survived with a hole in them.
+router.delete('/:id', protectedDelete('member', { failure: 'Failed to delete client' }))
 
 export default router

@@ -7,6 +7,7 @@ import { useAuth } from '../context/AuthContext'
 import { useLocale } from '../i18n'
 import { apiUrl } from '../api'
 import { formatLocalDate } from '../utils/dates'
+import { loadList } from '../utils/format'
 
 // Mass Intentions (MI.1) — the parish book of requested Mass intentions.
 // Reads GET /api/mass-intentions (status filter + keyword search, paginated);
@@ -55,6 +56,7 @@ export default function MassIntentions() {
 
   const [adding,   setAdding]   = useState(false)
   const [masses,   setMasses]   = useState(null) // upcoming calendar events; lazy-fetched on first form open
+  const [massesFailed, setMassesFailed] = useState(false)
   const [editingId, setEditingId] = useState(null)
   const [form,     setForm]     = useState(emptyForm)
   const [busy,     setBusy]     = useState(false)
@@ -93,16 +95,18 @@ export default function MassIntentions() {
   // Upcoming events for the "Assign to Mass" dropdown — next 60 days,
   // fetched once per page visit, only when a form is actually opened.
   const loadMasses = useCallback(() => {
-    if (masses !== null) return
+    // Retry on a later form open if the last attempt failed — an empty
+    // dropdown must not become the permanent answer because of one 500.
+    if (masses !== null && !massesFailed) return
     const pad = n => String(n).padStart(2, '0')
     const iso = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
     const today = new Date()
     const end = new Date(today); end.setDate(end.getDate() + 60)
-    fetch(apiUrl(`/api/calendar?start=${iso(today)}&end=${iso(end)}`))
-      .then(r => r.ok ? r.json() : [])
-      .then(rows => setMasses(Array.isArray(rows) ? rows : []))
-      .catch(() => setMasses([]))
-  }, [masses])
+    loadList(apiUrl(`/api/calendar?start=${iso(today)}&end=${iso(end)}`)).then(({ ok, data }) => {
+      setMasses(data)
+      setMassesFailed(!ok)
+    })
+  }, [masses, massesFailed])
 
   const closeForm = () => { setAdding(false); setEditingId(null); setForm(emptyForm); setError(null) }
   const startAdd = () => { setEditingId(null); setForm(emptyForm); setAdding(true); setError(null); loadMasses() }
@@ -247,6 +251,11 @@ export default function MassIntentions() {
                   </option>
                 ))}
               </select>
+              {massesFailed && (
+                <p role="status" className="mt-1 text-[11px] text-amber-700 dark:text-amber-400">
+                  {t('mi.massesFailed')}
+                </p>
+              )}
             </div>
             <div>
               <label className="block text-[11px] font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">{t('mi.offering')}</label>

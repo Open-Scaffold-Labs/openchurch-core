@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Loader2, ArrowRight, FileText } from 'lucide-react'
 import { apiUrl } from '../api'
+import { loadOne } from '../utils/format'
 
 // Parish Care (CARE.1) — the calm working view.
 //
@@ -47,21 +48,49 @@ export default function ParishCare() {
   const [selected, setSelected] = useState(null)
   const [panel, setPanel] = useState(null)
   const [error, setError] = useState('')
+  // CARE.3 — narrowing, not sorting. There is no "sort by" here on purpose:
+  // an ordering is an implied ranking, and this list is alphabetical.
+  const [stateFilter, setStateFilter] = useState(null)
+  const [q, setQ] = useState('')
+  const [typed, setTyped] = useState('')
+
+  // Debounced so a search runs when someone stops typing rather than on
+  // every keystroke.
+  useEffect(() => {
+    const id = setTimeout(() => setQ(typed.trim()), 250)
+    return () => clearTimeout(id)
+  }, [typed])
 
   useEffect(() => {
-    fetch(apiUrl('/api/diocese/care'))
-      .then(r => r.json())
-      .then(d => setData(d.parishes ? d : { parishes: [], counts: {} }))
-      .catch(() => setError('Could not load parish care just now.'))
-  }, [])
+    const params = new URLSearchParams()
+    if (stateFilter) params.set('state', stateFilter)
+    if (q) params.set('q', q)
+    const suffix = params.toString() ? `?${params}` : ''
+    // `d.parishes ? d : { parishes: [], counts: {} }` swallowed a 500 the
+    // same way the rest of this app did: an error body has no `parishes`
+    // key, so a failed request rendered as a diocese with no parishes in it
+    // — on the screen a chancery uses to decide who needs attention.
+    let live = true
+    loadOne(apiUrl(`/api/diocese/care${suffix}`)).then(({ ok, data }) => {
+      if (!live) return
+      if (!ok || !Array.isArray(data?.parishes)) {
+        setError('Could not load parish care just now.')
+        return
+      }
+      setError('')
+      setData(data)
+    })
+    return () => { live = false }
+  }, [stateFilter, q])
 
   useEffect(() => {
     if (!selected) { setPanel(null); return }
     setPanel('loading')
-    fetch(apiUrl(`/api/diocese/care/${selected}`))
-      .then(r => r.json())
-      .then(setPanel)
-      .catch(() => setPanel(null))
+    // A failed panel used to `setPanel(null)`, which closes it as if nothing
+    // had been clicked. `'error'` is a third state so the panel can say so.
+    loadOne(apiUrl(`/api/diocese/care/${selected}`)).then(({ ok, data }) => {
+      setPanel(ok && data?.parish ? data : 'error')
+    })
   }, [selected])
 
   if (error) {
@@ -86,9 +115,21 @@ export default function ParishCare() {
     <div className="flex gap-8 items-start">
       <div className="flex-1 min-w-0 max-w-3xl">
         <h1 className="font-serif text-3xl font-bold text-church-600 mb-1">Parish Care</h1>
-        <p className="text-sm text-ink-500 mb-7">
+        <p className="text-sm text-ink-500 mb-5">
           A quiet view of where a parish may need attention, accompaniment, or simply time.
         </p>
+
+        {/* Find a parish you already have in mind. Not a search engine —
+            a filter over a list of dozens, matching the four things a
+            staff member actually remembers. */}
+        <div className="mb-6">
+          <label htmlFor="care-search" className="sr-only">Find a parish</label>
+          <input
+            id="care-search" type="search" value={typed} onChange={e => setTyped(e.target.value)}
+            placeholder="Find a parish, place, deanery or tradition"
+            className="w-full max-w-md px-3 py-2 text-sm rounded-lg border border-parchment-300 bg-parchment-50 text-ink-900 placeholder:text-ink-400 focus:outline-none focus:ring-2 focus:ring-brass-400"
+          />
+        </div>
 
         {/* Explanatory states, not a KPI wall. The number is small and the
             sentence is the point. */}
@@ -97,20 +138,45 @@ export default function ParishCare() {
             const sample = parishes.find(p => p.status.key === key)?.status
             const meta = sample ?? FALLBACK_MEANING[key]
             const tone = TONE[meta.tone] ?? TONE.stone
+            const on = stateFilter === key
             return (
-              <div key={key} className="rounded-xl border border-parchment-300/70 bg-parchment-50 p-4">
+              <button
+                key={key} type="button"
+                onClick={() => setStateFilter(on ? null : key)}
+                aria-pressed={on}
+                className={`text-left rounded-xl border p-4 transition-colors ${
+                  on ? 'border-brass-400 bg-parchment-200/60' : 'border-parchment-300/70 bg-parchment-50 hover:bg-parchment-100'}`}>
                 <div className="flex items-center gap-2 mb-1.5">
                   <span className={`inline-block w-1.5 h-1.5 rounded-full ${tone.dot}`} aria-hidden="true" />
                   <p className="text-[11px] font-semibold uppercase tracking-widest text-ink-500">{meta.label}</p>
                 </div>
                 <p className="font-serif text-2xl text-church-700 leading-none mb-2">{counts[key] ?? 0}</p>
                 <p className="text-[11.5px] text-ink-500 leading-snug">{meta.meaning}</p>
-              </div>
+              </button>
             )
           })}
         </div>
 
-        {parishes.length === 0 ? (
+        {(stateFilter || q) && (
+          <p className="text-[12.5px] text-ink-500 mb-4">
+            Showing {parishes.length} of {data.total ?? parishes.length}
+            {stateFilter ? ` in ${(FALLBACK_MEANING[stateFilter]?.label ?? stateFilter).toLowerCase()}` : ''}
+            {q ? ` matching “${q}”` : ''}.{' '}
+            <button type="button" onClick={() => { setStateFilter(null); setTyped(''); }}
+              className="text-church-700 hover:underline">Show everything</button>
+          </p>
+        )}
+
+        {parishes.length === 0 && (stateFilter || q) ? (
+          <div className="rounded-2xl border border-parchment-300/70 bg-parchment-50 p-8 text-center">
+            <p className="font-serif text-xl font-bold text-church-600 mb-2">Nothing matches that</p>
+            <p className="text-sm text-ink-600 max-w-md mx-auto">
+              Try a shorter search, or{' '}
+              <button type="button" onClick={() => { setStateFilter(null); setTyped(''); }}
+                className="text-church-700 hover:underline">show everything</button>.
+            </p>
+          </div>
+        ) : parishes.length === 0 ? (
           <div className="rounded-2xl border border-parchment-300/70 bg-parchment-50 p-8 text-center">
             <p className="font-serif text-xl font-bold text-church-600 mb-2">No parishes yet</p>
             <p className="text-sm text-ink-600 max-w-md mx-auto">
@@ -203,6 +269,19 @@ function ContextPanel({ panel, onClose }) {
     return (
       <aside className="w-80 shrink-0 hidden lg:flex justify-center pt-10">
         <Loader2 size={18} className="animate-spin text-brass-500" />
+      </aside>
+    )
+  }
+  if (panel === 'error') {
+    return (
+      <aside className="w-80 shrink-0 hidden lg:block">
+        <div className="rounded-xl border border-amber-300/70 bg-amber-50/70 p-5">
+          <p className="text-sm font-semibold text-ink-900">This parish’s context didn’t load.</p>
+          <p className="text-sm text-ink-600 mt-1 leading-relaxed">
+            Read it as missing, not as an empty record — this parish’s history is intact.
+            Choose it again in a moment.
+          </p>
+        </div>
       </aside>
     )
   }

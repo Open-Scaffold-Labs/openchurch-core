@@ -21,12 +21,13 @@ import pool from '../db.js'
 import { requireIntParam } from '../utils/params.js'
 import { monitor } from '../monitoring/index.js'
 import { financialObservations } from '../finance/observations.js'
+import { overlapsRange, findOverlappingSubmission, overlapMessage } from '../finance/fiscalPeriod.js'
 
 const router = Router()
 
 const ROSTER_SELECT = `
   SELECT a.id, a.status, a.grant_level, a.invited_email,
-         a.accepted_at, a.created_at,
+         a.accepted_at, a.created_at, a.region_id,
          p.id AS parish_org_id, p.name AS parish_name, p.slug AS parish_slug
     FROM ochr_diocese_affiliations a
     JOIN ochr_organizations p ON p.id = a.parish_org_id
@@ -36,16 +37,175 @@ const ROSTER_SELECT = `
 router.get('/parishes', async (req, res) => {
   try {
     const { rows } = await pool.query(
-      `${ROSTER_SELECT}
-        WHERE a.diocese_org_id = $1
-        ORDER BY (a.status = 'active') DESC, p.name ASC
-        LIMIT 500`,
+      // DISTINCT ON (parish_org_id): the CURRENT affiliation per parish,
+      // not every one there has ever been.
+      //
+      // Migration 094 lets a parish that left be invited back, which means
+      // a (diocese, parish) pair can now hold an 'ended' row AND a new live
+      // one. Without this the roster would list that parish twice — once as
+      // ended, once as invited — and a chancery reading "St. Anne · ended"
+      // next to "St. Anne · invited" has to work out which is now true.
+      //
+      // The inner ordering picks live over ended, then most recent; the
+      // outer restores the display order the page expects.
+      `SELECT * FROM (
+         SELECT DISTINCT ON (a.parish_org_id) a.id, a.status, a.grant_level,
+                a.invited_email, a.accepted_at, a.created_at, a.region_id,
+                p.id AS parish_org_id, p.name AS parish_name, p.slug AS parish_slug
+           FROM ochr_diocese_affiliations a
+           JOIN ochr_organizations p ON p.id = a.parish_org_id
+          WHERE a.diocese_org_id = $1
+          ORDER BY a.parish_org_id,
+                   (a.status IN ('invited','active','suspended')) DESC,
+                   a.created_at DESC
+       ) current
+       ORDER BY (status = 'active') DESC, parish_name ASC
+       LIMIT 500`,
       [req.organizationId]
     )
     res.json({ parishes: rows })
   } catch (err) {
     monitor.error('diocese.parishes.list', err, { orgId: req.organizationId })
     res.status(500).json({ error: 'Failed to load the parish roster' })
+  }
+})
+
+// POST /api/diocese/parishes/cohort (PILOT.3) — bring in a small cohort,
+// with a look before you leap.
+//
+// WHY THIS IS INVITATIONS AND NOT AN IMPORT.
+//
+// The obvious reading of "import a parish cohort" is a CSV that creates
+// parish records. That would contradict the thing the whole product is
+// built on: a diocese cannot create a parish's account or enrol it without
+// consent. Parishes sign up themselves and ACCEPT — what they share is a
+// covenant they enter and can end from their own settings.
+//
+// So a cohort is a validated batch of INVITATIONS. It reads as a missing
+// feature until you notice it is the constraint doing its job.
+//
+// Two phases, because the point is not to save typing — it is to let
+// somebody see what is about to happen before it happens. `dry_run` costs
+// one round trip and turns a batch of surprises into a list you can read.
+router.post('/parishes/cohort', async (req, res) => {
+  const raw = Array.isArray(req.body?.emails) ? req.body.emails
+    : typeof req.body?.emails === 'string' ? req.body.emails.split(/[\s,;]+/)
+    : null
+  if (!raw) return res.status(400).json({ error: 'Send a list of parish admin emails' })
+
+  const dryRun = req.body?.dry_run !== false   // safe by default
+  const cleaned = raw.map(e => String(e).trim().toLowerCase()).filter(Boolean)
+  if (!cleaned.length) return res.status(400).json({ error: 'That list is empty' })
+  if (cleaned.length > 50) {
+    return res.status(400).json({
+      error: 'That is more than a pilot cohort. Fifty at a time is the limit — a first cohort of four to eight is what the runbook suggests.',
+    })
+  }
+
+  try {
+    const seen = new Set()
+    const rows = []
+    for (const email of cleaned) {
+      // A list pasted from a spreadsheet routinely repeats a line. Saying
+      // so is kinder than silently collapsing it.
+      if (seen.has(email)) { rows.push({ email, state: 'duplicate', note: 'Listed more than once' }); continue }
+      seen.add(email)
+
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        rows.push({ email, state: 'invalid', note: 'That does not look like an email address' })
+        continue
+      }
+
+      const { rows: users } = await pool.query(
+        `SELECT u.id, u.role, u.organization_id, o.org_type, o.name AS org_name
+           FROM ochr_users u JOIN ochr_organizations o ON o.id = u.organization_id
+          WHERE u.email = $1`, [email])
+      const t = users[0]
+
+      // Own-address first. It reveals nothing the caller does not already
+      // know, and checking it after the generic miss made this branch
+      // unreachable — a chancery pasting its own address got told no parish
+      // administrator existed, which is true and useless.
+      if (t && t.organization_id === req.organizationId) {
+        rows.push({ email, state: 'invalid', note: 'That address belongs to this diocese' })
+        continue
+      }
+      // Then ONE message for every kind of miss, exactly as the single
+      // invite does — otherwise a diocese can probe which addresses exist
+      // and what they are.
+      if (!t || t.role !== 'admin' || t.org_type !== 'parish') {
+        rows.push({ email, state: 'not_found',
+          note: 'No parish administrator with that address. They may need to sign up first.' })
+        continue
+      }
+
+      const { rows: aff } = await pool.query(
+        `SELECT status, diocese_org_id FROM ochr_diocese_affiliations
+          WHERE parish_org_id = $1 AND status IN ('invited', 'active', 'suspended')`,
+        [t.organization_id])
+      if (aff.length) {
+        const ours = aff[0].diocese_org_id === req.organizationId
+        rows.push({
+          email, parish_name: t.org_name,
+          state: ours ? (aff[0].status === 'invited' ? 'already_invited' : 'already_affiliated') : 'spoken_for',
+          // Never name the other diocese. That a parish is affiliated
+          // elsewhere is that parish's business.
+          note: ours
+            ? (aff[0].status === 'invited' ? 'Already invited — still waiting on them' : 'Already with this diocese')
+            : 'Already affiliated elsewhere. That is theirs to change, not ours.',
+        })
+        continue
+      }
+
+      rows.push({ email, parish_name: t.org_name, state: 'ready', note: 'Will be invited' })
+    }
+
+    const willInvite = rows.filter(r => r.state === 'ready')
+
+    if (dryRun) {
+      return res.json({
+        preview: true, rows,
+        summary: { total: rows.length, ready: willInvite.length,
+                   skipped: rows.length - willInvite.length },
+      })
+    }
+
+    // Commit. Each row is its own statement so one failure cannot cost the
+    // rest — a cohort that half-lands and says which half is better than a
+    // cohort that rolls back and says nothing.
+    const invited = []
+    for (const r of willInvite) {
+      const { rows: u } = await pool.query(
+        `SELECT organization_id FROM ochr_users WHERE email = $1`, [r.email])
+      try {
+        await pool.query(
+          `INSERT INTO ochr_diocese_affiliations (diocese_org_id, parish_org_id, invited_email)
+           VALUES ($1, $2, $3)`,
+          [req.organizationId, u[0].organization_id, r.email])
+        invited.push({ ...r, state: 'invited' })
+      } catch (err) {
+        // 23505: somebody invited them between the preview and the commit.
+        // "Invited by someone else a moment ago" was asserted for EVERY
+        // 23505, including the one raised when this diocese re-invited a
+        // parish that had left it — blaming a diocese that had done
+        // nothing. Say which rule fired, or say nothing about who.
+        const dupe = err?.code === '23505'
+        const own  = err?.constraint === 'uq_affiliation_one_live_pair'
+        invited.push({ ...r, state: dupe ? 'already_invited' : 'failed',
+                       note: !dupe ? 'Could not invite'
+                             : own ? 'You already have a live invitation or affiliation with this parish'
+                                   : 'This parish already has a live affiliation or invitation' })
+      }
+    }
+    res.status(201).json({
+      preview: false,
+      rows: rows.map(r => invited.find(i => i.email === r.email) ?? r),
+      summary: { total: rows.length, invited: invited.filter(i => i.state === 'invited').length,
+                 skipped: rows.length - invited.length },
+    })
+  } catch (err) {
+    monitor.error('diocese.cohort', err, { orgId: req.organizationId })
+    res.status(500).json({ error: 'Could not work through that list' })
   }
 })
 
@@ -86,10 +246,18 @@ router.post('/parishes/invite', async (req, res) => {
     )
     res.status(201).json(full[0])
   } catch (err) {
-    // 23505 — unique violation: either this diocese already invited the
-    // parish, or the parish already has a live affiliation elsewhere.
+    // 23505 — a unique violation, but WHICH one changes what the reader
+    // should do, and the old single sentence covered a case that no longer
+    // exists. Since migration 094 the only way to collide is a LIVE
+    // affiliation: this diocese's own, or another diocese's. An 'ended' row
+    // no longer blocks anything, which is the point of that migration.
     if (err?.code === '23505') {
-      return res.status(409).json({ error: 'That parish already has a diocese affiliation or pending invitation' })
+      const own = err?.constraint === 'uq_affiliation_one_live_pair'
+      return res.status(409).json({
+        error: own
+          ? 'You already have a live invitation or affiliation with that parish'
+          : 'That parish is already affiliated with a diocese, or has an invitation pending',
+      })
     }
     monitor.error('diocese.parishes.invite', err, { orgId: req.organizationId })
     res.status(500).json({ error: 'Failed to send the invitation' })
@@ -199,6 +367,37 @@ router.patch('/submissions/:id', async (req, res) => {
     return res.status(400).json({ error: 'Returning a submission requires a note explaining what to fix' })
   }
   try {
+    // Approving is what admits a period to the roll-up and the bill, so
+    // this is the last gate before two overlapping periods are both
+    // counted (1 Sep). The parish-side POST refuses an overlap at submit
+    // time; this catches what that cannot — two overlapping rows that were
+    // both 'submitted' before the guard existed, or landed in a race. The
+    // second one may still be RETURNED: that is the way to resolve it.
+    if (next === 'approved') {
+      const { rows: mine } = await pool.query(
+        `SELECT organization_id,
+                to_char(period_start, 'YYYY-MM-DD') AS period_start,
+                to_char(period_end, 'YYYY-MM-DD')   AS period_end
+           FROM ochr_report_submissions
+          WHERE id = $1 AND diocese_org_id = $2 AND status = 'submitted'`,
+        [id, req.organizationId]
+      )
+      if (mine.length) {
+        const overlap = await findOverlappingSubmission(pool, {
+          organizationId: mine[0].organization_id, dioceseOrgId: req.organizationId,
+          periodStart: mine[0].period_start, periodEnd: mine[0].period_end,
+          statuses: ['approved'], excludeId: id,
+        })
+        if (overlap) {
+          return res.status(409).json({
+            error: overlapMessage(overlap, 'return this one, or return the approved period and approve this one instead.'),
+            code: 'period_overlap',
+            overlaps: { id: overlap.id, period_start: overlap.period_start, period_end: overlap.period_end, status: overlap.status },
+          })
+        }
+      }
+    }
+
     // Review requires a LIVE affiliation (audit follow-up): once a parish
     // leaves, the diocese can no longer act on its in-flight submissions.
     const { rows } = await pool.query(
@@ -217,13 +416,29 @@ router.patch('/submissions/:id', async (req, res) => {
     if (!rows.length) return res.status(404).json({ error: 'No reviewable submission found' })
     res.json(rows[0])
   } catch (err) {
+    // 23P01 — the 097 exclusion constraint caught an overlap the
+    // check-then-write above raced past. Two concurrent requests both read
+    // "no overlap" on separate pooled connections and both wrote; the
+    // database refused the second. That is the guard working, so it must
+    // read as the same 409 the application check produces, not as "we broke".
+    if (err?.code === '23P01') {
+      return res.status(409).json({
+        error: "This period overlaps another of this parish's live periods. A parish's periods must not overlap.",
+        code: 'period_overlap',
+      })
+    }
     monitor.error('diocese.submissions.patch', err, { orgId: req.organizationId, id })
     res.status(500).json({ error: 'Failed to review the submission' })
   }
 })
 
 // GET /api/diocese/financials?start&end — THE roll-up. Reads only
-// APPROVED submissions whose period overlaps the range: rollup_group ×
+// APPROVED submissions whose period OVERLAPS the range — which is what this
+// comment always said and, until 27 Aug, not what the SQL did. It used
+// containment, so a July–June parish read $0.00 here while being billed
+// $2,420.57 for the same year. The predicate is now named and shared; see
+// ../finance/fiscalPeriod.js for why a browse overlaps and an assessment
+// partitions. Shape: rollup_group ×
 // parish matrix plus consolidated totals. Group-level data is what
 // every grant level shares; account lines stay behind the per-parish
 // drill-down below.
@@ -239,7 +454,7 @@ router.get('/financials', async (req, res) => {
          JOIN ochr_organizations p ON p.id = s.organization_id
          JOIN (${ACTIVE_AFF}) aff ON aff.parish_org_id = s.organization_id
         WHERE s.diocese_org_id = $1 AND s.status = 'approved'
-          AND s.period_start >= $2 AND s.period_end <= $3
+          AND ${overlapsRange('$2', '$3')}
         ORDER BY p.name, s.period_start`,
       [req.organizationId, start, end]
     )
@@ -328,7 +543,7 @@ router.get('/parishes/:id/financials', async (req, res) => {
               s.status, s.totals_json
          FROM ochr_report_submissions s
         WHERE s.diocese_org_id = $1 AND s.organization_id = $2 AND s.status = 'approved'
-          AND s.period_start >= $3 AND s.period_end <= $4
+          AND ${overlapsRange('$3', '$4')}
         ORDER BY s.period_start`,
       [req.organizationId, parishOrgId, start, end]
     )

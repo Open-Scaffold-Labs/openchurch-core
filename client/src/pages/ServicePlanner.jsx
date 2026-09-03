@@ -70,7 +70,10 @@ function escapeHtml(s) {
 
 // Open a print window with the order of worship — a numbered run-sheet.
 // Same print-window pattern as the bulletin / name tags (no PDF library).
-function printOrderOfWorship({ orgName, plan, lit, t, dateLocale }) {
+// `tradition` was read here as a free variable — printing the order of
+// worship threw a ReferenceError for any plan with a season. It is a
+// parameter now, supplied by the caller that actually has it.
+function printOrderOfWorship({ orgName, plan, lit, t, dateLocale, tradition }) {
   const w = window.open('', '_blank', 'width=800,height=1000')
   if (!w) return
   const accent = LIT_HEX[lit?.color] ?? '#7B2D26'
@@ -362,7 +365,7 @@ export default function ServicePlanner() {
           {plan && (
             <button
               type="button"
-              onClick={() => printOrderOfWorship({ orgName, plan, lit, t, dateLocale })}
+              onClick={() => printOrderOfWorship({ orgName, plan, lit, t, dateLocale, tradition })}
               className="shrink-0 flex items-center gap-2 px-4 py-2.5 rounded-xl border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-50 dark:bg-ink-800 text-church-900 dark:text-brass-200 text-sm font-semibold hover:bg-parchment-100 dark:hover:bg-ink-800/70 transition-colors"
               title={t('plan.printHint')}
             >
