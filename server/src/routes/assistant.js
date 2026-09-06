@@ -8,12 +8,13 @@
 //
 // The widget's job is "how do I…" answers about OpenChurch itself plus light
 // parish-operations context (liturgical calendar mechanics, giving statements,
-// bilingual features). It follows the AI Studio provider chain: an org that
-// has plugged in its own key (AIP.1) rides its own provider and bill;
-// everyone else uses the platform key. It does NOT consume AI Studio
-// generation quota — support shouldn't compete with bulletin-writing — but
-// is capped at ASSISTANT_DAILY_CAP messages/org/day (default 300), counted
-// from ochr_assistant_messages.
+// bilingual features). It follows the shared callLLM chain: an org that
+// has plugged in its own Anthropic or OpenAI key (AIP.1) rides its own
+// provider and bill; everyone else uses the platform target (OpenRouter /
+// OpenAI-compat, then Anthropic, then first-party OpenAI). It does NOT
+// consume AI Studio generation quota — support shouldn't compete with
+// bulletin-writing — but is capped at ASSISTANT_DAILY_CAP messages/org/day
+// (default 300), counted from ochr_assistant_messages.
 //
 // Boundaries baked into the system prompt: the assistant is not a canonist,
 // not a lawyer, and not the chancery — questions of canon law, sacramental
@@ -22,16 +23,17 @@
 // know, it says so and points at Report a Problem.
 
 import { Router } from 'express'
-import Anthropic from '@anthropic-ai/sdk'
 import pool from '../db.js'
 import { getOrgProvider } from '../ai/orgProvider.js'
+import { callLLM, isPlatformLLMConfigured, isOrgLLMConfigured } from '../ai/callLLM.js'
 import { monitor } from '../monitoring/index.js'
 
 const router = Router()
 
-// Same default as AI Studio (small, cheap, known-good); SUPPORT_AI_MODEL
-// upgrades the assistant + diagnostic together.
-const DEFAULT_MODEL = process.env.SUPPORT_AI_MODEL || 'claude-haiku-4-5-20251001'
+// SUPPORT_AI_MODEL is an optional pin for whichever platform target
+// actually fires. When unset, callLLM uses that target's default
+// (OpenRouter Flash, first-party Haiku / gpt-4o-mini).
+const MODEL_PIN = process.env.SUPPORT_AI_MODEL || undefined
 const DAILY_CAP = Number(process.env.ASSISTANT_DAILY_CAP) || 300
 const MAX_HISTORY = 12 // turns kept from the client-supplied history
 
@@ -88,36 +90,27 @@ async function todayCount(orgId) {
 }
 
 async function runChat({ org, messages }) {
-  if (org?.provider === 'anthropic') {
-    const model = org.model || DEFAULT_MODEL
-    const client = new Anthropic({ apiKey: org.apiKey })
-    const m = await client.messages.create({ model, max_tokens: 700, system: SYSTEM_PROMPT, messages })
-    const text = m.content?.[0]?.text
-    if (text) return { text, provider: 'anthropic (org key)', model }
-    throw new Error('anthropic (org key): empty response')
-  }
-  // Org OpenAI keys fall through to platform for the assistant (chat-shape
-  // differences aren't worth a second code path here); platform Anthropic:
-  if (process.env.ANTHROPIC_API_KEY) {
-    const client = new Anthropic()
-    const m = await client.messages.create({ model: DEFAULT_MODEL, max_tokens: 700, system: SYSTEM_PROMPT, messages })
-    const text = m.content?.[0]?.text
-    if (text) return { text, provider: 'anthropic', model: DEFAULT_MODEL }
-  }
-  throw new Error('No AI provider available')
+  return callLLM({
+    systemPrompt: SYSTEM_PROMPT,
+    messages,
+    maxTokens: 700,
+    org,
+    model: MODEL_PIN,
+  })
 }
 
 // GET /api/assistant/status — can this org get an answer at all?
 // The widget probes this once and simply doesn't render the quill when
 // the answer is no: a support button that always apologizes is worse
-// than no button ("Anxiety is a Defect"). Availability = platform key,
-// or the org's own Anthropic key (AIP.1).
+// than no button ("Anxiety is a Defect"). Availability = any platform
+// target (OpenRouter / OpenAI-compat, Anthropic, or first-party OpenAI)
+// or the org's own Anthropic/OpenAI key (AIP.1).
 router.get('/status', async (req, res) => {
   try {
-    let available = Boolean(process.env.ANTHROPIC_API_KEY)
+    let available = isPlatformLLMConfigured()
     if (!available) {
       const org = await getOrgProvider(req.organizationId).catch(() => null)
-      available = org?.provider === 'anthropic'
+      available = isOrgLLMConfigured(org)
     }
     res.set('Cache-Control', 'private, max-age=300')
     res.json({ available })
