@@ -41,7 +41,7 @@ Serving Catholic, Anglican, and Lutheran parishes.
 | **Child check-in** | Check children in and out against a pickup code, with printed name tags and a self-serve kiosk mode for a tablet at the entrance |
 | **Calendar sync** | A personal ICS feed per member covering every event, schedule entry, and task assigned to them. One-tap subscribe from Apple or Google Calendar |
 | **Bulletins & public pages** | A public parish page, bulletin, events list, and giving link, each publishable on its own |
-| **AI Studio** | Sermon outlines, devotionals, and announcements, with a per-parish monthly quota and an Anthropic → OpenAI fallback. Assistance as craft, not sorcery — bring your own key |
+| **AI Studio** | Sermon outlines, devotionals, and announcements, with a per-parish monthly quota. Platform traffic prefers OpenRouter / OpenAI-compat, then Anthropic, then first-party OpenAI. Assistance as craft, not sorcery — bring your own key |
 | **Audit log** | Every mutation captured with actor, entity, summary, and status. Admin-only viewer with filters and pagination |
 | **Operations** | Daily task checklists, payroll and shift logging, team roles with last-admin protection, and per-parish insights |
 
@@ -181,8 +181,11 @@ OpenChurch deploys as a Vercel monorepo:
 | `JWT_SECRET` | Signing key for auth tokens | yes |
 | `CHECKIN_CODE_PEPPER` | HMAC pepper for child pickup codes, hashed at rest | yes |
 | `BASE_URL` | Public host, used to build the calendar-sync ICS URLs | recommended |
-| `ANTHROPIC_API_KEY` | Primary AI provider | one of these |
-| `OPENAI_API_KEY` | Fallback AI provider | one of these |
+| `OPENROUTER_API_KEY` | Preferred platform AI (OpenAI-compat via OpenRouter) | one of these |
+| `AI_BASE_URL` | OpenAI-compat base URL; defaults to OpenRouter when `OPENROUTER_API_KEY` is set | optional |
+| `AI_MODEL` | Model for the OpenAI-compat platform path (default `google/gemini-2.5-flash`) | optional |
+| `ANTHROPIC_API_KEY` | Fallback platform AI (first-party Anthropic) | one of these |
+| `OPENAI_API_KEY` | Fallback first-party OpenAI, or the key for a custom `AI_BASE_URL` | one of these |
 | `CRON_SECRET` | Shared secret on `Authorization: Bearer …` for cron endpoints | required for cron |
 | `MONITORING_LEVEL` | `error` / `warn` / `info` / `debug` (default `info`) | optional |
 | `BILLING_PRICE_ID_PRO` | Provider-specific price id for Pro checkout | when billing is wired |

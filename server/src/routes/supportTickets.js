@@ -20,7 +20,7 @@
 //
 // Triage model:
 //   · An async diagnostic pass (never blocks the submit response) asks
-//     Claude for structured triage — root cause, suspected files, proposed
+//     the platform LLM for structured triage — root cause, suspected files, proposed
 //     fix, suggested severity + classification. The suggestion is adopted
 //     onto the row ONLY while the ticket is untouched (status 'new',
 //     severity still default, classification unset); after a human sets
@@ -40,8 +40,8 @@
 // compete with bulletin-writing.
 
 import { Router } from 'express'
-import Anthropic from '@anthropic-ai/sdk'
 import pool from '../db.js'
+import { callLLM, isPlatformLLMConfigured } from '../ai/callLLM.js'
 import { requireIntParam, parsePagination } from '../utils/params.js'
 import { isVendorAdmin } from '../middleware/superAdmin.js'
 import { sendEmail } from '../email/send.js'
@@ -66,9 +66,10 @@ const router = Router()
 // on what was true when the token was minted. Same pattern as setup.js:55.
 router.use(requireRole('admin', 'staff', 'viewer'))
 
-// Same default as AI Studio (small, cheap, known-good); SUPPORT_AI_MODEL
-// upgrades the diagnostic independently when the vendor wants deeper triage.
-const DIAG_MODEL = process.env.SUPPORT_AI_MODEL || 'claude-haiku-4-5-20251001'
+// Optional pin for the shared helper; when unset, callLLM uses the
+// default of whichever platform target fires (OpenRouter Flash, or
+// first-party Haiku / gpt-4o-mini). Diagnostic stays platform-key-only.
+const DIAG_MODEL = process.env.SUPPORT_AI_MODEL || undefined
 
 const SEVERITIES      = new Set(['critical', 'high', 'normal', 'low'])
 const STATUSES        = new Set(['new', 'diagnosing', 'waiting_on_parish', 'in_progress', 'resolved', 'closed'])
@@ -131,7 +132,7 @@ async function forwardToSupport(ticketId, req, description, pageRoute) {
 
 // ── Diagnostic pass (async — never blocks the submission response) ───────
 export async function runDiagnostic(ticketId, description, pageRoute) {
-  if (!process.env.ANTHROPIC_API_KEY) return // no key, no triage — never an error state
+  if (!isPlatformLLMConfigured()) return // no key, no triage — never an error state
   const startMs = Date.now()
 
   const prompt = `You are the triage agent for OpenChurch. A user reported a problem in-app.
@@ -154,12 +155,12 @@ Page the user was on: ${pageRoute || 'unknown'}
 Report: ${description}`
 
   try {
-    const client = new Anthropic()
-    const response = await client.messages.create({
-      model: DIAG_MODEL, max_tokens: 1000, system: loadSupportContext(),
-      messages: [{ role: 'user', content: prompt }],
+    const { text, usage } = await callLLM({
+      systemPrompt: loadSupportContext(),
+      userPrompt: prompt,
+      maxTokens: 1000,
+      model: DIAG_MODEL,
     })
-    const text = response.content?.find(b => b.type === 'text')?.text || ''
     let diagnosis
     try { diagnosis = JSON.parse(text) } catch {
       diagnosis = { confidence: 'low', narrative: text.slice(0, 400) }
@@ -183,7 +184,7 @@ Report: ${description}`
               updated_at = NOW()
         WHERE id = $1 AND status = 'new' AND severity = 'normal' AND classification IS NULL`,
       [ticketId, JSON.stringify(diagnosis),
-       JSON.stringify({ input: response.usage?.input_tokens, output: response.usage?.output_tokens }),
+       JSON.stringify({ input: usage?.input, output: usage?.output }),
        Date.now() - startMs, sevOk, clsOk])
 
     if (!rowCount) {

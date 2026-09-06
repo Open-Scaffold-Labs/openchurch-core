@@ -146,13 +146,37 @@ Env:
 - `SUPPORT_EMAIL` — if set, every new ticket is forwarded there through the
   vendor-neutral `sendEmail()` seam (Resend when `RESEND_API_KEY` is set,
   console stub otherwise). Best-effort; never blocks submission.
-- `ANTHROPIC_API_KEY` — enables the async AI triage pass (suggested
+- Platform AI keys — enable the async AI triage pass (suggested
   severity/classification, root cause, suspected files). Absent → tickets
-  simply arrive untriaged; nothing errors. `SUPPORT_AI_MODEL` overrides the
-  default (AI Studio's Haiku default).
+  simply arrive untriaged; nothing errors. Order is OpenRouter /
+  OpenAI-compat (`OPENROUTER_API_KEY` or `AI_BASE_URL` + a key), then
+  `ANTHROPIC_API_KEY`, then first-party `OPENAI_API_KEY`. Diagnostic is
+  platform-key-only (org BYOK is not used). `SUPPORT_AI_MODEL` optionally
+  pins the model; when unset, the helper uses the default of whichever
+  target fires. `AI_MODEL` / `OPENROUTER_MODEL` pin the OpenAI-compat
+  default.
 - `ASSISTANT_DAILY_CAP` — in-app assistant messages/org/day (default 300).
-  The assistant follows the AIP.1 org-key chain and does NOT consume AI
-  Studio quota.
+  The assistant follows the shared `callLLM` chain (org BYOK or platform
+  target) and does NOT consume AI Studio quota.
+
+## Platform AI (`callLLM`)
+
+Studio generate/enhance, the in-app assistant, and support-ticket
+diagnostics all go through `server/src/ai/callLLM.js`. Org BYOK stays
+first-party (`anthropic` | `openai` on the org row) and exclusive.
+Platform order:
+
+1. OpenAI-compat — `OPENROUTER_API_KEY`, or `AI_BASE_URL` plus
+   `OPENROUTER_API_KEY` / `OPENAI_API_KEY`. Base defaults to
+   `https://openrouter.ai/api/v1` when the OpenRouter key is set.
+   Model: `AI_MODEL` or `OPENROUTER_MODEL` or `google/gemini-2.5-flash`.
+2. First-party Anthropic — `ANTHROPIC_API_KEY` (Haiku default).
+3. First-party OpenAI — `OPENAI_API_KEY` (`gpt-4o-mini`), skipped when
+   that same key already served step 1.
+
+If a platform target fails, the next configured target is tried. An org
+key never falls through onto the platform bill. `@anthropic-ai/sdk`
+stays because org Anthropic BYOK still needs it.
 
 Deliberately absent (Founder Decision Ledger, Aug 12): AI self-heal
 dispatch. When it's green-lit, the workflow + endpoints land with their own

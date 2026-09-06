@@ -1,20 +1,14 @@
 import { Router } from 'express'
-import Anthropic from '@anthropic-ai/sdk'
-import OpenAI from 'openai'
 import pool from '../db.js'
 import { requireIntParam } from '../utils/params.js'
 import { quotaFor, reserveSlot, releaseSlot, updateSlotProvider } from '../billing/aiQuota.js'
 import { requireRole } from '../middleware/auth.js'
 import { getOrgProvider, encryptApiKey } from '../ai/orgProvider.js'
+import { callLLM } from '../ai/callLLM.js'
 import { resolveLiturgicalContext } from './liturgical.js'
 import { monitor } from '../monitoring/index.js'
 
 const router = Router()
-
-// Default models — kept small and cheap. Callers can still override via
-// body.model if we ever expose that.
-const DEFAULT_ANTHROPIC_MODEL = 'claude-haiku-4-5-20251001'
-const DEFAULT_OPENAI_MODEL    = 'gpt-4o-mini'
 
 // System prompts per generation type. Keeping them here (rather than the
 // client) keeps prompt engineering server-side where it belongs.
@@ -27,78 +21,6 @@ const SYSTEM_PROMPTS = {
 
 const ALLOWED_TYPES = new Set(Object.keys(SYSTEM_PROMPTS))
 
-// Run a prompt through the provider chain. With no org override:
-// platform keys, Anthropic → OpenAI fallback. When the org has plugged
-// in its OWN provider (AIP.1), we use exactly that — their provider,
-// their key, their optional model pin, no silent fallback onto the
-// platform's bill. Returns { text, provider, model } or throws.
-async function runLLM({ systemPrompt, userPrompt, maxTokens = 1024, org = null }) {
-  const errors = []
-
-  if (org?.provider === 'anthropic') {
-    const model = org.model || DEFAULT_ANTHROPIC_MODEL
-    const client = new Anthropic({ apiKey: org.apiKey })
-    const message = await client.messages.create({
-      model, max_tokens: maxTokens, system: systemPrompt,
-      messages: [{ role: 'user', content: userPrompt }],
-    })
-    const text = message.content?.[0]?.text
-    if (text) return { text, provider: 'anthropic (org key)', model }
-    throw new Error('anthropic (org key): empty response')
-  }
-  if (org?.provider === 'openai') {
-    const model = org.model || DEFAULT_OPENAI_MODEL
-    const client = new OpenAI({ apiKey: org.apiKey })
-    const completion = await client.chat.completions.create({
-      model,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user',   content: userPrompt },
-      ],
-    })
-    const text = completion.choices?.[0]?.message?.content
-    if (text) return { text, provider: 'openai (org key)', model }
-    throw new Error('openai (org key): empty response')
-  }
-
-  if (process.env.ANTHROPIC_API_KEY) {
-    try {
-      const client = new Anthropic()
-      const message = await client.messages.create({
-        model: DEFAULT_ANTHROPIC_MODEL,
-        max_tokens: maxTokens,
-        system: systemPrompt,
-        messages: [{ role: 'user', content: userPrompt }],
-      })
-      const text = message.content?.[0]?.text
-      if (text) return { text, provider: 'anthropic', model: DEFAULT_ANTHROPIC_MODEL }
-    } catch (err) {
-      errors.push(`anthropic: ${err.message}`)
-    }
-  }
-
-  if (process.env.OPENAI_API_KEY) {
-    try {
-      const client = new OpenAI()
-      const completion = await client.chat.completions.create({
-        model: DEFAULT_OPENAI_MODEL,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user',   content: userPrompt },
-        ],
-      })
-      const text = completion.choices?.[0]?.message?.content
-      if (text) return { text, provider: 'openai', model: DEFAULT_OPENAI_MODEL }
-    } catch (err) {
-      errors.push(`openai: ${err.message}`)
-    }
-  }
-
-  const err = new Error(errors.length ? `All providers failed: ${errors.join(' | ')}` : 'No AI provider configured')
-  err.code = errors.length ? 'ALL_FAILED' : 'NO_PROVIDER'
-  throw err
-}
-
 // POST /api/ai/enhance — kept for existing callers.
 router.post('/enhance', async (req, res) => {
   const { text, context } = req.body ?? {}
@@ -109,7 +31,7 @@ router.post('/enhance', async (req, res) => {
   // gated when an org went over — a real cost-leak the AI quota
   // work shipped earlier didn't cover.
   //
-  // Atomic check-and-reserve (closes the TOCTOU race) BEFORE runLLM so we
+  // Atomic check-and-reserve (closes the TOCTOU race) BEFORE callLLM so we
   // never burn credits on a refused call. A reservation failure now FAILS
   // CLOSED — a DB error 503s rather than silently letting the call through
   // and bypassing the cap.
@@ -144,7 +66,7 @@ router.post('/enhance', async (req, res) => {
 
   try {
     const org = await getOrgProvider(req.organizationId).catch(() => null)
-    const { text: result, provider, model } = await runLLM({ systemPrompt, userPrompt, org })
+    const { text: result, provider, model } = await callLLM({ systemPrompt, userPrompt, org })
     // Backfill the provider/model onto the reserved usage row now that we
     // know which provider served the call. Best-effort — never fails the request.
     updateSlotProvider(slotId, { provider, model }).catch(uErr => monitor.error('ai-quota.update', uErr, { orgId: req.organizationId, endpoint: 'enhance' }))
@@ -171,7 +93,7 @@ router.post('/generate', async (req, res) => {
     return res.status(400).json({ error: `Invalid type. Expected one of: ${[...ALLOWED_TYPES].join(', ')}` })
   }
 
-  // Quota gate — must run BEFORE runLLM so we never burn credits on a
+  // Quota gate — must run BEFORE callLLM so we never burn credits on a
   // call we're going to refuse. Failed/refused calls do not count.
   //
   // Atomic check-and-reserve closes the TOCTOU race the plain COUNT(*) gate
@@ -225,7 +147,7 @@ router.post('/generate', async (req, res) => {
     }
 
     const org = await getOrgProvider(req.organizationId).catch(() => null)
-    const { text, provider, model } = await runLLM({
+    const { text, provider, model } = await callLLM({
       systemPrompt: SYSTEM_PROMPTS[type],
       userPrompt,
       org,

@@ -11908,16 +11908,38 @@ describe('in-app assistant (SUP.3)', () => {
   })
 
   it('reports availability so the widget can hide an assistant that cannot answer', async () => {
-    delete process.env.ANTHROPIC_API_KEY
-    const off = await request(server).get('/api/assistant/status')
-      .set('Authorization', `Bearer ${tokenA}`)
-    expect(off.status).toBe(200)
-    expect(off.body.available).toBe(false)
-    process.env.ANTHROPIC_API_KEY = 'test-key-present'
-    const on = await request(server).get('/api/assistant/status')
-      .set('Authorization', `Bearer ${tokenA}`)
-    expect(on.body.available).toBe(true)
-    delete process.env.ANTHROPIC_API_KEY
+    const prev = {
+      ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+      OPENAI_API_KEY: process.env.OPENAI_API_KEY,
+      OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY,
+      AI_BASE_URL: process.env.AI_BASE_URL,
+    }
+    try {
+      delete process.env.ANTHROPIC_API_KEY
+      delete process.env.OPENAI_API_KEY
+      delete process.env.OPENROUTER_API_KEY
+      delete process.env.AI_BASE_URL
+      const off = await request(server).get('/api/assistant/status')
+        .set('Authorization', `Bearer ${tokenA}`)
+      expect(off.status).toBe(200)
+      expect(off.body.available).toBe(false)
+
+      process.env.OPENROUTER_API_KEY = 'test-or-key-present'
+      const viaRouter = await request(server).get('/api/assistant/status')
+        .set('Authorization', `Bearer ${tokenA}`)
+      expect(viaRouter.body.available).toBe(true)
+      delete process.env.OPENROUTER_API_KEY
+
+      process.env.ANTHROPIC_API_KEY = 'test-key-present'
+      const on = await request(server).get('/api/assistant/status')
+        .set('Authorization', `Bearer ${tokenA}`)
+      expect(on.body.available).toBe(true)
+    } finally {
+      for (const [k, v] of Object.entries(prev)) {
+        if (v == null) delete process.env[k]
+        else process.env[k] = v
+      }
+    }
   })
 
   it('enforces the per-org daily cap before touching any provider', async () => {
