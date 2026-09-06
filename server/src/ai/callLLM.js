@@ -30,8 +30,7 @@ export const DEFAULT_OPENAI_MODEL = 'gpt-4o-mini'
 export const DEFAULT_OPENROUTER_MODEL = 'google/gemini-2.5-flash'
 export const DEFAULT_OPENROUTER_BASE = 'https://openrouter.ai/api/v1'
 
-function trimEnv(name) {
-  const v = process.env[name]
+function trim(v) {
   return v == null ? '' : String(v).trim()
 }
 
@@ -70,7 +69,7 @@ function modelFor(kind, { orgModel, model }) {
   if (model) return model
   if (kind === 'anthropic') return DEFAULT_ANTHROPIC_MODEL
   if (kind === 'openai') return DEFAULT_OPENAI_MODEL
-  return trimEnv('AI_MODEL') || trimEnv('OPENROUTER_MODEL') || DEFAULT_OPENROUTER_MODEL
+  return trim(process.env.AI_MODEL) || trim(process.env.OPENROUTER_MODEL) || DEFAULT_OPENROUTER_MODEL
 }
 
 function isOpenRouterBase(baseURL) {
@@ -78,9 +77,9 @@ function isOpenRouterBase(baseURL) {
 }
 
 function platformCompatTarget() {
-  const openrouterKey = trimEnv('OPENROUTER_API_KEY')
-  const openaiKey = trimEnv('OPENAI_API_KEY')
-  const configuredBase = stripSlash(trimEnv('AI_BASE_URL'))
+  const openrouterKey = trim(process.env.OPENROUTER_API_KEY)
+  const openaiKey = trim(process.env.OPENAI_API_KEY)
+  const configuredBase = stripSlash(trim(process.env.AI_BASE_URL))
   const baseURL = configuredBase || (openrouterKey ? DEFAULT_OPENROUTER_BASE : '')
   const apiKey = openrouterKey || (baseURL ? openaiKey : '')
   if (!baseURL || !apiKey) return null
@@ -93,9 +92,9 @@ function platformCompatTarget() {
 // platform key can serve a call — including OpenRouter-only deploys.
 export function isPlatformLLMConfigured() {
   return Boolean(
-    trimEnv('OPENROUTER_API_KEY')
-    || trimEnv('ANTHROPIC_API_KEY')
-    || trimEnv('OPENAI_API_KEY')
+    trim(process.env.OPENROUTER_API_KEY)
+    || trim(process.env.ANTHROPIC_API_KEY)
+    || trim(process.env.OPENAI_API_KEY)
   )
 }
 
@@ -113,7 +112,7 @@ export function listPlatformTargets({ model } = {}) {
       model: modelFor('openai-compat', { model }),
     })
   }
-  const anthropicKey = trimEnv('ANTHROPIC_API_KEY')
+  const anthropicKey = trim(process.env.ANTHROPIC_API_KEY)
   if (anthropicKey) {
     targets.push({
       kind: 'anthropic',
@@ -122,7 +121,7 @@ export function listPlatformTargets({ model } = {}) {
       model: modelFor('anthropic', { model }),
     })
   }
-  const openaiKey = trimEnv('OPENAI_API_KEY')
+  const openaiKey = trim(process.env.OPENAI_API_KEY)
   if (openaiKey && !compat?.usedOpenAIKey) {
     targets.push({
       kind: 'openai',
@@ -145,8 +144,8 @@ function orgTarget(org, model) {
 }
 
 function openaiCompatHeaders(baseURL) {
-  if (!isOpenRouterBase(baseURL) && !trimEnv('OPENROUTER_API_KEY')) return undefined
-  const referer = trimEnv('CLIENT_URL') || trimEnv('BASE_URL') || 'https://openchurch.vercel.app'
+  if (!isOpenRouterBase(baseURL) && !trim(process.env.OPENROUTER_API_KEY)) return undefined
+  const referer = trim(process.env.CLIENT_URL) || trim(process.env.BASE_URL) || 'https://openchurch.vercel.app'
   return {
     'HTTP-Referer': referer,
     'X-Title': 'OpenChurch',
