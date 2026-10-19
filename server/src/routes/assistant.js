@@ -1,6 +1,10 @@
 // Assistant — in-app support chat (SUP.3).
 //
-//   POST /api/assistant           → { question, page_route, history[] } → { answer }
+//   POST /api/assistant           → { question, page_route, help_key?, history[] } → { answer }
+//
+// help_key (optional) names a Help-panel guide entry. It is validated
+// against the static help content's own keys; the guide TEXT is built on
+// the server (ai/assistantGuide.js), never taken from the request.
 //   POST /api/assistant/:id/feedback → thumbs up/down on an answer
 //
 // Mount (app.js):
@@ -21,17 +25,17 @@
 // chancery, never an answer. It also never invents features: if it doesn't
 // know, it says so and points at Report a Problem.
 
+import { randomUUID } from 'node:crypto'
 import { Router } from 'express'
-import Anthropic from '@anthropic-ai/sdk'
+import { dispatch, available, refusalBody } from '../ai/gate.js'
+import { routeTemplate } from '../ai/routeTemplate.js'
+import { CAPABILITIES } from '../ai/policy.js'
+import { resolveHelpKey, guideBlock, messageBytes } from '../ai/assistantGuide.js'
 import pool from '../db.js'
-import { getOrgProvider } from '../ai/orgProvider.js'
 import { monitor } from '../monitoring/index.js'
 
 const router = Router()
 
-// Same default as AI Studio (small, cheap, known-good); SUPPORT_AI_MODEL
-// upgrades the assistant + diagnostic together.
-const DEFAULT_MODEL = process.env.SUPPORT_AI_MODEL || 'claude-haiku-4-5-20251001'
 const DAILY_CAP = Number(process.env.ASSISTANT_DAILY_CAP) || 300
 const MAX_HISTORY = 12 // turns kept from the client-supplied history
 
@@ -87,24 +91,17 @@ async function todayCount(orgId) {
   return r.n
 }
 
-async function runChat({ org, messages }) {
-  if (org?.provider === 'anthropic') {
-    const model = org.model || DEFAULT_MODEL
-    const client = new Anthropic({ apiKey: org.apiKey })
-    const m = await client.messages.create({ model, max_tokens: 700, system: SYSTEM_PROMPT, messages })
-    const text = m.content?.[0]?.text
-    if (text) return { text, provider: 'anthropic (org key)', model }
-    throw new Error('anthropic (org key): empty response')
-  }
-  // Org OpenAI keys fall through to platform for the assistant (chat-shape
-  // differences aren't worth a second code path here); platform Anthropic:
-  if (process.env.ANTHROPIC_API_KEY) {
-    const client = new Anthropic()
-    const m = await client.messages.create({ model: DEFAULT_MODEL, max_tokens: 700, system: SYSTEM_PROMPT, messages })
-    const text = m.content?.[0]?.text
-    if (text) return { text, provider: 'anthropic', model: DEFAULT_MODEL }
-  }
-  throw new Error('No AI provider available')
+// The assistant's one outbound seam is ai/gate.js dispatch (platform stop,
+// explicit routing, input bound). A parish whose own key is OpenAI is
+// refused visibly; it is never answered on the platform key.
+//
+// accounting: each POST is one request with its own server-generated id
+// (the ledger's idempotency key). On the platform-managed route the gate
+// reserves it in ochr_ai_ledger before sending and audits it in
+// ochr_ai_audit (OSL AI plan P1). A parish's own key is not accounted.
+async function runChat({ orgId, userId, messages }) {
+  return dispatch({ orgId, capabilityId: 'parish_assistant_v1', system: SYSTEM_PROMPT, messages, maxTokens: 700,
+    accounting: { requestId: randomUUID(), actorId: userId } })
 }
 
 // GET /api/assistant/status — can this org get an answer at all?
@@ -113,17 +110,9 @@ async function runChat({ org, messages }) {
 // than no button ("Anxiety is a Defect"). Availability = platform key,
 // or the org's own Anthropic key (AIP.1).
 router.get('/status', async (req, res) => {
-  try {
-    let available = Boolean(process.env.ANTHROPIC_API_KEY)
-    if (!available) {
-      const org = await getOrgProvider(req.organizationId).catch(() => null)
-      available = org?.provider === 'anthropic'
-    }
-    res.set('Cache-Control', 'private, max-age=300')
-    res.json({ available })
-  } catch {
-    res.json({ available: false })
-  }
+  const ok = await available(req.organizationId, 'parish_assistant_v1')
+  res.set('Cache-Control', 'private, max-age=60')
+  res.json({ available: ok })
 })
 
 // POST /api/assistant
@@ -131,7 +120,9 @@ router.post('/', async (req, res) => {
   const question = typeof req.body?.question === 'string' ? req.body.question.trim() : ''
   if (!question) return res.status(400).json({ error: 'Question is required' })
   if (question.length > 2000) return res.status(400).json({ error: 'Question is too long' })
-  const pageRoute = typeof req.body?.page_route === 'string' ? req.body.page_route.slice(0, 200) : null
+  // A route is a path. A query or fragment can carry ids, codes or a
+  // search the user typed; none of it goes to the model or the log table.
+  const pageRoute = routeTemplate(req.body?.page_route)
 
   try {
     const used = await todayCount(req.organizationId)
@@ -146,26 +137,35 @@ router.post('/', async (req, res) => {
       ? req.body.history
           .filter(t => t && (t.role === 'user' || t.role === 'assistant') && typeof t.content === 'string')
           .slice(-MAX_HISTORY)
-          .map(t => ({ role: t.role, content: t.content.slice(0, 4000) }))
+          .map(t => ({ role: t.role, content: t.content.slice(0, 1000) }))
       : []
 
     const contextLine = pageRoute ? `(User is currently on page: ${pageRoute})\n\n` : ''
-    const messages = [...history, { role: 'user', content: contextLine + question }]
+    // Page-guide grounding (S2): static OpenChurch help text for this page,
+    // chosen server-side and sized to the capability's remaining input bound.
+    const guide = guideBlock(resolveHelpKey(req.body?.help_key, pageRoute), {
+      otherBytes: messageBytes([...history, { content: contextLine + question }]),
+      maxInputBytes: CAPABILITIES.parish_assistant_v1.maxInputBytes,
+    })
+    const messages = [...history, { role: 'user', content: guide + contextLine + question }]
 
-    const org = await getOrgProvider(req.organizationId).catch(() => null)
     const started = Date.now()
-    const { text, provider, model } = await runChat({ org, messages })
+    const { text, provider, model } = await runChat({ orgId: req.organizationId, userId: req.user.id, messages })
 
     const { rows: [logged] } = await pool.query(
       `INSERT INTO ochr_assistant_messages
          (organization_id, user_id, page_route, question, answer, provider, model, duration_ms)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
-      [req.organizationId, req.user.id, pageRoute, question, text, provider, model, Date.now() - started])
+      // Operational telemetry is metadata only (TARS #280 disposition 3): the
+      // question and answer text are not stored; the answer is returned once.
+      [req.organizationId, req.user.id, pageRoute, null, null, provider, model, Date.now() - started])
 
     res.json({ id: logged.id, answer: text })
   } catch (err) {
     monitor.error('assistant.chat', err, { orgId: req.organizationId })
-    res.status(500).json({ error: 'The assistant is unavailable right now \u2014 the Help panel below has the full guide.' })
+    const r = refusalBody(err)
+    if (r) return res.status(r.status).json(r.body)
+    res.status(500).json({ code: 'ai_failed', error: 'The assistant is unavailable right now \u2014 the Help panel below has the full guide.' })
   }
 })
 
@@ -175,12 +175,12 @@ router.post('/:id/feedback', async (req, res) => {
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'Invalid id' })
   const feedback = req.body?.feedback
   if (!['up', 'down'].includes(feedback)) return res.status(400).json({ error: 'Feedback must be up or down' })
-  const note = typeof req.body?.note === 'string' ? req.body.note.trim().slice(0, 500) || null : null
   try {
     const { rowCount } = await pool.query(
-      `UPDATE ochr_assistant_messages SET feedback = $2, feedback_note = $3
-        WHERE id = $1 AND organization_id = $4`,
-      [id, feedback, note, req.organizationId])
+      // Own answers only; a free-text note is not stored (metadata only).
+      `UPDATE ochr_assistant_messages SET feedback = $2
+        WHERE id = $1 AND organization_id = $3 AND user_id = $4`,
+      [id, feedback, req.organizationId, req.user.id])
     if (!rowCount) return res.status(404).json({ error: 'Message not found' })
     res.json({ ok: true })
   } catch (err) {

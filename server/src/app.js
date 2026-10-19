@@ -15,11 +15,18 @@ import express from 'express'
 import cors from 'cors'
 
 import pool from './db.js'
-import { paymentsProvider, paymentsConfigured, paymentsCanMoveMoney, stubWouldFakeMoney } from './payments/index.js'
+import { dbIdentity, UNKNOWN_IDENTITY } from './monitoring/dbIdentity.js'
+import { paymentsProvider, paymentsConfigured, paymentsCanMoveMoney, paymentsWebhookReady, stubWouldFakeMoney } from './payments/index.js'
 import { EXPECTED_MIGRATION } from './migrations/names.js'
 import { appliedMigration } from './migrations/applied.js'
 import { requireSuperAdmin } from './middleware/superAdmin.js'
 import { requireAuth, gateMutations, requireRole, requireOrgType } from './middleware/auth.js'
+import { isAllowedOrigin, rejectCrossSiteMutation } from './auth/sessionCookie.js'
+import {
+  CONTENT_SECURITY_POLICY_REPORT_ONLY,
+  PERMISSIONS_POLICY,
+  REFERRER_POLICY,
+} from './security/browserPolicies.js'
 import { auditLog } from './middleware/auditLog.js'
 import authRouter from './routes/auth.js'
 import clientsRouter from './routes/clients.js'
@@ -73,6 +80,7 @@ import checklistsRouter from './routes/checklists.js'
 import feedbackRouter, { adminRouter as feedbackAdminRouter } from './routes/feedback.js'
 import supportTicketsRouter from './routes/supportTickets.js'
 import assistantRouter from './routes/assistant.js'
+import aiSwitchRouter from './routes/aiSwitch.js'
 import notificationPrefsRouter from './routes/notificationPrefs.js'
 import unsubscribeRouter from './routes/unsubscribe.js'
 import emailWebhookRouter from './routes/emailWebhook.js'
@@ -91,6 +99,7 @@ import { kioskAdminRouter, kioskPublicRouter } from './routes/kiosk.js'
 import feeSchedulesRouter from './routes/feeSchedules.js'
 import invoicesRouter from './routes/invoices.js'
 import importsRouter from './routes/imports.js'
+import { maskPath } from './utils/redact.js'
 
 const app = express()
 
@@ -98,36 +107,45 @@ const app = express()
 // real client IP. Vercel terminates TLS at its edge and forwards; without
 // this, every rate-limit key would collapse to the same internal IP.
 app.set('trust proxy', 1)
+// ARG-LEAK-3: don't advertise the framework.
+app.disable('x-powered-by')
 
-// CORS allowlist (audit H10). Origins come from CORS_ORIGINS (comma-
-// separated) with CLIENT_URL as the always-trusted default. Requests
-// with no Origin header (curl, server-to-server, same-origin PWA
-// fetches) pass — CORS only governs browsers doing cross-origin reads.
-// Outside production, localhost dev servers are allowed so dev "just
-// works" with no env setup.
-const ALLOWED_ORIGINS = new Set(
-  [
-    ...(process.env.CORS_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean),
-    process.env.CLIENT_URL,
-  ].filter(Boolean).map(u => u.replace(/\/$/, ''))
-)
+// CORS allowlist (audit H10). Origins come from CLIENT_URL,
+// DIOCESE_CLIENT_URL, and CORS_ORIGINS. Requests with no Origin header
+// (curl, server-to-server, same-origin PWA fetches) pass — CORS only
+// governs browsers doing cross-origin reads. Outside production,
+// localhost dev servers are allowed so dev "just works" with no env
+// setup. credentials: true is required so the browser will accept and
+// send the httpOnly session cookie on credentialed fetches.
 app.use(cors({
+  credentials: true,
   origin(origin, cb) {
-    if (!origin) return cb(null, true)
-    if (ALLOWED_ORIGINS.has(origin.replace(/\/$/, ''))) return cb(null, true)
-    if (process.env.NODE_ENV !== 'production' && /^http:\/\/localhost:\d+$/.test(origin)) {
-      return cb(null, true)
-    }
+    if (isAllowedOrigin(origin)) return cb(null, true)
     return cb(null, false) // not an error — just no CORS headers for this origin
   },
 }))
 
 // Security headers (audit H10) — hand-set, no new dependency. HSTS is
 // meaningful only behind TLS, which Vercel guarantees in production.
+//
+// OC-READY-01-014 adds Content-Security-Policy-Report-Only and a
+// conservative Permissions-Policy. HARD: do not set Content-Security-Policy
+// (Enforce) here. Report-Only is the only CSP mode this PR ships; flipping
+// to Enforce is a separate decision after reports are reviewed.
+// Session/cookie auth is unchanged — this middleware only calls res.set.
 app.use((_req, res, next) => {
   res.set('X-Content-Type-Options', 'nosniff')
   res.set('X-Frame-Options', 'DENY')
-  res.set('Referrer-Policy', 'no-referrer')
+  res.set('Referrer-Policy', REFERRER_POLICY)
+  res.set('Content-Security-Policy-Report-Only', CONTENT_SECURITY_POLICY_REPORT_ONLY)
+  res.set('Permissions-Policy', PERMISSIONS_POLICY)
+  // ARG-LEAK-3: API responses carry session tokens, giving data and
+  // whole-parish exports; no browser or shared cache may keep them. A
+  // route that wants caching (e.g. a public feed) can still override.
+  if (_req.path.startsWith('/api')) {
+    res.set('Cache-Control', 'no-store')
+    res.set('Pragma', 'no-cache')
+  }
   if (process.env.NODE_ENV === 'production') {
     res.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains')
   }
@@ -150,9 +168,16 @@ app.use('/api/email', emailWebhookRouter)
 // are authed so there's no unauth'd DoS vector through this limit.
 app.use(express.json({ limit: '10mb' }))
 
+// Cookie CSRF belt: SameSite=Lax is the strategy (see sessionCookie.js).
+// This refuses a cookie-bearing mutation whose Origin is present and
+// not on the allowlist — CORS hides the response from a foreign page;
+// this refuses the write.
+app.use(rejectCrossSiteMutation)
+
 // Health check (H.1) — a real probe: ping the DB and report which
 // payments provider is live (stub vs a real one). 503 if the DB is
-// unreachable so a load balancer / uptime monitor can react.
+// unreachable OR its schema is behind the migration this build expects,
+// so a load balancer / uptime monitor can react to either.
 //
 // It also answers the release-truth question (RELIABILITY 1.1): which
 // commit is running, in which environment, with which migrations
@@ -174,16 +199,57 @@ app.use(express.json({ limit: '10mb' }))
 // then be silently logging a different commit than /health reports.
 
 
+// One stderr line when the health probe cannot ask the database.
+// `stage` is `ping` (SELECT 1) or `ledger` (appliedMigration()).
+// `code` is a five-character SQLSTATE, one of the network codes below,
+// or the literal `unknown`. Message, stack, detail, hint, where, and
+// the connection string are not fields on this line.
+const HEALTH_DB_NETWORK_CODES = new Set([
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'ENOTFOUND',
+  'ETIMEDOUT',
+  'EAI_AGAIN',
+  'EPIPE',
+])
+
+function healthDbFailureCode(err) {
+  const code = typeof err?.code === 'string' ? err.code : ''
+  if (/^[0-9A-Z]{5}$/.test(code)) return code
+  if (HEALTH_DB_NETWORK_CODES.has(code)) return code
+  return 'unknown'
+}
+
+function logHealthDbFailure(stage, err) {
+  console.error(JSON.stringify({
+    event: 'health_db',
+    stage,
+    code: healthDbFailureCode(err),
+  }))
+}
+
+// The ping doubles as the identity probe: the database and schema the
+// fingerprint names come from this exact successful round trip.
+export const HEALTH_PING_SQL = 'SELECT current_database() AS database, current_schema() AS schema'
+
 async function healthHandler(_req, res) {
   let db = 'ok'
   let migration = 'unknown'
+  let probe = null
   try {
-    await pool.query('SELECT 1')
-    // Serverless never calls runAllMigrations(), so this is where a
-    // Vercel cold start gets itself into the release log. Once per
-    // process, fire-and-forget, and every failure swallowed inside —
-    // bookkeeping about deploys must never be why a health check answers
-    // 503.
+    const r = await pool.query(HEALTH_PING_SQL)
+    const row = r?.rows?.[0]
+    probe = row ? { database: row.database, schema: row.schema } : null
+  } catch (err) {
+    logHealthDbFailure('ping', err)
+    db = 'error'
+  }
+  // Serverless never calls runAllMigrations(), so this is where a
+  // Vercel cold start gets itself into the release log. Once per
+  // process, fire-and-forget, and every failure swallowed inside —
+  // bookkeeping about deploys must never be why a health check answers
+  // 503. A ping that failed never starts it.
+  if (db === 'ok') {
     recordRelease(releaseInfo()).catch(() => {})
     // The applied migration is the other half of "what is running": the
     // code and the schema can disagree, and that disagreement is exactly
@@ -193,13 +259,43 @@ async function healthHandler(_req, res) {
     // migrations/applied.js for why, and for the `999-race-sim` row in
     // production that made it necessary. The same function answers for
     // release/log.js, so the two can no longer drift apart.
-    migration = (await appliedMigration()) ?? migration
-  } catch {
-    db = 'error'
+    //
+    // A throw here is still a database failure on the public payload —
+    // the same 503, db 'error', schema 'unknown' the single catch used
+    // to return. The log is the only place the stage is named.
+    try {
+      migration = (await appliedMigration()) ?? migration
+    } catch (err) {
+      logHealthDbFailure('ledger', err)
+      db = 'error'
+    }
   }
-  res.status(db === 'ok' ? 200 : 503).json({
-    status:            db === 'ok' ? 'ok' : 'degraded',
+  // The verdict has to READ the disagreement it reports. Both migration
+  // fields were already in the payload, but `status` and the HTTP code came
+  // from the ping alone — so a database at 098 under code at 099 answered
+  // 200 {status:'ok'} while every route touching the 099 table answered
+  // 500 (reproduced 8 Sep). prod-health.yml reads `status` and `db` and
+  // nothing else; a monitor that is told "ok" by the one field it reads is
+  // a monitor that has been switched off. Schema behind code is degraded,
+  // and degraded is 503, same as an unreachable database: the deploy runs
+  // migrations before the code goes live, so on a good deploy these agree,
+  // and a 503 here means the deploy did not do what it said.
+  //
+  // Only judged when the ping succeeded — with db 'error' the migration is
+  // 'unknown', which is the database's fault, not the schema's, and the
+  // payload should not blame both.
+  const schema = db !== 'ok' ? 'unknown' : migration === EXPECTED_MIGRATION ? 'ok' : 'behind'
+  const healthy = db === 'ok' && schema === 'ok'
+  // A failed probe (ping OR ledger) never claims an identity.
+  const db_identity = db === 'ok' ? dbIdentity(process.env.DATABASE_URL, probe) : UNKNOWN_IDENTITY
+  res.status(healthy ? 200 : 503).json({
+    status:            healthy ? 'ok' : 'degraded',
     db,
+    // Which half is wrong. `db` already says whether the database answered;
+    // this says whether what it holds is what this build expects, so a
+    // reader of a 503 does not have to compare the two migration fields
+    // below by eye to find out.
+    schema,
     payments_provider: paymentsProvider(),
     // 'stub' above means two different things: somebody chose the stub, or
     // nobody chose anything — and production is the latter (the public
@@ -213,10 +309,15 @@ async function healthHandler(_req, res) {
     //                         somebody typed stripe, nothing more.
     //   payments_configured — whether anybody chose at all.
     //   payments_capable    — whether THIS deployment could actually move
-    //                         money right now: a real provider AND the
-    //                         credentials it needs. Stripe without
+    //                         money right now AND record that it did: a
+    //                         real provider, the credentials it needs, and
+    //                         a webhook receiver that can verify what the
+    //                         provider sends back. Stripe without
     //                         PAYMENTS_PROVIDER_SECRET is selected and
-    //                         configured and cannot charge anything.
+    //                         configured and cannot charge anything; Stripe
+    //                         without BILLING_WEBHOOK_SECRET charges and
+    //                         then cannot write the row (see
+    //                         payments_webhook_ready).
     //   payments_safe       — whether a synthetic charge could be recorded
     //                         as a received gift here. False is the alarm:
     //                         it means the stub is running on a deployment
@@ -229,6 +330,13 @@ async function healthHandler(_req, res) {
     // A deployment-wide "giving enabled" would be a fifth thing that is not
     // true of any particular church.
     payments_capable: paymentsCanMoveMoney(),
+    // The webhook half of "capable", on its own, so an operator reading
+    // capable:false can see WHICH half is missing. A live gift is recorded
+    // by the provider's webhook and nothing else (payments/index.js,
+    // recordDonationCheckoutCompleted); a receiver with no signing secret
+    // refuses every delivery, and the provider keeps retrying into it for
+    // three days before giving up.
+    payments_webhook_ready: paymentsWebhookReady(),
     payments_safe: !stubWouldFakeMoney(),
     ...releaseInfo(),
     migration,
@@ -236,6 +344,9 @@ async function healthHandler(_req, res) {
     // makes a reader hold the repo in their head to judge it; reporting both
     // makes a schema-behind-code deploy visible in the payload itself.
     migration_expected: EXPECTED_MIGRATION,
+    // Which database answered — non-secret, versioned, diagnostic only.
+    // docs/HEALTH-DB-IDENTITY.md
+    db_identity,
   })
 }
 app.get('/health', healthHandler)
@@ -304,7 +415,9 @@ app.use('/api/events',        requireAuth, writeGate, auditLog('event'),  events
 // eventForOrg().
 app.use('/api/events/:id/attendance', requireAuth, writeGate, auditLog('attendance'), attendanceRouter)
 app.use('/api/schedule',      requireAuth, writeGate, scheduleRouter)
-app.use('/api/ai',            requireAuth, writeGate, aiRouter)
+// Parish capabilities only: a diocese session is refused until an approved
+// diocese capability is wired (TARS #280 disposition 8).
+app.use('/api/ai',            requireAuth, requireOrgType('parish'), writeGate, aiRouter)
 app.use('/api/tasks',         requireAuth, writeGate, auditLog('task'),   tasksRouter)
 app.use('/api/calendar',      requireAuth, writeGate, auditLog('calendar_event'), calendarRouter)
 app.use('/api/availability',  requireAuth, writeGate, auditLog('availability'), availabilityRouter)
@@ -355,7 +468,9 @@ app.use('/api/imports',       requireAuth, writeGate, auditLog('import_batch'), 
 // In-app assistant (SUP.3) — every signed-in role may ask (viewers get
 // stuck too). Per-org daily cap inside the route; no writeGate because
 // the only "mutation" is the assistant's own usage log.
-app.use('/api/assistant',     requireAuth, assistantRouter)
+app.use('/api/assistant',     requireAuth, requireOrgType('parish'), assistantRouter)
+// Platform AI stop (Stage 7): operator seats only, 404 otherwise.
+app.use('/api/admin/ai-switch', requireAuth, aiSwitchRouter)
 app.use('/api/notifications', requireAuth, writeGate, notificationsRouter)
 app.use('/api/liturgical',    requireAuth, liturgicalRouter)
 // The Sunday Packet (SPK.1) — read-only aggregation; any signed-in role
@@ -475,6 +590,15 @@ app.use('/api/cron', cronRouter)
 // short reference id the user can quote in support.
 app.use((err, req, res, _next) => {
   const ref = Math.random().toString(36).slice(2, 10)
+  // ARG-LEAK-1: body-parser errors (malformed JSON, oversize, bad charset)
+  // carry the raw request body in err.body, and V8's SyntaxError message
+  // quotes it — a malformed login would write the password to the log.
+  // Answer 4xx and log only type/status, never message, stack or body.
+  if (err && typeof err.type === 'string' && (err.type.startsWith('entity.') || err.type.endsWith('.unsupported') || err.type === 'request.aborted' || err.type === 'request.size.invalid' || err.type === 'stream.encoding.set' || err.type === 'stream.not.readable' || err.type === 'parameters.too.many')) {
+    const status = Number.isInteger(err.status) && err.status >= 400 && err.status < 500 ? err.status : 400
+    console.warn('[bad-request]', { ref, method: req.method, path: maskPath(req.path), type: err.type, status })
+    return res.status(status).json({ error: status === 413 ? 'Request body too large' : 'Malformed request body', ref })
+  }
   console.error('[unhandled]', {
     ref,
     method: req.method,
@@ -489,3 +613,4 @@ app.use((err, req, res, _next) => {
 })
 
 export default app
+

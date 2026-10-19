@@ -38,7 +38,7 @@ const stubFetch = (routes = []) => vi.stubGlobal('fetch', vi.fn(async (url, opts
   for (const [match, handler] of routes) if (match(u, method)) return handler()
   if (u.includes(`/api/clients/${MEMBER.id}/donations`)) return ok({ lines: [], total: 0, gift_count: 0 })
   if (u.match(/\/api\/clients\/\d+$/))                   return ok(MEMBER)
-  return ok({ records: [], entries: [], checkins: [], pledges: [], dates: [] })
+  return ok({ records: [], entries: [], checkins: [], pledges: [], dates: [], unavailability: [] })
 }))
 
 const mount = () => render(
@@ -76,6 +76,40 @@ describe('the member read', () => {
     expect(await screen.findByText(NOT_FOUND)).toBeInTheDocument()
     expect(screen.queryByText(UNREAD)).not.toBeInTheDocument()
   })
+
+  for (const [label, body] of [
+    ['a 200 empty object', {}],
+    ['a 200 body with the wrong id', { id: 99999, name: 'Other' }],
+    ['a 200 array body', []],
+    ['a 200 null body', null],
+    ['a 200 body whose name is not a string', { id: 20013, name: null }],
+  ]) {
+    it(`${label} is a failed read, not spinner-forever and not "Member not found"`, async () => {
+      stubFetch([[u => /\/api\/clients\/\d+$/.test(u), () => ok(body)]]); mount()
+      await waitFor(() => expect(screen.getAllByText(UNREAD).length).toBeGreaterThan(0))
+      expect(screen.queryByText(NOT_FOUND)).not.toBeInTheDocument()
+      expect(screen.queryByText(/belongs to another organization/i)).not.toBeInTheDocument()
+      // Loading spinner must not remain once the bad 200 resolved.
+      expect(document.querySelector('.animate-spin')).not.toBeInTheDocument()
+    })
+  }
+
+  it('a 200 wrapper with the name only nested is a failed read', async () => {
+    stubFetch([[u => /\/api\/clients\/\d+$/.test(u), () => ok({ id: MEMBER.id, client: { name: 'Nested Only' } })]])
+    mount()
+    await waitFor(() => expect(screen.getAllByText(UNREAD).length).toBeGreaterThan(0))
+    expect(screen.queryByText('Nested Only')).not.toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Nested Only' })).not.toBeInTheDocument()
+    expect(document.querySelector('.animate-spin')).not.toBeInTheDocument()
+  })
+
+  it('CONTROL — a flat name is the profile, even when a nested name is also present', async () => {
+    stubFetch([[u => /\/api\/clients\/\d+$/.test(u), () => ok({ ...MEMBER, name: 'Flat Name', client: { name: 'Nested Only' } })]])
+    mount()
+    expect(await screen.findByRole('heading', { name: 'Flat Name' })).toBeInTheDocument()
+    expect(screen.queryByText('Nested Only')).not.toBeInTheDocument()
+    expect(screen.queryByText(UNREAD)).not.toBeInTheDocument()
+  })
 })
 
 describe('the donations read', () => {
@@ -101,5 +135,12 @@ describe('the donations read', () => {
     stubFetch(); mount()
     expect(await screen.findByText(NO_GIFTS)).toBeInTheDocument()
     expect(screen.queryByText(UNREAD)).not.toBeInTheDocument()
+  })
+
+  it('a 200 with no lines list is unread, and the profile stays up', async () => {
+    stubFetch([[u => u.includes('/donations'), () => ok({})]]); mount()
+    expect(await screen.findByText('Default Probe')).toBeInTheDocument()
+    await waitFor(() => expect(screen.getAllByText(UNREAD).length).toBeGreaterThan(0))
+    expect(screen.queryByText(NO_GIFTS)).not.toBeInTheDocument()
   })
 })

@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useMemo, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { CheckCircle2, AlertTriangle, Info, X } from 'lucide-react'
+import { useLocale } from '../i18n'
 
 // App-wide toast notifications. Replaces alert() everywhere — we
 // accumulated a dozen-plus alert() sites once role enforcement
@@ -49,11 +50,12 @@ const VARIANTS = {
 }
 
 export function ToastProvider({ children }) {
+  const { t } = useLocale()
   const [toasts, setToasts] = useState([])
   const idRef = useRef(1)
 
   const dismiss = useCallback((id) => {
-    setToasts(prev => prev.filter(t => t.id !== id))
+    setToasts(prev => prev.filter(item => item.id !== id))
   }, [])
 
   const push = useCallback((kind, message, opts = {}) => {
@@ -80,12 +82,12 @@ export function ToastProvider({ children }) {
       <div
         className="fixed top-4 right-4 z-[100] flex flex-col gap-2 pointer-events-none max-w-sm"
         role="region"
-        aria-label="Notifications"
+        aria-label={t('toast.region')}
         aria-live="polite"
       >
         <AnimatePresence>
-          {toasts.map(t => (
-            <Toast key={t.id} {...t} onDismiss={() => dismiss(t.id)} />
+          {toasts.map(toast => (
+            <Toast key={toast.id} {...toast} onDismiss={() => dismiss(toast.id)} />
           ))}
         </AnimatePresence>
       </div>
@@ -94,6 +96,7 @@ export function ToastProvider({ children }) {
 }
 
 function Toast({ kind, message, onDismiss }) {
+  const { t } = useLocale()
   const v = VARIANTS[kind] || VARIANTS.info
   const Icon = v.Icon
   return (
@@ -111,7 +114,7 @@ function Toast({ kind, message, onDismiss }) {
       <button
         type="button"
         onClick={onDismiss}
-        aria-label="Dismiss"
+        aria-label={t('toast.dismiss')}
         className="shrink-0 opacity-50 hover:opacity-100 transition-opacity -mr-1 -mt-0.5"
       >
         <X size={14} />

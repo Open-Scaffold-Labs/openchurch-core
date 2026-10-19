@@ -67,7 +67,7 @@ export default function TextField({
           {...inputProps}
         />
         {trailing && (
-          <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center">
+          <div className="textfield-trailing absolute right-3 top-1/2 -translate-y-1/2 flex items-center">
             {trailing}
           </div>
         )}

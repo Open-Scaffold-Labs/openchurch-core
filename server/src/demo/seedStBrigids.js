@@ -25,8 +25,16 @@
 // ship. --force still requires the name to match; there is no flag that
 // lets this run against an arbitrary org.
 
+import { realpathSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import pool from '../db.js'
 import { PARISH, CLERGY, FAMILIES, REGISTER, MEMBERS, INTENTIONS, WEEKLY, ministerFor } from './stBrigids.js'
+import {
+  addCivilDays,
+  civilDateInTimeZone,
+  resolveParishTimeZone,
+  weekdayInTimeZone,
+} from '../utils/timezone.js'
 
 const arg = (flag, fallback = null) => {
   const i = process.argv.indexOf(flag)
@@ -41,11 +49,19 @@ const force = has('--force')
 // The fixture is anchored to "today" so the intention book and the week's
 // services are always current — a demo where the last service was in March
 // tells the rector this is a mock-up.
-const iso = d => d.toISOString().slice(0, 10)
-const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x }
-const TODAY = new Date()
-// Sunday of the current week, so WEEKLY's day-of-week offsets land right.
-const SUNDAY = addDays(TODAY, -TODAY.getDay())
+//
+// The anchor is the Sunday that begins the current week in the demo
+// org's timezone (ochr_organizations.timezone; blank or invalid falls
+// back to UTC, the same rule as the signup sample seed). A DATE is a
+// civil day. Date#toISOString().slice(0, 10) is the UTC day, so
+// Saturday 23:00 in America/Los_Angeles stored the Monday after the
+// Sunday that actually started the week.
+
+export function demoSundayAnchor(now, timeZone) {
+  const zone = resolveParishTimeZone(timeZone)
+  const today = civilDateInTimeZone(now, zone)
+  return addCivilDays(today, -weekdayInTimeZone(now, zone))
+}
 
 // Certificate numbers run per book, in date order — B-0001, M-0031, …
 // A register whose numbers are random is a register nobody kept.
@@ -60,15 +76,18 @@ function personIndex() {
   return byKey
 }
 
-async function assertSafe(db) {
-  const { rows } = await db.query('SELECT id, name FROM ochr_organizations WHERE id = $1', [orgId])
-  if (!rows.length) throw new Error(`Organisation ${orgId} does not exist.`)
+async function assertSafe(db, organizationId, force) {
+  const { rows } = await db.query(
+    'SELECT id, name, timezone FROM ochr_organizations WHERE id = $1',
+    [organizationId]
+  )
+  if (!rows.length) throw new Error(`Organisation ${organizationId} does not exist.`)
   const org = rows[0]
 
   if (org.name !== PARISH.name) {
     throw new Error(
       `REFUSING TO SEED.\n` +
-      `  Organisation ${orgId} is named "${org.name}".\n` +
+      `  Organisation ${organizationId} is named "${org.name}".\n` +
       `  This seeder only runs against "${PARISH.name}".\n\n` +
       `  It deletes the target org's members, register and intentions. Pointing it\n` +
       `  at a real parish would destroy a sacramental register, so the name check\n` +
@@ -78,25 +97,32 @@ async function assertSafe(db) {
   }
 
   const { rows: [{ count }] } = await db.query(
-    `SELECT COUNT(*)::int AS count FROM ochr_sacramental_records WHERE organization_id = $1`, [orgId])
+    `SELECT COUNT(*)::int AS count FROM ochr_sacramental_records WHERE organization_id = $1`, [organizationId])
   if (count > 0 && !force) {
     throw new Error(
-      `Organisation ${orgId} already holds ${count} sacramental record(s).\n` +
+      `Organisation ${organizationId} already holds ${count} sacramental record(s).\n` +
       `  Re-run with --force to wipe and re-seed the demo parish.`
     )
   }
   return org
 }
 
-async function seed() {
-  if (!Number.isInteger(orgId) || orgId <= 0) {
-    console.error('Usage: node server/src/demo/seedStBrigids.js --org <id> [--force]')
-    process.exit(1)
+export async function seedStBrigidDemo(db, organizationId, options = {}) {
+  if (!Number.isInteger(organizationId) || organizationId <= 0) {
+    throw new Error('Usage: node server/src/demo/seedStBrigids.js --org <id> [--force]')
   }
+  const now = options.now instanceof Date && !Number.isNaN(options.now.getTime())
+    ? options.now
+    : new Date()
+  const force = options.force === true
 
-  const db = await pool.connect()
+  const org = await assertSafe(db, organizationId, force)
+  const timeZone = resolveParishTimeZone(org.timezone)
+  const today = civilDateInTimeZone(now, timeZone)
+  // Sunday that begins this civil week, so WEEKLY's day-of-week offsets land.
+  const sunday = demoSundayAnchor(now, timeZone)
+
   try {
-    const org = await assertSafe(db)
     await db.query('BEGIN')
 
     // ── Wipe (scoped to this org, every statement) ──
@@ -104,7 +130,7 @@ async function seed() {
       'ochr_mass_intentions', 'ochr_sacramental_records', 'ochr_event_members',
       'ochr_calendar_events', 'ochr_events', 'ochr_donations', 'ochr_clients',
     ]) {
-      await db.query(`DELETE FROM ${table} WHERE organization_id = $1`, [orgId])
+      await db.query(`DELETE FROM ${table} WHERE organization_id = $1`, [organizationId])
     }
 
     // ── Members ──
@@ -113,7 +139,7 @@ async function seed() {
       const { rows: [row] } = await db.query(
         `INSERT INTO ochr_clients (organization_id, name, role, tags, birth_date, joined_date, status)
          VALUES ($1,$2,$3,$4,$5,$6,'active') RETURNING id`,
-        [orgId, m.name, m.role, m.tags, m.born, m.joined])
+        [organizationId, m.name, m.role, m.tags, m.born, m.joined])
       memberId[m.name] = row.id
     }
 
@@ -137,6 +163,11 @@ async function seed() {
       // Historical subjects who are dead or married-out simply don't link —
       // which is correct, and demonstrates that the register survives
       // independently of the membership list (client_id is ON DELETE SET NULL).
+      //
+      // The name on the entry is the fixture's name for that person — Margaret
+      // Anne Kelleher at her baptism, even though the living roster knows her
+      // as Margaret Anne Doyle. Leaving member_name empty made the book follow
+      // the roster, or name nobody at all.
       const linked = memberId[subject.name] ?? null
 
       const meta = {}
@@ -152,10 +183,10 @@ async function seed() {
 
       await db.query(
         `INSERT INTO ochr_sacramental_records
-           (organization_id, client_id, type, date, minister, place, certificate_no, notes, meta_attributes)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-        [orgId, linked, r.t, r.date, ministerFor(r.date), r.place ?? PARISH.name,
-         cert, notes || null, JSON.stringify(meta)])
+           (organization_id, client_id, type, date, minister, place, certificate_no, notes, meta_attributes, member_name)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+        [organizationId, linked, r.t, r.date, ministerFor(r.date), r.place ?? PARISH.name,
+         cert, notes || null, JSON.stringify(meta), subject.name])
 
       if (r.t === 'baptism' && !firstBaptismOf[r.who]) firstBaptismOf[r.who] = true
       registerCount++
@@ -165,7 +196,7 @@ async function seed() {
     let serviceCount = 0
     for (let week = -1; week <= 2; week++) {
       for (const s of WEEKLY) {
-        const date = iso(addDays(SUNDAY, week * 7 + s.dow))
+        const date = addCivilDays(sunday, week * 7 + s.dow)
         // assigned_to is a jsonb array of member ids — it is what the Sunday
         // Packet resolves "Serving this day" from. Acolytes alternate by week
         // so the rota reads like a rota rather than the same two children
@@ -178,41 +209,41 @@ async function seed() {
           `INSERT INTO ochr_calendar_events
              (organization_id, title, date, start_time, end_time, type, liturgical_season, liturgical_color, assigned_to)
            VALUES ($1,$2,$3,$4,$5,'service',$6,$7,$8::jsonb)`,
-          [orgId, s.title, date, s.start, s.end, 'Ordinary Time', 'Green', JSON.stringify(ids)])
+          [organizationId, s.title, date, s.start, s.end, 'Ordinary Time', 'Green', JSON.stringify(ids)])
         serviceCount++
       }
     }
     // The Sunday principal service also lands in the events roster, which is
     // what the assignment/serving flow reads.
-    const sundayISO = iso(SUNDAY)
+    const sundayISO = sunday
     const { rows: [ev] } = await db.query(
       `INSERT INTO ochr_events (organization_id, title, service_division, date, time, location, liturgical_season, liturgical_color, is_public)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,true) RETURNING id`,
-      [orgId, 'Choral Eucharist, Rite II', 'Worship', sundayISO, '10:30', 'Church', 'Ordinary Time', 'Green'])
+      [organizationId, 'Choral Eucharist, Rite II', 'Worship', sundayISO, '10:30', 'Church', 'Ordinary Time', 'Green'])
     for (const who of ['Robert Alan Whitfield', 'Elena Vargas Ruiz', 'Nora Margaret Doyle',
                        'Jennifer Lynn Ferreira', 'Jason Robert Whitfield']) {
       if (memberId[who]) {
         await db.query(
           `INSERT INTO ochr_event_members (event_id, organization_id, member_id) VALUES ($1,$2,$3)`,
-          [ev.id, orgId, memberId[who]])
+          [ev.id, organizationId, memberId[who]])
       }
     }
 
     // ── The intention book ──
     for (const i of INTENTIONS) {
-      const massDate = iso(addDays(TODAY, i.offset))
+      const massDate = addCivilDays(today, i.offset)
       await db.query(
         `INSERT INTO ochr_mass_intentions
            (organization_id, intention, requested_by, requested_by_client_id, mass_date, stipend, status, note)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-        [orgId, i.intention, i.by, memberId[i.by] ?? null, massDate, i.stipend, i.status, i.note ?? null])
+        [organizationId, i.intention, i.by, memberId[i.by] ?? null, massDate, i.stipend, i.status, i.note ?? null])
     }
 
     // ── A little giving history, so Insights isn't a wall of zeros ──
     const CATEGORIES = ['Plate', 'Pledge', 'Altar Flowers', 'Outreach', 'Building Fund']
     let donationCount = 0
     for (let w = 0; w < 26; w++) {
-      const date = iso(addDays(SUNDAY, -w * 7))
+      const date = addCivilDays(sunday, -w * 7)
       for (const m of MEMBERS.slice(2, 14)) {
         // Deterministic pseudo-variation: no Math.random, so two runs of the
         // seeder produce the same parish and screenshots stay reproducible.
@@ -222,7 +253,7 @@ async function seed() {
         await db.query(
           `INSERT INTO ochr_donations (organization_id, donor_name, amount, category, method, date)
            VALUES ($1,$2,$3,$4,$5,$6)`,
-          [orgId, m.name, amount, CATEGORIES[h % CATEGORIES.length], h % 3 === 0 ? 'check' : 'cash', date])
+          [organizationId, m.name, amount, CATEGORIES[h % CATEGORIES.length], h % 3 === 0 ? 'check' : 'cash', date])
         donationCount++
       }
     }
@@ -230,16 +261,45 @@ async function seed() {
     await db.query('COMMIT')
 
     console.log(`\n  ${PARISH.name} — ${PARISH.city}, ${PARISH.state} (founded ${PARISH.founded})`)
-    console.log(`  organisation ${orgId}\n`)
+    console.log(`  organisation ${organizationId}\n`)
     console.log(`    ${MEMBERS.length} members on the roster`)
     console.log(`    ${registerCount} sacramental records, ${ordered[0].date} – ${ordered[ordered.length - 1].date}`)
     console.log(`    ${CLERGY.length} rectors, ${CLERGY[0].from}–present`)
     console.log(`    ${INTENTIONS.length} intentions across the current week`)
     console.log(`    ${serviceCount} services over four weeks`)
     console.log(`    ${donationCount} gifts over six months\n`)
-    console.log(`  Try: /register  ·  /intentions  ·  /register/<id>/certificate\n`)
+    console.log(`  Try: /register  ·  /mass-intentions  ·  /mass-intentions/print  ·  /register/<id>/certificate\n`)
   } catch (err) {
     await db.query('ROLLBACK').catch(() => {})
+    throw err
+  }
+}
+
+// import.meta.url is the resolved module. argv[1] is whatever was typed,
+// including a symlink, so a string compare exits 0 and seeds nothing.
+// A missing argv[1] is not a CLI launch. realpathSync throws ENOENT for
+// a path that is not there and for '-' (node - < script); that must not
+// take down an import of this module.
+export function invokedAsCli() {
+  const entry = process.argv[1]
+  if (!entry) return false
+  try {
+    return realpathSync(entry) === fileURLToPath(import.meta.url)
+  } catch {
+    return false
+  }
+}
+
+async function main() {
+  if (!Number.isInteger(orgId) || orgId <= 0) {
+    console.error('Usage: node server/src/demo/seedStBrigids.js --org <id> [--force]')
+    process.exit(1)
+  }
+
+  const db = await pool.connect()
+  try {
+    await seedStBrigidDemo(db, orgId, { force })
+  } catch (err) {
     console.error(`\n${err.message}\n`)
     process.exitCode = 1
   } finally {
@@ -248,4 +308,4 @@ async function seed() {
   }
 }
 
-seed()
+if (invokedAsCli()) main()

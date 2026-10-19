@@ -48,7 +48,10 @@ const mount = () => render(
 const give = () => screen.queryAllByText(/give/i)
 const MINISTRIES_UNREAD = /couldn'?t load this church'?s ministries/i
 
-beforeEach(() => vi.unstubAllGlobals())
+beforeEach(() => {
+  vi.unstubAllGlobals()
+  localStorage.removeItem('ochr_locale')
+})
 
 describe('CONTROL — a church with giving set up', () => {
   it('offers giving', async () => {

@@ -15,6 +15,27 @@
     transition-duration: 150ms;
   }
 
+  /* Non-essential motion yields when the user asks for less of it.
+     The * rule above puts a 150ms colour transition on every element;
+     Tailwind loops (animate-spin, parchment shimmer) keep moving after
+     that. Both go still here. Colour and state still change — they just
+     change at once. (P8; WCAG 2.2 2.3.3) */
+  @media (prefers-reduced-motion: reduce) {
+    html {
+      scroll-behavior: auto;
+    }
+
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      transition-delay: 0s !important;
+      scroll-behavior: auto !important;
+    }
+  }
+
   /* Warm parchment in light mode; warm near-black in dark mode. */
   body {
     @apply bg-parchment-50 text-ink-800 dark:bg-ink-950 dark:text-parchment-100;
@@ -58,11 +79,32 @@
                area, centred, via a pseudo-element. Use for inline text
                links, where growing the box would break the line it
                sits in. The link still looks like a link; the hit area
-               is simply larger than the ink. */
+               is simply larger than the ink.
+     `.tap-line` — grows the box itself, but only on a coarse pointer,
+               for an inline link whose row already has the vertical
+               room. Use when `.tap-reach` cannot reach: see below. */
   @media (pointer: coarse) {
     .tap {
       min-width: 44px;
       min-height: 44px;
+    }
+
+    /* Auth narthex targets (A11Y-L0-03). `.tap-reach` left the *visual*
+       box under 44px — the audit's getBoundingClientRect of show-password,
+       locale, and forgot-password. This grows the element's own box so
+       the measured hit area is the element, not a clipped ::after. */
+    .tap-auth {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 44px;
+      min-height: 44px;
+    }
+
+    /* Room for a 44px show-password control inside the field. Desktop
+       keeps the tighter right-3 inset. */
+    .textfield-trailing {
+      right: 0;
     }
 
     .tap-reach {
@@ -87,6 +129,73 @@
       width: 100%;
       height: 100%;
     }
+
+    /* `.tap-reach` is silently defeated by any ancestor with
+       overflow:hidden — Tailwind's `truncate` — because an absolutely
+       positioned pseudo-element is clipped to that ancestor's box.
+       Measured on the check-in roster: the ::after computed to a full
+       48px while the real, hit-tested reach was 20px. A box measurement
+       calls that a pass, which is exactly the kind of fix that looks
+       done and does nothing.
+
+       `.tap-line` grows the element's own box instead, so there is
+       nothing to clip. It is display-switching rather than padding, so
+       it must stay inside this query: outside it the link remains a
+       plain inline box and the desktop line is untouched. Use it only
+       where the row already has the vertical room — the roster row is
+       65px on a coarse pointer, because its buttons are already 44px —
+       so growing the link changes the hit area and not the layout.
+
+       `inline-block` rather than `inline-flex`, and `line-height` rather
+       than `align-items`, for one reason: an inline-flex box is atomic,
+       so the row's own `text-overflow: ellipsis` cannot reach inside it
+       and a long name is cut off mid-letter with no ellipsis. Measured:
+       "Maria de los Angeles Fernandez de la Cruz Villalobos" rendered as
+       "Maria de los Angeles Fernand" with nothing to say it continued.
+       An inline-block is a block container for its own text, so it
+       ellipsises itself. The line-height is what centres the single line
+       inside the taller box, and is deliberately the same 44px. */
+    a.tap-line {
+      display: inline-block;
+      min-height: 44px;
+      line-height: 44px;
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      vertical-align: middle;
+    }
+  }
+
+  /* ---------------------------------------------------------------
+     Safe-area insets (OC-READY-01-016)
+     ---------------------------------------------------------------
+     index.html already sets viewport-fit=cover. Without these, fixed
+     and sticky parish chrome sits in the iPhone notch / home-indicator
+     on Add-to-Home-Screen. Every rule uses env(..., 0px), so a desktop
+     or any browser that reports no inset is byte-identical in layout.
+
+     Non-semantic and reversible: drop the class, the inset goes away.
+     Do not put product meaning on these names. */
+  .safe-pt {
+    padding-top: env(safe-area-inset-top, 0px);
+  }
+
+  .safe-pb {
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+
+  /* Lift bottom-* chrome by the home-indicator inset. `bottom` on a
+     fixed box is measured to the margin edge, so this stacks on top
+     of bottom-4 / bottom-5 instead of replacing them. */
+  .safe-mb {
+    margin-bottom: env(safe-area-inset-bottom, 0px);
+  }
+
+  /* Flush 4rem top bar (the shell header). border-box would crush the
+     row if we only added padding, so the box grows by the same inset. */
+  .safe-h-16 {
+    height: calc(4rem + env(safe-area-inset-top, 0px));
   }
 }
 

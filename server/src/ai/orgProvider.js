@@ -31,6 +31,17 @@ export function decryptApiKey(enc) {
   return Buffer.concat([decipher.update(ct), decipher.final()]).toString('utf8')
 }
 
+// R5-2: a stored provider the gate can never use (no key, or a key that no
+// longer decrypts). Carries provider/model only, never key material.
+export const AI_PROVIDER_BROKEN = 'ai_provider_broken'
+function brokenProvider(row, message) {
+  const err = new Error(message)
+  err.code = AI_PROVIDER_BROKEN
+  err.provider = row.ai_provider
+  err.model = row.ai_model || null
+  return err
+}
+
 // → { provider, apiKey, model, last4 } | null (null = ride the platform)
 export async function getOrgProvider(orgId) {
   const { rows } = await pool.query(
@@ -38,8 +49,17 @@ export async function getOrgProvider(orgId) {
     [orgId]
   )
   const row = rows[0]
-  if (!row?.ai_provider || !row.ai_api_key_enc) return null
-  const apiKey = decryptApiKey(row.ai_api_key_enc)
+  if (!row?.ai_provider) return null
+  // R3-2: a provider chosen with no stored key is a broken configuration,
+  // not "use the platform". Throw so the gate refuses (ai_unavailable).
+  // R5-2: these two failures (and only these) mark the config as broken.
+  if (!row.ai_api_key_enc) throw brokenProvider(row, 'org AI provider set without a key')
+  let apiKey
+  try {
+    apiKey = decryptApiKey(row.ai_api_key_enc)
+  } catch {
+    throw brokenProvider(row, 'org AI provider key does not decrypt')
+  }
   return {
     provider: row.ai_provider,
     apiKey,

@@ -13,7 +13,7 @@
 
 import { requireIntParam } from '../utils/params.js'
 import { monitor } from '../monitoring/index.js'
-import { captureAndDelete, VaultError } from './index.js'
+import { captureAndDelete, VaultError, vaultErrorPayload } from './index.js'
 import { PROTECTED } from './registry.js'
 
 export function protectedDelete(kind, { notFound, failure, before = null } = {}) {
@@ -37,7 +37,7 @@ export function protectedDelete(kind, { notFound, failure, before = null } = {})
       res.status(204).end()
     } catch (err) {
       if (err instanceof VaultError) {
-        return res.status(err.status).json({ error: err.message, code: err.code })
+        return res.status(err.status).json(vaultErrorPayload(err))
       }
       monitor.error(`vault.delete.${kind}`, err, { orgId: req.organizationId, id })
       res.status(500).json({ error: failure || `Failed to delete ${spec.noun}` })

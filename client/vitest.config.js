@@ -5,11 +5,22 @@
 // a source of failures that have nothing to do with the code under test. The
 // test environment should be the smallest thing that can run a component.
 
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
+const ROOT = dirname(fileURLToPath(import.meta.url))
+
 export default defineConfig({
   plugins: [react()],
+  resolve: {
+    // vite-plugin-pwa injects this virtual module at app build time.
+    // Tests never load VitePWA, so the specifier has to resolve here.
+    alias: {
+      'virtual:pwa-register/react': join(ROOT, 'src/test/pwa-register-react.js'),
+    },
+  },
   test: {
     environment: 'jsdom',
     globals: true,

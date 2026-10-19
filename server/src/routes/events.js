@@ -89,6 +89,17 @@ async function filterMemberIdsToOrg(db, memberIds, orgId) {
   return rows.map(r => r.id)
 }
 
+// The in-app assignment line names the civil day of the event. Build the
+// label from the YYYY-MM-DD parts. A Date — local or UTC — would print
+// the previous evening on a server west of UTC.
+export function eventAssignmentWhen(date, time) {
+  if (!date) return ''
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(date).trim())
+  if (!m) return ''
+  const label = `${Number(m[2])}/${Number(m[3])}/${m[1]}`
+  return ` on ${label}${time ? ` at ${time}` : ''}`
+}
+
 // Helper — create a notification row per newly-assigned member for this event.
 // Runs *after* the event-save transaction commits so a notification failure
 // never rolls the event back. Every notification belongs to the same org.
@@ -99,9 +110,7 @@ async function notifyEventAssignments(db, event, memberIds, organizationId) {
     [memberIds, organizationId]
   )
   if (valid.length === 0) return
-  const when = event.date
-    ? ` on ${new Date(event.date).toLocaleDateString()}${event.time ? ` at ${event.time}` : ''}`
-    : ''
+  const when = eventAssignmentWhen(event.date, event.time)
   const message = `You have been assigned to the event: "${event.title}"${when}`
   const params = []
   const placeholders = valid.map((row, i) => {
@@ -193,7 +202,7 @@ async function dispatchEventNotifications(db, event, memberIds, organizationId) 
       recipient:         m.email ?? null,
       notification_type: 'event_assignment_added',
       vars,
-    }).catch(err => monitor.error('notify.event_assignment_added', err, { recipient: m.email }))
+    }).catch(err => monitor.error('notify.event_assignment_added', err, { memberId: m.id ?? null }))
 
     // Pre-event reminder, only when the event is far enough away.
     if (reminderInFuture) {
@@ -203,7 +212,7 @@ async function dispatchEventNotifications(db, event, memberIds, organizationId) 
         notification_type: 'assignment_reminder',
         vars,
         sendAt:            reminderAt,
-      }).catch(err => monitor.error('notify.schedule_assignment_reminder', err, { recipient: m.email }))
+      }).catch(err => monitor.error('notify.schedule_assignment_reminder', err, { memberId: m.id ?? null }))
     }
   }
 }

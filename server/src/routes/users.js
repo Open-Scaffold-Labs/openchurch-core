@@ -5,6 +5,7 @@
 // distinct from "members" (ochr_clients), which are the church's
 // parishioners/volunteers/staff list.
 
+import { ORGANIZATION_HELD, isHoldRefusal, isClosedCapabilityRefusal } from '../auth/organizationHold.js'
 import { Router } from 'express'
 import crypto from 'node:crypto'
 import bcrypt from 'bcryptjs'
@@ -17,6 +18,22 @@ import { monitor } from '../monitoring/index.js'
 import { sendEmail } from '../email/send.js'
 import { welcomeEmail } from '../email/templates.js'
 import { requireIntParam } from '../utils/params.js'
+import { markLoginLifecycle } from '../middleware/auditLog.js'
+import {
+  deactivateLogin,
+  reactivateLogin,
+  withLoginTransaction,
+  lockLoginForAdminCount,
+  countOtherActiveAdmins,
+  INVITE_DOES_NOT_REACTIVATE,
+} from '../auth/loginDeactivation.js'
+import {
+  closeLogin,
+  closureReceipt,
+  isClosedEmail,
+  INVITE_DOES_NOT_REOPEN,
+  FORMER_OPERATOR_LABEL,
+} from '../auth/loginClosure.js'
 
 const router = Router()
 
@@ -76,8 +93,14 @@ async function issueInviteLink(userId, orgType) {
 // Shape returned to the client. Never includes password_hash; only the
 // fields the team page needs.
 function publicUser(u) {
+  const closed = u.closed_at != null
   return {
-    id: u.id, name: u.name, email: u.email, role: u.role, created_at: u.created_at,
+    id: u.id,
+    name: closed ? FORMER_OPERATOR_LABEL : u.name,
+    email: closed ? null : u.email,
+    role: u.role,
+    created_at: u.created_at,
+    closed,
     // PILOT.2 — an unaccepted invitation is a visible state, not an
     // indistinguishable account. A chancery should be able to see at a
     // glance who has actually walked through the door.
@@ -87,19 +110,9 @@ function publicUser(u) {
     // CARE.3 — a permission, not a role. Surfaced so a chancery admin can
     // see at a glance who may read what the office keeps to itself.
     pastoral_lead: u.pastoral_lead === true,
+    // Level A. A deactivated login is still a login. It is not deleted.
+    deactivated: closed || u.deactivated_at != null,
   }
-}
-
-// Counts admins in the org *other than* the given user id. Used by
-// last-admin protection — if this returns 0, the operation would
-// leave the org without any admin and must be rejected.
-async function otherAdminCount(orgId, excludeUserId) {
-  const { rows } = await pool.query(
-    `SELECT COUNT(*)::int AS n FROM ochr_users
-      WHERE organization_id = $1 AND role = 'admin' AND id <> $2`,
-    [orgId, excludeUserId]
-  )
-  return rows[0].n
 }
 
 // GET /api/users — list all users in the caller's org, sorted oldest-
@@ -108,7 +121,8 @@ router.get('/', async (req, res) => {
   try {
     const { rows } = await pool.query(
       `SELECT id, name, email, role, pastoral_lead, created_at,
-              invited_at, invite_accepted_at, invited_by_name
+              invited_at, invite_accepted_at, invited_by_name,
+              deactivated_at, closed_at
          FROM ochr_users
         WHERE organization_id = $1
         ORDER BY created_at ASC`,
@@ -143,6 +157,9 @@ router.post('/', async (req, res) => {
     if (!ROLES.includes(role))      return res.status(400).json({ error: `Role must be one of: ${ROLES.join(', ')}` })
 
     const cleanEmail = email.trim().toLowerCase()
+    if (isClosedEmail(cleanEmail)) {
+      return res.status(400).json({ error: 'That email cannot be used.' })
+    }
 
     // Email uniqueness is global across the app — same email can't
     // belong to two orgs. Check up front for a friendly error.
@@ -205,6 +222,9 @@ router.post('/invite', async (req, res) => {
   if (!ROLES.includes(role)) return res.status(400).json({ error: `Role must be one of: ${ROLES.join(', ')}` })
 
   const cleanEmail = String(email).trim().toLowerCase()
+  if (isClosedEmail(cleanEmail)) {
+    return res.status(400).json({ error: 'That email cannot be used.' })
+  }
   try {
     // Unusable by construction. 32 random bytes hashed and discarded.
     const hash = await bcrypt.hash(crypto.randomBytes(32).toString('base64url'), 10)
@@ -227,6 +247,8 @@ router.post('/invite', async (req, res) => {
     if (err?.code === '23505') {
       return res.status(409).json({ error: 'Someone with that email already has an account' })
     }
+    // A HOLD committed after this request was admitted. Nothing was issued.
+    if (isHoldRefusal(err)) return res.status(409).json({ error: ORGANIZATION_HELD })
     monitor.error('users.invite', err, { orgId: req.organizationId })
     res.status(500).json({ error: 'Failed to send the invitation' })
   }
@@ -241,13 +263,19 @@ router.post('/:id/invite/resend', async (req, res) => {
   const id = requireIntParam(req, res); if (id === null) return
   try {
     const { rows } = await pool.query(
-      `SELECT u.id, u.invite_accepted_at, o.org_type
+      `SELECT u.id, u.invite_accepted_at, u.deactivated_at, u.closed_at, o.org_type
          FROM ochr_users u
          JOIN ochr_organizations o ON o.id = u.organization_id
         WHERE u.id = $1 AND u.organization_id = $2`,
       [id, req.organizationId]
     )
     if (!rows.length) return res.status(404).json({ error: 'User not found' })
+    if (rows[0].closed_at != null) {
+      return res.status(409).json({ error: INVITE_DOES_NOT_REOPEN })
+    }
+    if (rows[0].deactivated_at != null) {
+      return res.status(409).json({ error: INVITE_DOES_NOT_REACTIVATE })
+    }
     if (rows[0].invite_accepted_at != null) {
       return res.status(409).json({
         error: 'That invitation has already been accepted. They can reset their own password from the sign-in page.',
@@ -255,6 +283,10 @@ router.post('/:id/invite/resend', async (req, res) => {
     }
     res.json({ invite: await issueInviteLink(id, rows[0].org_type) })
   } catch (err) {
+    // A closure or HOLD committed after the read above; the database
+    // refused the new link (migrations 113/114). Nothing was issued.
+    if (isClosedCapabilityRefusal(err)) return res.status(409).json({ error: INVITE_DOES_NOT_REOPEN })
+    if (isHoldRefusal(err)) return res.status(409).json({ error: ORGANIZATION_HELD })
     monitor.error('users.invite.resend', err, { orgId: req.organizationId, id })
     res.status(500).json({ error: 'Failed to resend the invitation' })
   }
@@ -279,11 +311,14 @@ router.patch('/:id/pastoral-lead', async (req, res) => {
   try {
     const { rows } = await pool.query(
       `UPDATE ochr_users SET pastoral_lead = $1
-        WHERE id = $2 AND organization_id = $3
-        RETURNING id, name, email, role, pastoral_lead, created_at`,
+        WHERE id = $2 AND organization_id = $3 AND closed_at IS NULL
+        RETURNING id, name, email, role, pastoral_lead, created_at, deactivated_at, closed_at`,
       [grant, id, req.organizationId]
     )
-    if (!rows.length) return res.status(404).json({ error: 'User not found' })
+    if (!rows.length) {
+      const { rows: existing } = await pool.query('SELECT closed_at FROM ochr_users WHERE id = $1 AND organization_id = $2', [id, req.organizationId])
+      return res.status(existing[0]?.closed_at ? 409 : 404).json({ error: existing[0]?.closed_at ? 'This login is closed. Its permissions cannot be changed.' : 'User not found' })
+    }
     res.json({ user: publicUser(rows[0]) })
   } catch (err) {
     monitor.error('users.pastoralLead', err, { orgId: req.organizationId, id })
@@ -293,6 +328,9 @@ router.patch('/:id/pastoral-lead', async (req, res) => {
 
 // PATCH /api/users/:id/role — admin changes a user's role. Last-admin
 // protection prevents the org from being orphaned without an admin.
+// The count and the write share the deactivation lock (id order) so a
+// demotion cannot pass the check and then commit beside a deactivation
+// or a delete of the other active admin.
 router.patch('/:id/role', async (req, res) => {
   const id = requireIntParam(req, res); if (id === null) return
   try {
@@ -301,81 +339,129 @@ router.patch('/:id/role', async (req, res) => {
       return res.status(400).json({ error: `Role must be one of: ${ROLES.join(', ')}` })
     }
 
-    // Confirm the target belongs to the caller's org and read their
-    // current role so we know whether this is a demotion away from
-    // admin (which needs the last-admin guard).
-    const { rows: existing } = await pool.query(
-      'SELECT id, role FROM ochr_users WHERE id = $1 AND organization_id = $2',
-      [id, req.organizationId]
-    )
-    if (!existing.length) return res.status(404).json({ error: 'User not found' })
-    const target = existing[0]
+    const result = await withLoginTransaction(async (client) => {
+      const { target, rows: locked } = await lockLoginForAdminCount(client, req.organizationId, id)
+      if (!target) return { status: 404, body: { error: 'User not found' } }
+      if (target.closed_at != null) return { status: 409, body: { error: 'This login is closed. Its role cannot be changed.' } }
 
-    // Demoting an admin: only allowed if at least one other admin
-    // remains. Covers both "admin demotes self" and "admin demotes
-    // the other admin in a 2-admin org."
-    if (target.role === 'admin' && role !== 'admin') {
-      const others = await otherAdminCount(req.organizationId, target.id)
-      if (others === 0) {
-        return res.status(400).json({ error: 'Cannot demote the only admin. Promote another user first.' })
+      // Demoting an admin: only allowed if at least one other active
+      // admin remains. Covers both "admin demotes self" and "admin
+      // demotes the other admin in a 2-admin org." The count is the
+      // locked snapshot, not a second query.
+      if (target.role === 'admin' && role !== 'admin' && countOtherActiveAdmins(locked, target.id) === 0) {
+        return { status: 400, body: { error: 'Cannot demote the only active admin. Promote another user first.' } }
       }
-    }
 
-    // Bump token_version alongside the role, exactly as logout-everywhere,
-    // password reset and password change already do (audit H5). requireAuth
-    // checks token_version on every request, so this makes the change take
-    // effect on the demoted user's NEXT request rather than whenever their
-    // token happens to expire — which is up to seven days.
-    //
-    // Without it, a role change was a promise about the future rather than a
-    // decision that took effect. It is a strange thing to tell an admin that
-    // the person she just demoted still has access until next week, and it is
-    // stranger still for that to be invisible.
-    //
-    // The cost is that the user is signed out and has to sign in again. For a
-    // promotion that is a small annoyance; for a demotion it is the point.
-    const { rows } = await pool.query(
-      `UPDATE ochr_users
-          SET role = $1, token_version = COALESCE(token_version, 1) + 1
-        WHERE id = $2 AND organization_id = $3
-        RETURNING *`,
-      [role, id, req.organizationId]
-    )
-    res.json(publicUser(rows[0]))
+      // Bump token_version alongside the role, exactly as logout-everywhere,
+      // password reset and password change already do (audit H5). requireAuth
+      // checks token_version on every request, so this makes the change take
+      // effect on the demoted user's NEXT request rather than whenever their
+      // token happens to expire — which is up to seven days.
+      //
+      // Without it, a role change was a promise about the future rather than a
+      // decision that took effect. It is a strange thing to tell an admin that
+      // the person she just demoted still has access until next week, and it is
+      // stranger still for that to be invisible.
+      //
+      // The cost is that the user is signed out and has to sign in again. For a
+      // promotion that is a small annoyance; for a demotion it is the point.
+      const { rows } = await client.query(
+        `UPDATE ochr_users
+            SET role = $1, token_version = COALESCE(token_version, 1) + 1
+          WHERE id = $2 AND organization_id = $3
+          RETURNING *`,
+        [role, id, req.organizationId]
+      )
+      if (!rows.length) return { status: 404, body: { error: 'User not found' } }
+      return { status: 200, row: rows[0] }
+    }, { organizationId: req.organizationId })
+    if (result.status !== 200) return res.status(result.status).json(result.body)
+    res.json(publicUser(result.row))
   } catch (err) {
     console.error('user role change failed:', err)
     res.status(500).json({ error: 'Failed to update role' })
   }
 })
 
-// DELETE /api/users/:id — admin removes a user. Same last-admin guard
-// as role change. Self-deletion is permitted as long as another admin
-// exists, since an admin should be able to leave their own org.
+// DELETE /api/users/:id — kept so an older client cannot hard-delete
+// the login and drop the actor. It closes the login instead. Success
+// stays 204 so existing callers still see a completed removal of access.
+// The row remains. POST /close returns the receipt.
 router.delete('/:id', async (req, res) => {
   const id = requireIntParam(req, res); if (id === null) return
   try {
-    const { rows: existing } = await pool.query(
-      'SELECT id, role FROM ochr_users WHERE id = $1 AND organization_id = $2',
-      [id, req.organizationId]
-    )
-    if (!existing.length) return res.status(404).json({ error: 'User not found' })
-    const target = existing[0]
-
-    if (target.role === 'admin') {
-      const others = await otherAdminCount(req.organizationId, target.id)
-      if (others === 0) {
-        return res.status(400).json({ error: 'Cannot remove the only admin. Promote another user first.' })
-      }
+    const result = await closeLogin({
+      organizationId: req.organizationId,
+      targetId: id,
+      closedBy: req.user?.id ?? null,
+    })
+    if (result.status === 200) {
+      markLoginLifecycle(res, { op: 'close', via: 'legacy-delete', targetId: id, already: result.body?.already })
+      return res.status(204).end()
     }
-
-    await pool.query(
-      'DELETE FROM ochr_users WHERE id = $1 AND organization_id = $2',
-      [id, req.organizationId]
-    )
-    res.status(204).end()
+    const status = result.status === 409 ? 400 : result.status
+    res.status(status).json(result.body)
   } catch (err) {
     console.error('user delete failed:', err)
     res.status(500).json({ error: 'Failed to remove user' })
+  }
+})
+
+// POST /api/users/:id/close — permanent closure. Distinct from
+// turning a login off. The receipt says what ended and what remains.
+router.post('/:id/close', async (req, res) => {
+  const id = requireIntParam(req, res); if (id === null) return
+  try {
+    const result = await closeLogin({
+      organizationId: req.organizationId,
+      targetId: id,
+      closedBy: req.user?.id ?? null,
+    })
+    if (result.status === 200) markLoginLifecycle(res, { op: 'close', via: 'admin', targetId: id, already: result.body?.already })
+    res.status(result.status).json(result.body)
+  } catch (err) {
+    monitor.error('users.close', err, { orgId: req.organizationId, id })
+    res.status(500).json({ error: 'Failed to close that login' })
+  }
+})
+
+router.get('/:id/closure', async (req, res) => {
+  const id = requireIntParam(req, res); if (id === null) return
+  try {
+    const result = await closureReceipt(pool, req.organizationId, id)
+    res.status(result.status).json(result.body)
+  } catch (err) {
+    monitor.error('users.closure', err, { orgId: req.organizationId, id })
+    res.status(500).json({ error: 'Failed to load that closure' })
+  }
+})
+
+// POST /api/users/:id/deactivate — an admin turns a login off.
+// The row stays. Sessions for that login die. The last active admin
+// cannot be deactivated; that would orphan the parish.
+router.post('/:id/deactivate', async (req, res) => {
+  const id = requireIntParam(req, res); if (id === null) return
+  try {
+    const result = await deactivateLogin({ organizationId: req.organizationId, targetId: id })
+    if (result.status === 200) markLoginLifecycle(res, { op: 'deactivate', via: 'admin', targetId: id, already: result.body?.already })
+    res.status(result.status).json(result.body)
+  } catch (err) {
+    monitor.error('users.deactivate', err, { orgId: req.organizationId, id })
+    res.status(500).json({ error: 'Failed to deactivate that login' })
+  }
+})
+
+// POST /api/users/:id/reactivate — an admin turns a login back on.
+// Does not sign a session. The person signs in again. Prior tokens stay dead.
+router.post('/:id/reactivate', async (req, res) => {
+  const id = requireIntParam(req, res); if (id === null) return
+  try {
+    const result = await reactivateLogin({ organizationId: req.organizationId, targetId: id })
+    if (result.status === 200) markLoginLifecycle(res, { op: 'reactivate', via: 'admin', targetId: id, already: result.body?.already })
+    res.status(result.status).json(result.body)
+  } catch (err) {
+    monitor.error('users.reactivate', err, { orgId: req.organizationId, id })
+    res.status(500).json({ error: 'Failed to turn that login back on' })
   }
 })
 

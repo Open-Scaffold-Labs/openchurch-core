@@ -109,10 +109,10 @@ export function ConfirmProvider({ children }) {
       pendingRef.current = { resolve, isPrompt }
       setValue(isPrompt ? String(options.defaultValue ?? '') : '')
       setRequest({
-        title: options.title || 'Are you sure?',
+        title: options.title || t('confirm.title'),
         body: options.body || '',
-        confirmLabel: options.confirmLabel || (isPrompt ? 'Save' : 'Confirm'),
-        cancelLabel: options.cancelLabel || 'Cancel',
+        confirmLabel: options.confirmLabel || (isPrompt ? t('confirm.save') : t('confirm.confirm')),
+        cancelLabel: options.cancelLabel || t('confirm.cancel'),
         // 'destructive' is the default because every current caller is a
         // destructive double-check. Pass tone: 'neutral' for a question
         // that only changes something reversible.
@@ -129,7 +129,7 @@ export function ConfirmProvider({ children }) {
         recoverable: options.recoverable === true,
       })
     })
-  }, [])
+  }, [t])
 
   const settle = useCallback(result => {
     const pending = pendingRef.current

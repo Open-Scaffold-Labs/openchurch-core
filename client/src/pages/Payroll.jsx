@@ -141,6 +141,12 @@ function ActionsMenu({ onEdit, onAddShift, onDelete }) {
 }
 
 // ── Staff modal ───────────────────────────────────────────────
+// SP-031: a stored role outside ROLES (e.g. "Office Manager") has no
+// <option>, so the browser showed the first one, "Pastor", as the role.
+// The record's own role is always offered and stays selected.
+function roleOptions(current) {
+  return current && !ROLES.includes(current) ? [current, ...ROLES] : ROLES
+}
 function StaffModal({ staff, onClose, onSave }) {
   const [form, setForm] = useState(staff ?? { name: '', role: 'Staff', pay_rate: '', status: 'active' })
   const f = k => e => setForm(p => ({ ...p, [k]: e.target.value }))
@@ -163,8 +169,8 @@ function StaffModal({ staff, onClose, onSave }) {
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1.5">Role</label>
-              <select value={form.role} onChange={f('role')} className={inp}>
-                {ROLES.map(r => <option key={r} value={r}>{r}</option>)}
+              <select value={form.role ?? ''} onChange={f('role')} className={inp}>
+                {roleOptions(form.role).map(r => <option key={r} value={r}>{r}</option>)}
               </select>
             </div>
             <div>

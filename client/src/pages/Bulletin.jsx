@@ -10,6 +10,7 @@ import LoadFailure from '../components/LoadFailure'
 import { useLoad } from '../hooks/useLoad'
 import { useLocale } from '../i18n'
 import { LIT_COLOR_TEXT, LIT_COLOR_DOT, LIT_COLOR_DOT_NONE } from '../utils/liturgicalColors'
+import { seasonLabel } from '../i18n/liturgical'
 import { useConfirm } from '../components/ConfirmProvider'
 
 // Weekly bulletin editor (BUL.2). The admin picks a date (defaults to the
@@ -126,7 +127,7 @@ function printBulletin({ orgName, date, lit, services, form }) {
 const EMPTY = { announcements: '', readings: '', intentions: '', pastor_note: '', published: false }
 
 export default function Bulletin() {
-  const { t } = useLocale()
+  const { t, tradition } = useLocale()
   const toast = useToast()
   const ask = useConfirm()
   const { user } = useAuth()
@@ -213,18 +214,28 @@ export default function Bulletin() {
   // Pull the day's readings from the service plan for this date (SVC.3b).
   // Finds a plan dated the same as the bulletin, then fills the Readings
   // field from its reading/psalm elements (title — reference).
+  // A refused list is not "no plan for this date," and a refused plan is
+  // not "no readings yet."
   const [pulling, setPulling] = useState(false)
   async function pullFromPlan() {
     setPulling(true)
     try {
-      const list = await fetch(apiUrl('/api/service-plans')).then(r => (r.ok ? r.json() : { plans: [] }))
-      const match = (list.plans ?? []).find(p => p.date === date)
-      if (!match) { toast.info('No service plan for this date yet'); return }
-      const full = await fetch(apiUrl(`/api/service-plans/${match.id}`)).then(r => (r.ok ? r.json() : null))
-      const readings = (full?.elements ?? [])
+      const listRes = await fetch(apiUrl('/api/service-plans'))
+      if (!listRes.ok) { toast.error(t('bul.pullUnread')); return }
+      const list = await listRes.json()
+      const plans = list?.plans
+      if (!Array.isArray(plans)) { toast.error(t('bul.pullUnread')); return }
+      const match = plans.find(p => p.date === date)
+      if (!match) { toast.info(t('bul.pullNone')); return }
+      const fullRes = await fetch(apiUrl(`/api/service-plans/${match.id}`))
+      if (!fullRes.ok) { toast.error(t('bul.pullPlanUnread')); return }
+      const full = await fullRes.json()
+      const elements = full?.elements
+      if (!Array.isArray(elements)) { toast.error(t('bul.pullPlanUnread')); return }
+      const readings = elements
         .filter(e => e.kind === 'reading' || e.kind === 'psalm')
         .map(e => `${e.title}${e.reference ? ` — ${e.reference}` : ''}`)
-      if (!readings.length) { toast.info('That service plan has no readings yet'); return }
+      if (!readings.length) { toast.info(t('bul.pullNoReadings')); return }
       if (form.readings.trim() && !(await ask({
         title: 'Replace the current Readings?',
         body: 'The readings from the service plan will overwrite what is in the Readings field now.',
@@ -233,8 +244,8 @@ export default function Bulletin() {
       }))) return
       setForm(f => ({ ...f, readings: readings.join('\n') }))
       toast.success('Readings pulled from the service plan')
-    } catch (err) {
-      toast.error("Couldn't pull from the service plan. Nothing was lost — please retry.")
+    } catch {
+      toast.error(t('bul.pullFailed'))
     } finally {
       setPulling(false)
     }
@@ -279,7 +290,9 @@ export default function Bulletin() {
     }
   }
 
-  const litLabel = lit?.feast_name || lit?.season
+  // On screen the season follows the parish's language and tradition. The
+  // printed sheet (printBulletin) is still all-English chrome and is left as is.
+  const litLabel = lit?.feast_name || (lit?.season ? seasonLabel(t, lit.season, { tradition, block: lit.ordinary_block }) : lit?.season)
   const dirty = useMemo(() => {
     const existing = bulletins.find(b => b.date === date)
     const base = existing

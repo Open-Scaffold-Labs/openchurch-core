@@ -40,7 +40,9 @@
 // compete with bulletin-writing.
 
 import { Router } from 'express'
-import Anthropic from '@anthropic-ai/sdk'
+import { dispatch } from '../ai/gate.js'
+import { ERROR_CATEGORIES } from '../ai/providerError.js'
+import { routeTemplate } from '../ai/routeTemplate.js'
 import pool from '../db.js'
 import { requireIntParam, parsePagination } from '../utils/params.js'
 import { isVendorAdmin } from '../middleware/superAdmin.js'
@@ -66,9 +68,7 @@ const router = Router()
 // on what was true when the token was minted. Same pattern as setup.js:55.
 router.use(requireRole('admin', 'staff', 'viewer'))
 
-// Same default as AI Studio (small, cheap, known-good); SUPPORT_AI_MODEL
-// upgrades the diagnostic independently when the vendor wants deeper triage.
-const DIAG_MODEL = process.env.SUPPORT_AI_MODEL || 'claude-haiku-4-5-20251001'
+// The triage model is pinned by the managed route in ai/policy.js.
 
 const SEVERITIES      = new Set(['critical', 'high', 'normal', 'low'])
 const STATUSES        = new Set(['new', 'diagnosing', 'waiting_on_parish', 'in_progress', 'resolved', 'closed'])
@@ -115,6 +115,10 @@ function loadSupportContext() {
 async function forwardToSupport(ticketId, req, description, pageRoute) {
   const to = process.env.SUPPORT_EMAIL
   if (!to) return
+  const { rows: activeOrg } = await pool.query(
+    'SELECT id FROM ochr_organizations WHERE id = $1 AND held_at IS NULL', [req.organizationId],
+  )
+  if (!activeOrg.length) return
   await sendEmail({
     to,
     subject: `[OpenChurch ticket #${ticketId}] ${description.slice(0, 60)}`,
@@ -131,7 +135,6 @@ async function forwardToSupport(ticketId, req, description, pageRoute) {
 
 // ── Diagnostic pass (async — never blocks the submission response) ───────
 export async function runDiagnostic(ticketId, description, pageRoute) {
-  if (!process.env.ANTHROPIC_API_KEY) return // no key, no triage — never an error state
   const startMs = Date.now()
 
   const prompt = `You are the triage agent for OpenChurch. A user reported a problem in-app.
@@ -154,12 +157,29 @@ Page the user was on: ${pageRoute || 'unknown'}
 Report: ${description}`
 
   try {
-    const client = new Anthropic()
-    const response = await client.messages.create({
-      model: DIAG_MODEL, max_tokens: 1000, system: loadSupportContext(),
-      messages: [{ role: 'user', content: prompt }],
-    })
-    const text = response.content?.find(b => b.type === 'text')?.text || ''
+    // The task is asynchronous: HOLD may have landed after submission, and
+    // the platform AI stop or the parish's routing may have changed. All are
+    // re-checked here, immediately before dispatch (ai/gate.js).
+    const { rows: activeTicket } = await pool.query(
+      `SELECT t.id, t.organization_id FROM ochr_support_tickets t
+        JOIN ochr_organizations o ON o.id = t.organization_id
+        WHERE t.id = $1 AND o.held_at IS NULL`, [ticketId],
+    )
+    if (!activeTicket.length) return
+    let response
+    try {
+      response = await dispatch({
+        orgId: activeTicket[0].organization_id, capabilityId: 'support_triage_v1',
+        system: loadSupportContext(), messages: [{ role: 'user', content: prompt }], maxTokens: 1000,
+      })
+    } catch (refused) {
+      // Stopped, not configured, or this parish routes AI through its own
+      // key (triage is managed-only): no triage, and that is not an error
+      // state. The ticket stands.
+      if (refused?.refusal) return
+      throw refused
+    }
+    const text = response.text || ''
     let diagnosis
     try { diagnosis = JSON.parse(text) } catch {
       diagnosis = { confidence: 'low', narrative: text.slice(0, 400) }
@@ -183,7 +203,7 @@ Report: ${description}`
               updated_at = NOW()
         WHERE id = $1 AND status = 'new' AND severity = 'normal' AND classification IS NULL`,
       [ticketId, JSON.stringify(diagnosis),
-       JSON.stringify({ input: response.usage?.input_tokens, output: response.usage?.output_tokens }),
+       JSON.stringify(response.usage ?? { input: null, output: null }),
        Date.now() - startMs, sevOk, clsOk])
 
     if (!rowCount) {
@@ -207,7 +227,8 @@ Report: ${description}`
         -- tenancy: vendor support console, cross-parish by design. Gated by
         -- requireRole + isVendorAdmin (fails closed with no env set); ?org_id
         -- can only NARROW. Verified 27 Aug: org B reading org A's ticket 404s.`,
-      [ticketId, JSON.stringify({ error: `Diagnostic failed: ${err.message}` })])
+      // Category only (ai/providerError.js closed list); never err.message.
+      [ticketId, JSON.stringify({ error: 'diagnostic_failed', category: ERROR_CATEGORIES.includes(err?.category) ? err.category : 'unknown' })])
       .catch(e2 => monitor.error('supportTickets.diagnostic.write', e2, { ticketId }))
   }
 }
@@ -221,7 +242,8 @@ router.post('/', async (req, res) => {
   if (description.length > MAX_DESCRIPTION) {
     return res.status(400).json({ error: 'Description is too long' })
   }
-  const pageRoute = typeof req.body?.page_route === 'string' ? req.body.page_route.slice(0, 200) : null
+  // Route template only — never the raw URL (TARS #280 F3).
+  const pageRoute = routeTemplate(req.body?.page_route)
   const contextBundle = req.body?.context_bundle && typeof req.body.context_bundle === 'object'
     && !Array.isArray(req.body.context_bundle) ? req.body.context_bundle : null
 
@@ -456,7 +478,11 @@ async function notifyReporter(before, after, req) {
          SELECT u.email, u.name, o.name AS org_name
        FROM ochr_users u
        JOIN ochr_organizations o ON o.id = $2
-      WHERE u.id = $1`,
+      WHERE u.id = $1
+        AND u.organization_id = $2 -- S-F5: defense in depth
+        -- ARG-V2-2: never write to a closed or deactivated submitter.
+        AND u.closed_at IS NULL
+        AND u.deactivated_at IS NULL`,
     [before.user_id, before.organization_id])
   if (!info?.email) return
 

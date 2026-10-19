@@ -156,6 +156,7 @@ async function findPublishedForm(orgSlug, formSlug) {
        FROM ochr_forms f
        JOIN ochr_organizations o ON o.id = f.organization_id
       WHERE o.slug = $1 AND f.slug = $2
+        AND o.held_at IS NULL
         AND f.is_public = TRUE
         AND f.status = 'open'
       LIMIT 1`,

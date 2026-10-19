@@ -12,6 +12,13 @@
 // import once per cold-start and reuse across warm invocations. Migrations do
 // NOT run here (only server/src/index.js boots them); the CI deploy job runs
 // them against prod before either project ships.
-import app from 'openchurch-server/src/app.js'
+//
+// The specifier is a relative path, not the `openchurch-server` package name.
+// deploy-diocese replaces the file: symlink with a directory that contains
+// only package.json, so Node would look for src/app.js inside that stub and
+// miss the traced copy at server/src/app.js. The relative import loads that
+// traced file. Paths inside the server stay relative to server/, including
+// the parish timezone helper.
+import app from '../../server/src/app.js'
 
 export default app

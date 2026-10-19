@@ -8,7 +8,7 @@
   "scripts": {
     "dev": "node --watch src/index.js",
     "start": "node src/index.js",
-    "test": "vitest run --testTimeout=15000"
+    "test": "vitest run --testTimeout=15000 --exclude tests/stage6Privacy.test.js --exclude tests/r286Regressions.test.js --exclude tests/pr11WhitespaceNorm.test.js --exclude tests/aiLedger.test.js && vitest run --testTimeout=15000 --no-file-parallelism tests/stage6Privacy.test.js tests/r286Regressions.test.js tests/pr11WhitespaceNorm.test.js tests/aiLedger.test.js && TZ=Pacific/Auckland vitest run --testTimeout=15000 tests/sampleSeedSunday.test.js tests/stBrigidsSunday.test.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.111.0",

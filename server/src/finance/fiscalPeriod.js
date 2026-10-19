@@ -92,3 +92,35 @@ export async function findOverlappingSubmission(pool, {
 export const overlapMessage = (other, remedy) =>
   `This period overlaps an already submitted period (${other.period_start} – ${other.period_end}, ${other.status}). ` +
   `A parish's periods must not overlap; ${remedy}`
+
+// THE REMEDY HAS TO EXIST BEFORE IT IS OFFERED.
+//
+// Until 4 Sep both 409s ended the same way whatever the other period's
+// status was: the parish was told to "ask the chancery to return that
+// period", the chancery to "return the approved period and approve this
+// one instead". Neither is possible for an APPROVED period. The only
+// status change a chancery can make is submitted → approved | returned
+// (the review UPDATE in routes/diocese.js requires status = 'submitted';
+// on an approved row it matches nothing and answers 404), and the parish's
+// resubmit path only reopens a 'returned' row. Once approved, a period is
+// final — that is the frozen-totals policy, and it is deliberate.
+//
+// So the sentence now depends on the status it names. For a 'submitted'
+// period the return remedy is real and is offered. For an 'approved' one
+// the honest answer is that OpenChurch cannot reopen it yet and the two
+// offices must sort it out between themselves. Whether approved periods
+// SHOULD become reopenable is a policy decision; this function only
+// refuses to promise it while it is untrue.
+//
+// `side` is who is reading: 'parish' (the submit 409) or 'chancery' (the
+// approve 409). Both get the same fact in the words that fit their desk.
+export function overlapRemedy(other, side = 'parish') {
+  if (other.status === 'approved') {
+    return side === 'chancery'
+      ? 'return this one — the approved period cannot be reopened in OpenChurch yet.'
+      : 'an approved period cannot be reopened in OpenChurch yet — contact the chancery directly about which period should stand.'
+  }
+  return side === 'chancery'
+    ? 'return this one, or return the other submitted period and approve this one instead.'
+    : 'ask the chancery to return that period first.'
+}

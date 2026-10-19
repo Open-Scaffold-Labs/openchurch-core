@@ -18,13 +18,17 @@ const router = Router()
 //   • Stems via the english config so "scheduling" matches rows
 //     containing "scheduled", "groups" matches "group", etc.
 
-async function safeQuery(scope, sql, params) {
+// A failed scope used to become []. The handler then answered 200, and the
+// palette said the parish had no matches. One failed read fails the search:
+// a partial list would still read as the whole parish. The database text
+// stays in the log; the response is a fixed sentence.
+async function searchScope(scope, sql, params) {
   try {
     const { rows } = await pool.query(sql, params)
     return rows
   } catch (err) {
     monitor.error(`search.${scope}`, err)
-    return []
+    throw new Error('Search failed')
   }
 }
 
@@ -39,7 +43,7 @@ router.get('/', async (req, res) => {
     const orgId = req.organizationId
 
     const [clients, events, tasks, staff, donations] = await Promise.all([
-      safeQuery('clients',
+      searchScope('clients',
         `SELECT id, name, COALESCE(email,'') AS email,
                 COALESCE(role,'') AS role, COALESCE(status,'') AS status,
                 'member'::text AS type
@@ -49,7 +53,7 @@ router.get('/', async (req, res) => {
           ORDER BY name LIMIT 5`,
         [q, orgId]
       ),
-      safeQuery('events',
+      searchScope('events',
         `SELECT id, title, COALESCE(service_division,'') AS service_division,
                 date, COALESCE(location,'') AS location,
                 'event'::text AS type
@@ -59,7 +63,7 @@ router.get('/', async (req, res) => {
           ORDER BY date DESC LIMIT 5`,
         [q, orgId]
       ),
-      safeQuery('tasks',
+      searchScope('tasks',
         `SELECT id, title, COALESCE(category,'') AS category,
                 COALESCE(priority,'') AS priority, COALESCE(status,'') AS status,
                 'task'::text AS type
@@ -69,7 +73,7 @@ router.get('/', async (req, res) => {
           ORDER BY created_at DESC LIMIT 5`,
         [q, orgId]
       ),
-      safeQuery('staff',
+      searchScope('staff',
         `SELECT id, name, COALESCE(role,'') AS role,
                 COALESCE(status,'') AS status,
                 'staff'::text AS type
@@ -79,7 +83,7 @@ router.get('/', async (req, res) => {
           ORDER BY name LIMIT 5`,
         [q, orgId]
       ),
-      safeQuery('donations',
+      searchScope('donations',
         `SELECT id, donor_name, amount, COALESCE(category,'') AS category,
                 date, 'donation'::text AS type
            FROM ochr_donations
@@ -90,10 +94,16 @@ router.get('/', async (req, res) => {
       ),
     ])
 
-    const results = [...clients, ...events, ...tasks, ...staff, ...donations]
+    // SP-014..022: a Viewer may search Members only (Help role table).
+    const results = req.user?.role === 'viewer'
+      ? [...clients]
+      : [...clients, ...events, ...tasks, ...staff, ...donations]
     res.json(results)
   } catch (err) {
-    monitor.error('search.handler', err, { q: req.query.q })
+    // The query is often a person's name. The log and the Sentry extra
+    // get its length, never the text.
+    const rawQ = typeof req.query.q === 'string' ? req.query.q : ''
+    monitor.error('search.handler', err, { qLength: rawQ.length })
     res.status(500).json({ error: 'Search failed' })
   }
 })

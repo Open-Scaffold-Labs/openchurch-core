@@ -56,11 +56,21 @@ export default function AttendanceSection({ eventId }) {
     fetch(apiUrl(`/api/events/${eventId}/attendance`))
       .then(r => r.ok ? r.json() : Promise.reject(new Error(`Failed (${r.status})`)))
       .then(d => {
-        setRoster(d.roster ?? [])
+        // A 200 without a usable roster is unread, not "nobody assigned".
+        // `d.roster ?? []` hid the whole section, exactly like an event
+        // with no assigned members, so attendance could not be taken.
+        const list = d && typeof d === 'object' && !Array.isArray(d) ? d.roster : null
+        const usable = Array.isArray(list) && list.every(r =>
+          r && typeof r === 'object' && !Array.isArray(r)
+          && Number.isInteger(r.member_id) && r.member_id > 0
+          && typeof r.member_name === 'string'
+          && (r.status == null || Object.prototype.hasOwnProperty.call(STATUS_LABEL, r.status)))
+        if (!usable) throw new Error('Failed (malformed)')
+        setRoster(list)
         // Seed local marks from the server response — anything
         // un-marked stays absent from the map (rendered as 'no mark').
         const seed = {}
-        for (const r of d.roster ?? []) {
+        for (const r of list) {
           if (r.status) seed[r.member_id] = r.status
         }
         setMarks(seed)

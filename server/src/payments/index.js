@@ -15,6 +15,7 @@
 // provider's unit (e.g. Stripe cents) at the boundary — that
 // conversion is a provider-file concern, not a caller concern.
 
+import { maskRef } from '../utils/redact.js'
 import pool from '../db.js'
 import { normalizeDonorEmail } from '../finance/donorIdentity.js'
 import { monitor } from '../monitoring/index.js'
@@ -138,9 +139,42 @@ export function paymentsCanMoveMoney() {
   // The stub never moves money anywhere, including locally. That is the
   // point of it.
   if (provider === 'stub') return false
-  if (provider === 'stripe') return Boolean(stripeSecret())
+  // Stripe moves money through hosted Checkout, and the gift only reaches
+  // this system through the webhook — which cannot verify anything without
+  // its signing secret (billing/provider.js). Secret without webhook is a
+  // deployment that can TAKE a gift and cannot RECORD one, which is the
+  // worst of the four states health enumerates, not a capable one.
+  if (provider === 'stripe') return Boolean(stripeSecret()) && paymentsWebhookReady()
   // An unknown provider name is a typo, not a capability.
   return false
+}
+
+// Can the webhook receiver record what the provider tells it? One shared
+// endpoint serves billing and giving, and one signing secret verifies it.
+// Read here rather than in app.js so health and the capability predicate
+// above cannot disagree about which variable that is.
+export function paymentsWebhookReady() {
+  return Boolean(process.env.BILLING_WEBHOOK_SECRET)
+}
+
+// Could a REAL provider event still arrive at this deployment? Not "is
+// giving switched on" — "is there a live credential anywhere in this
+// environment", which is a strictly weaker and strictly safer question.
+//
+// currentProvider() lets an explicit PAYMENTS_PROVIDER win over the secret,
+// which is right for outgoing behaviour: setting it to `stub` is how an
+// operator switches giving OFF. It is wrong for INCOMING behaviour. Switching
+// off does not cancel the Checkout sessions donors already opened, and Stripe
+// delivers those for up to 24h. With PAYMENTS_PROVIDER=stub and the live
+// secret still in the environment, a correctly-signed donation event was
+// answered {received:true, stub:true} 200 and dropped — the same
+// acknowledge-into-silence the billing/giving split was just fixed for,
+// reached through a rollback instead of a rollout (reproduced 4 Sep, M6).
+//
+// So the webhook asks THIS question, and a rollback stops taking new gifts
+// without discarding the ones already in flight.
+export function paymentsLiveCredentialPresent() {
+  return Boolean(stripeSecret())
 }
 
 function randomRef(prefix) {
@@ -177,15 +211,23 @@ async function chargeStub({ amount, currency, donorName, idempotencyKey }) {
   const ref = idempotencyKey
     ? `stub_${String(idempotencyKey).replace(/[^a-zA-Z0-9_-]/g, '')}`
     : randomRef('stub')
-  console.log(`[pay:stub] → ${donorName ?? '(anonymous)'} | ${currency.toUpperCase()} ${amount.toFixed(2)} | ${ref}`)
+  console.log(`[pay:stub] charge ${ref} (donor and amount not logged)`)
   return { id: ref, status: 'succeeded', provider: 'stub' }
 }
 
 // Refund the other direction. The stub returns a synthetic refunded
 // result; a real provider issues the refund against the original charge.
-async function refundStub({ chargeId, amount }) {
-  const ref = randomRef('stubref')
-  console.log(`[pay:stub] refund ${chargeId ?? '(unknown)'} → ${ref}${amount != null ? ` | ${amount.toFixed(2)}` : ''}`)
+//
+// The ref is DERIVED from idempotencyKey exactly as chargeStub does above,
+// for the same reason: the refund route's provider call and its row UPDATE
+// are two steps, and a retry after the second failed used to reach here
+// again with nothing tying it to the first — two refund ids for one gift
+// (4 Sep). With the key, the retry and the first call are the same refund.
+async function refundStub({ chargeId, amount, idempotencyKey }) {
+  const ref = idempotencyKey
+    ? `stubref_${String(idempotencyKey).replace(/[^a-zA-Z0-9_-]/g, '')}`
+    : randomRef('stubref')
+  console.log(`[pay:stub] refund (charge and amount not logged) → ${ref}`)
   return { id: ref, status: 'refunded', provider: 'stub' }
 }
 
@@ -205,11 +247,18 @@ async function chargeStripe({ donorName }) {
 
 // Refund a completed Checkout payment. payment_ref on the donation row
 // is the PaymentIntent id (pi_…) captured by the webhook.
-async function refundStripe({ chargeId, amount }) {
+//
+// idempotencyKey goes out as Stripe's Idempotency-Key header. Without it,
+// the failure mode was worse than the stub's: Stripe REJECTS a second full
+// refund of one PaymentIntent, so a retry after our UPDATE failed got a
+// provider error, answered 502, and left the row 'succeeded' for good while
+// the donor already had the money back. With the key Stripe replays the
+// first refund's response, the UPDATE runs, and the row catches up.
+async function refundStripe({ chargeId, amount, idempotencyKey }) {
   const refund = await stripeRequest('refunds', {
     payment_intent: chargeId,
     ...(amount != null ? { amount: Math.round(amount * 100) } : {}),
-  }, stripeSecret())
+  }, stripeSecret(), { idempotencyKey })
   return { id: refund.id, status: refund.status === 'succeeded' || refund.status === 'pending' ? 'refunded' : refund.status, provider: 'stripe' }
 }
 
@@ -269,10 +318,17 @@ export async function createCharge({ organizationId, amount, currency = 'usd', d
   }
 }
 
-// createRefund({ organizationId, chargeId, amount? }) → { id, status, provider }
+// createRefund({ organizationId, chargeId, amount?, idempotencyKey? }) → { id, status, provider }
 // Reverses a prior charge. amount omitted = full refund. Dispatches to
 // the configured provider's refund transport; the stub always succeeds.
-export async function createRefund({ organizationId, chargeId, amount }) {
+//
+// idempotencyKey is the caller's name for THIS refund. Option A (GIV-06)
+// uses a per-refund key (`refund-<org>-<donation>-<refundId>`), not a
+// gift-only key — two partials of one gift are two movements of money.
+// Unlike createCharge's key, BOTH transports consume it today: the stub
+// derives its ref from it, refundStripe forwards it as the Idempotency-Key
+// header.
+export async function createRefund({ organizationId, chargeId, amount, idempotencyKey }) {
   const PROVIDER = currentProvider()
   const transport = REFUND_TRANSPORTS[PROVIDER]
   if (!transport) {
@@ -283,6 +339,7 @@ export async function createRefund({ organizationId, chargeId, amount }) {
     const refund = await transport({
       chargeId,
       amount: amount != null ? Math.round(Number(amount) * 100) / 100 : undefined,
+      idempotencyKey,
       metadata: { organization_id: organizationId },
     })
     if (refund.status !== 'refunded') {
@@ -342,6 +399,35 @@ export async function createDonationCheckout({
 
 // Webhook completion → the ochr_donations row + receipt. Idempotent on
 // the PaymentIntent id: Stripe retries webhooks, the row appears once.
+//
+// A DATABASE ROW IS NOT A SETTLED PAYMENT. checkout.session.completed
+// means the donor finished Checkout, not that the money moved. For a card
+// those are the same moment and payment_status is 'paid'. For a
+// delayed-notification method — ACH debit, SEPA, OXXO, whichever the
+// dashboard has enabled, since payment_method_types is not pinned at
+// createDonationCheckout — the session completes 'unpaid', the donor sees
+// the success page, and the bank answers days later through
+// checkout.session.async_payment_succeeded or …async_payment_failed.
+// This recorder wrote 'succeeded' and sent a thank-you on the 'unpaid'
+// event (reproduced 8 Sep): a gift in the ledger, the finance summary, the
+// assessable base and the donor's year-end statement for money that could
+// still bounce.
+//
+// So payment_status decides. 'paid' and 'no_payment_required' (a fully
+// discounted session) are recorded. 'unpaid' is acknowledged and NOT
+// recorded — Stripe sends the follow-up, and the same session object
+// arrives here again under the succeeded event with 'paid' on it, where
+// the dedup on payment_ref still applies. Anything else is a value this
+// code has never seen: not recorded, and not acknowledged either — a 2xx
+// would end the delivery on a guess, so the error goes back, Stripe
+// redelivers, and the operator sees it.
+//
+// Absent entirely: Stripe stamps payment_status on every Checkout Session,
+// so an object without one is not a live delivery — it is one of the
+// hand-built fixtures the earlier webhook tests use, which predate this
+// check. Those keep recording; the field is decided on when it is there.
+const SETTLED_PAYMENT_STATUSES = new Set(['paid', 'no_payment_required'])
+
 export async function recordDonationCheckoutCompleted(session) {
   const md = session?.metadata ?? {}
   const orgId  = Number(md.organization_id)
@@ -350,8 +436,52 @@ export async function recordDonationCheckoutCompleted(session) {
   const dollars = Math.round(Number(session?.amount_total)) / 100
 
   if (!Number.isInteger(orgId) || !paymentRef || !Number.isFinite(dollars) || dollars <= 0) {
-    monitor.warn('payments.webhook', 'donation session missing fields', { session: session?.id })
+    monitor.warn('payments.webhook', 'donation session missing fields', { session: maskRef(session?.id) })
     return { recorded: false }
+  }
+
+  const paymentStatus = session?.payment_status
+  if (paymentStatus !== undefined && !SETTLED_PAYMENT_STATUSES.has(paymentStatus)) {
+    if (paymentStatus === 'unpaid') {
+      monitor.warn('payments.webhook', 'donation session completed unpaid (delayed payment method); not recorded until async_payment_succeeded',
+        { session: maskRef(session?.id), paymentRef: maskRef(paymentRef), orgId })
+      return { recorded: false, pending: true }
+    }
+    const err = new Error(`donation session ${maskRef(session?.id)} has unknown payment_status '${paymentStatus}'; not recorded`)
+    monitor.error('payments.webhook.payment_status', err, { session: maskRef(session?.id), paymentRef: maskRef(paymentRef), orgId, paymentStatus })
+    throw err
+  }
+
+  // The fund id was stamped at Checkout, and Checkout is not the webhook:
+  // minutes pass between them, and a parish can delete a fund with no
+  // gifts in those minutes (funds.js only refuses a fund WITH gifts — and
+  // this gift is not recorded yet). The INSERT then hit FK 23503, every
+  // redelivery hit it again, and after Stripe's three-day window the gift
+  // — money the donor had already given — was simply gone (4 Sep).
+  //
+  // So the fund is resolved against THIS org first. Gone (or, for the same
+  // price, somebody else's): the row is written undesignated, fund_id NULL,
+  // with the name Checkout stamped kept in category and spelled out in
+  // notes so the parish can see what the donor meant. That is funds.js's
+  // own model of a deleted fund — the gifts "lose the designation, which a
+  // restore puts back" — applied to a gift that arrived late. The operator
+  // is told, because a restricted gift landing in the general fund is a
+  // bookkeeping decision somebody has to make on purpose.
+  let resolvedFundId = null
+  let fundNote = null
+  if (Number.isInteger(fundId)) {
+    const { rowCount } = await pool.query(
+      'SELECT 1 FROM ochr_funds WHERE id = $1 AND organization_id = $2', [fundId, orgId])
+    if (rowCount) {
+      resolvedFundId = fundId
+    } else {
+      const designation = md.fund ? `"${md.fund}"` : `fund #${fundId}`
+      fundNote = `Given to ${designation} (fund #${fundId}), which no longer existed when the payment was confirmed. ` +
+        'Recorded without a fund; restore the fund and re-designate this gift to put it back.'
+      monitor.error('payments.webhook.fund_missing',
+        new Error(`fund ${fundId} not found for org ${orgId}; gift ${paymentRef} recorded undesignated`),
+        { orgId, fundId, paymentRef, fund: md.fund ?? null })
+    }
   }
 
   // Atomic dedup on (organization_id, payment_ref): the partial unique
@@ -372,9 +502,9 @@ export async function recordDonationCheckoutCompleted(session) {
       normalizeDonorEmail(md.donor_email),
       dollars,
       md.fund || null,
-      Number.isInteger(fundId) ? fundId : null,
+      resolvedFundId,
       paymentRef,
-      md.message || null,
+      [md.message || null, fundNote].filter(Boolean).join('\n') || null,
     ]
   )
   if (inserted.rowCount === 0) return { recorded: false, duplicate: true }
@@ -397,7 +527,7 @@ export async function recordDonationCheckoutCompleted(session) {
         },
       })
     } catch (err) {
-      monitor.error('payments.webhook.receipt', err, { orgId, paymentRef })
+      monitor.error('payments.webhook.receipt', err, { orgId, paymentRef: maskRef(paymentRef) })
     }
   }
 

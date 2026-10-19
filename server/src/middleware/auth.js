@@ -1,6 +1,9 @@
+import { viewerMayRead, isReadMethod, VIEWER_SCOPE_ERROR } from './viewerScope.js'
 import jwt from 'jsonwebtoken'
 import pool from '../db.js'
 import { monitor } from '../monitoring/index.js'
+import { extractSessionToken } from '../auth/sessionCookie.js'
+import { resolvePlatformIdentity } from './superAdmin.js'
 
 // Recognized roles. Keep in sync with the CHECK constraint in
 // migrations/003-roles-check.js.
@@ -28,9 +31,11 @@ export function verifyToken(token) {
   return jwt.verify(token, SECRET)
 }
 
-// Express middleware: unwraps the Authorization: Bearer <token> header,
-// verifies the JWT, and attaches req.user + req.organizationId for
-// downstream routes to scope their queries.
+// Express middleware: unwraps the session JWT from the httpOnly
+// `ochr_session` cookie (production), or — outside production — from
+// Authorization: Bearer <token> so the existing server suite can keep
+// proving isolation without a 200-file rewrite. Verifies the JWT and
+// attaches req.user + req.organizationId for downstream routes.
 //
 // Revocability (audit H5): every token carries a `tv` (token_version)
 // claim; the live row's version must match. Bumping the version — on
@@ -43,11 +48,10 @@ export function verifyToken(token) {
 //
 // On failure, responds 401 so the client knows to bounce back to /login.
 export async function requireAuth(req, res, next) {
-  const header = req.headers.authorization
-  if (!header?.startsWith('Bearer ')) {
+  const token = extractSessionToken(req)
+  if (!token) {
     return res.status(401).json({ error: 'Unauthorized' })
   }
-  const token = header.slice(7)
   let payload
   try {
     payload = verifyToken(token)
@@ -59,30 +63,58 @@ export async function requireAuth(req, res, next) {
   }
 
   let pastoralLead = false
+  let liveRole = null
+  let orgType = null
+  let platform = { founder: false, vendor: false }
   try {
     const { rows } = await pool.query(
       // pastoral_lead is read HERE, not taken from the token. A permission
       // baked into a JWT survives its own revocation until the token
       // expires, and "we removed her access an hour ago" has to be true the
       // moment it is said. This query already runs on every request.
-      'SELECT token_version, pastoral_lead FROM ochr_users WHERE id = $1 AND organization_id = $2',
+      `SELECT u.token_version, u.pastoral_lead, u.deactivated_at, u.closed_at,
+              u.role, o.org_type
+         FROM ochr_users u JOIN ochr_organizations o ON o.id = u.organization_id
+        WHERE u.id = $1 AND u.organization_id = $2`,
       [payload.userId, payload.organizationId]
     )
     if (!rows.length) {
       return res.status(401).json({ error: 'User no longer exists' })
     }
+    if (rows[0].closed_at != null) {
+      return res.status(401).json({ error: 'This login is closed.' })
+    }
+    if (rows[0].deactivated_at != null) {
+      return res.status(401).json({ error: 'This login is deactivated.' })
+    }
     if ((payload.tv ?? 1) !== (rows[0].token_version ?? 1)) {
       return res.status(401).json({ error: 'Session expired — please sign in again' })
     }
     pastoralLead = rows[0].pastoral_lead === true
+    liveRole = rows[0].role
+    orgType = rows[0].org_type
+    const { rows: organizations } = await pool.query('SELECT held_at FROM ochr_organizations WHERE id = $1', [payload.organizationId])
+    if (!organizations.length || organizations[0].held_at != null) {
+      return res.status(401).json({ error: 'This organization is on hold. Access is stopped; parish history remains.' })
+    }
+    // F-01: founder/vendor by this live row's id only (see superAdmin.js).
+    // Runs after the closed/deactivated and HOLD refusals above.
+    platform = await resolvePlatformIdentity(payload.userId)
   } catch (err) {
     monitor.error('auth.requireAuth', err, { userId: payload.userId, orgId: payload.organizationId })
     return res.status(500).json({ error: 'Authentication check failed' })
   }
 
+  // SP-014..022: a parish Viewer reads only what the Help role table
+  // promises. The live role decides, so a demotion applies at once.
+  if (liveRole === 'viewer' && orgType !== 'diocese' && isReadMethod(req.method)
+      && !viewerMayRead(req.originalUrl)) {
+    return res.status(403).json({ error: VIEWER_SCOPE_ERROR, code: 'viewer_scope' })
+  }
+
   req.user = {
-    id: payload.userId, email: payload.email, name: payload.name, role: payload.role,
-    pastoral_lead: pastoralLead,
+    id: payload.userId, email: payload.email, name: payload.name, role: liveRole ?? payload.role,
+    pastoral_lead: pastoralLead, platform,
   }
   req.organizationId = payload.organizationId
   next()
@@ -155,7 +187,7 @@ export function requireOrgType(...allowed) {
       )
       if (!rows.length) return res.status(401).json({ error: 'Organization not found' })
       if (!allowed.includes(rows[0].org_type)) {
-        return res.status(403).json({ error: 'This area is not available to your organization type' })
+        return res.status(403).json({ code: 'org_type_forbidden', error: 'This area is not available to your organization type' })
       }
       req.orgType = rows[0].org_type
       next()

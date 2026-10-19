@@ -1,9 +1,14 @@
 import { useState } from 'react'
 import { Feather, Loader2 } from 'lucide-react'
 import { apiUrl } from '../api'
+import { useLocale } from '../i18n'
+import { useToast } from './ToastProvider'
+import { aiRefusalMessage } from '../utils/aiRefusal'
 
 export default function AITextArea({ value, onChange, placeholder, className = '', context = '', ...props }) {
   const [loading, setLoading] = useState(false)
+  const { t } = useLocale()
+  const toast = useToast()
 
   const enhance = async () => {
     if (!value.trim()) return
@@ -14,10 +19,12 @@ export default function AITextArea({ value, onChange, placeholder, className = '
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: value, context }),
       })
-      const data = await res.json()
-      if (data.result) onChange({ target: { value: data.result } })
+      const data = await res.json().catch(() => ({}))
+      if (res.ok && data.result) onChange({ target: { value: data.result } })
+      // A refusal is said out loud; the original text is left intact.
+      else if (!res.ok) toast.error(aiRefusalMessage(t, data, 'ai.refusal.ai_failed'))
     } catch {
-      // silently fail — leave original text intact
+      // network failure — leave original text intact
     } finally {
       setLoading(false)
     }

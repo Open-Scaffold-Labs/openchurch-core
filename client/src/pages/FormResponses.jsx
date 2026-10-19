@@ -9,6 +9,7 @@ import EmptyState from '../components/EmptyState'
 import { SkeletonRowList } from '../components/Skeleton'
 import { useToast } from '../components/ToastProvider'
 import { useAuth } from '../context/AuthContext'
+import { useLocale } from '../i18n'
 import { apiUrl } from '../api'
 import { todayLocalISO } from '../utils/dates'
 
@@ -124,6 +125,7 @@ export default function FormResponses() {
   const { user } = useAuth()
   const isAdmin  = user?.role === 'admin'
   const toast    = useToast()
+  const { t }    = useLocale()
 
   const [form, setForm]       = useState(null)
   const [responses, setResp]  = useState(null)
@@ -140,9 +142,9 @@ export default function FormResponses() {
     // page state.
     Promise.all([
       fetch(apiUrl(`/api/forms/${id}`))
-        .then(r => r.ok ? r.json() : Promise.reject(new Error(r.status === 404 ? 'not-found' : "Couldn't load responses. Nothing was lost — please retry."))),
+        .then(r => r.ok ? r.json() : Promise.reject(new Error(r.status === 404 ? 'not-found' : t('form.loadFailBody')))),
       fetch(apiUrl(`/api/forms/${id}/responses?limit=200`))
-        .then(r => r.ok ? r.json() : Promise.reject(new Error(r.status === 404 ? 'not-found' : "Couldn't load responses. Nothing was lost — please retry."))),
+        .then(r => r.ok ? r.json() : Promise.reject(new Error(r.status === 404 ? 'not-found' : t('form.loadFailBody')))),
     ])
       .then(([formData, respData]) => {
         setForm(formData)
@@ -151,7 +153,7 @@ export default function FormResponses() {
       })
       .catch(e => setErr(e.message))
       .finally(() => setLoad(false))
-  }, [id, isAdmin])
+  }, [id, isAdmin, t])
 
   useEffect(() => { load() }, [load])
 
@@ -168,7 +170,7 @@ export default function FormResponses() {
       downloadCsv(`${form.slug}-responses-${stamp}.csv`, csv)
       toast.info(`Exported ${responses.length} response${responses.length === 1 ? '' : 's'}`)
     } catch (e) {
-      toast.error("Couldn't export responses. Nothing was lost — please retry.")
+      toast.error(t('form.submitFail'))
     }
   }
 
@@ -217,7 +219,7 @@ export default function FormResponses() {
         <div className="max-w-2xl mx-auto py-16">
           <EmptyState
             icon={AlertTriangle}
-            title="Couldn't load responses"
+            title={t('form.loadFailTitle')}
             body={err}
             action={{ label: 'Retry', onClick: load }}
           />

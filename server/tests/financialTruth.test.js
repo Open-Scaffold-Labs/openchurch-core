@@ -305,14 +305,16 @@ describe('D2 — a charged gift cannot be deleted; refund is the only way back',
     const r = await refund(onlineId)
     expect(r.status).toBe(200)
     expect(r.body.payment_status).toBe('refunded')
-    expect(await previewHas()).toBe(false)
+    // Option A: the gift stays on the statement at live net 0.
+    expect(await previewHas()).toBe(true)
 
     const res = await del(onlineId)
     expect(res.status).toBe(409)
     expect(res.body.error).toMatch(/refund/i)
-    const { rows } = await pool.query('SELECT payment_status FROM ochr_donations WHERE id = $1', [onlineId])
+    const { rows } = await pool.query('SELECT payment_status, amount FROM ochr_donations WHERE id = $1', [onlineId])
     expect(rows.length).toBe(1)
     expect(rows[0].payment_status).toBe('refunded')
+    expect(Number(rows[0].amount)).toBe(25.5)
   })
 
   it('a manual gift (no payment_ref) deletes with 204 as before', async () => {
@@ -324,7 +326,7 @@ describe('D2 — a charged gift cannot be deleted; refund is the only way back',
     expect(rows.length).toBe(0)
   })
 
-  it('a recurring-source gift the cron charged can be refunded, and leaves /summary', async () => {
+  it('a recurring-source gift the cron charged can be refunded, and stays on /summary at net 0', async () => {
     const before = await summaryCount()
     const { rows } = await pool.query(
       `INSERT INTO ochr_donations
@@ -337,7 +339,10 @@ describe('D2 — a charged gift cannot be deleted; refund is the only way back',
     const r = await refund(rows[0].id)
     expect(r.status).toBe(200)
     expect(r.body.payment_status).toBe('refunded')
-    expect(await summaryCount()).toBe(before)
+    expect(Number(r.body.amount)).toBe(40)
+    expect(Number(r.body.live_amount)).toBe(0)
+    // Option A: the gift remains in the count; live totals drop by the refund.
+    expect(await summaryCount()).toBe(before + 1)
   })
 
   it("an 'online' row with no payment_ref is not sent to the provider — 400, pointing at delete", async () => {
@@ -433,20 +438,66 @@ describe('D4 — a non-signature webhook failure returns 500 so the provider ret
     delete process.env.BILLING_WEBHOOK_SECRET
   })
 
-  it('a donation whose INSERT fails (fund gone between checkout and webhook) → 500, no row', async () => {
+  // THE FIXTURE THIS TEST USED IS NO LONGER A FAILURE — and that is a fix,
+  // not a regression. It used to drive the INSERT into FK 23503 with a
+  // fund id that does not exist, and assert 500 + no row. That 500 was
+  // the honest answer to "we could not record it" — but a fund deleted
+  // between Checkout and the webhook stays deleted, so the 500 repeated
+  // on every redelivery until Stripe stopped trying, and the gift was
+  // lost for good (falseSuccessMoney.test.js D4). A missing fund is now
+  // resolved BEFORE the INSERT and the gift recorded undesignated.
+  //
+  // The property this test exists for — a processing failure is answered
+  // 5xx, never 200 — is kept, with a failure that is still a failure: the
+  // INSERT itself refused by a trigger. The provider must be told to
+  // redeliver, and no row may exist to make the redelivery a no-op.
+  it('a donation whose INSERT fails → 500, no row (the provider must redeliver)', async () => {
+    await pool.query(`
+      CREATE OR REPLACE FUNCTION zz_ft_boom_donation() RETURNS trigger AS $$
+      BEGIN
+        IF NEW.donor_name = 'FT Lost Donor' THEN RAISE EXCEPTION 'chaos: donation insert refused'; END IF;
+        RETURN NEW;
+      END $$ LANGUAGE plpgsql;
+      DROP TRIGGER IF EXISTS zz_ft_boom_donation ON ochr_donations;
+      CREATE TRIGGER zz_ft_boom_donation BEFORE INSERT ON ochr_donations FOR EACH ROW EXECUTE FUNCTION zz_ft_boom_donation();
+    `)
+    try {
+      const body = JSON.stringify({
+        type: 'checkout.session.completed',
+        data: { object: {
+          id: `cs_ft_${RUN_ID}`, mode: 'payment', payment_intent: `pi_ft_${RUN_ID}`, amount_total: 4000,
+          metadata: { kind: 'donation', organization_id: String(par.orgId), donor_name: 'FT Lost Donor', fund: 'Gone' },
+        } },
+      })
+      const res = await post(body, signed(body))
+      expect(res.status).toBe(500)
+      expect(res.body.received).toBe(false)
+      const { rows } = await pool.query('SELECT 1 FROM ochr_donations WHERE payment_ref = $1', [`pi_ft_${RUN_ID}`])
+      expect(rows.length).toBe(0)
+    } finally {
+      await pool.query(`
+        DROP TRIGGER IF EXISTS zz_ft_boom_donation ON ochr_donations;
+        DROP FUNCTION IF EXISTS zz_ft_boom_donation();
+      `)
+    }
+  })
+
+  it('a fund id that no longer exists is no longer a failure: 200, row recorded undesignated', async () => {
     const body = JSON.stringify({
       type: 'checkout.session.completed',
       data: { object: {
-        id: `cs_ft_${RUN_ID}`, mode: 'payment', payment_intent: `pi_ft_${RUN_ID}`, amount_total: 4000,
-        // A fund id that no longer exists: FK 23503 on the INSERT.
+        id: `cs_ft_gone_${RUN_ID}`, mode: 'payment', payment_intent: `pi_ft_gone_${RUN_ID}`, amount_total: 4000,
         metadata: { kind: 'donation', organization_id: String(par.orgId), fund_id: '999999999', donor_name: 'Lost Donor', fund: 'Gone' },
       } },
     })
     const res = await post(body, signed(body))
-    expect(res.status).toBe(500)
-    expect(res.body.received).toBe(false)
-    const { rows } = await pool.query('SELECT 1 FROM ochr_donations WHERE payment_ref = $1', [`pi_ft_${RUN_ID}`])
-    expect(rows.length).toBe(0)
+    expect(res.status).toBe(200)
+    expect(res.body.handled).toBe('donation')
+    const { rows } = await pool.query(
+      'SELECT fund_id, category FROM ochr_donations WHERE payment_ref = $1', [`pi_ft_gone_${RUN_ID}`])
+    expect(rows.length).toBe(1)
+    expect(rows[0].fund_id).toBeNull()
+    expect(rows[0].category).toBe('Gone')
   })
 
   it('a bad signature is still 400', async () => {

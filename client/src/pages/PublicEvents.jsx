@@ -21,19 +21,19 @@ import { useLocale } from '../i18n'
 // support the webcal scheme — they'll see a download prompt instead
 // of a subscribe handoff.
 
-function fmtDate(iso) {
+function fmtDate(iso, dateLocale) {
   if (!iso) return null
   const [y, m, d] = iso.split('T')[0].split('-').map(Number)
-  return new Date(y, m - 1, d).toLocaleDateString(undefined, {
+  return new Date(y, m - 1, d).toLocaleDateString(dateLocale, {
     weekday: 'long', month: 'long', day: 'numeric',
   })
 }
 
-function fmtTime(hms) {
+function fmtTime(hms, dateLocale) {
   if (!hms) return null
   const [h, m] = String(hms).split(':').map(Number)
   const date = new Date(2000, 0, 1, h, m)
-  return date.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+  return date.toLocaleTimeString(dateLocale, { hour: 'numeric', minute: '2-digit' })
 }
 
 // Group events by date so the page reads like a printed bulletin —
@@ -54,7 +54,9 @@ function groupByDate(events) {
 }
 
 export default function PublicEvents() {
-  const { setPublicLocale } = useLocale()
+  // User-visible chrome goes through t(). Event titles, locations,
+  // divisions, and liturgical feast / season stay parish-supplied data.
+  const { t, dateLocale, setPublicLocale } = useLocale()
   const { slug } = useParams()
   const [data, setData]     = useState(null)
   const [loading, setLoad]  = useState(true)
@@ -78,7 +80,7 @@ export default function PublicEvents() {
       .catch(e => { if (!cancelled) setErr(e.message) })
       .finally(() => { if (!cancelled) setLoad(false) })
     return () => { cancelled = true }
-  }, [slug])
+  }, [slug, setPublicLocale])
 
   const icsHttpUrl = `${window.location.origin}/api/public/${slug}/events.ics`
   // webcal:// triggers the OS calendar app on most platforms. Strip
@@ -99,10 +101,10 @@ export default function PublicEvents() {
         <div className="text-center max-w-md">
           <AlertTriangle size={28} className="mx-auto text-amber-600 dark:text-amber-300 mb-3" />
           <h1 className="font-display text-2xl font-semibold text-ink-900 dark:text-parchment-50">
-            Church not found
+            {t('events.notFound')}
           </h1>
           <p className="mt-2 text-sm text-ink-500 dark:text-parchment-300/70">
-            We couldn't find a church at <span className="font-mono">/{slug}</span>. Double-check the link from your bulletin.
+            {t('events.notFoundBefore')}<span className="font-mono">/{slug}</span>{t('events.notFoundAfter')}
           </p>
         </div>
       </div>
@@ -115,9 +117,9 @@ export default function PublicEvents() {
         <div className="text-center max-w-md">
           <AlertTriangle size={28} className="mx-auto text-rose-700 dark:text-rose-300 mb-3" />
           <h1 className="font-display text-2xl font-semibold text-ink-900 dark:text-parchment-50">
-            Couldn't load events
+            {t('events.loadFailTitle')}
           </h1>
-          <p className="mt-2 text-sm text-ink-500 dark:text-parchment-300/70">{err}</p>
+          <p className="mt-2 text-sm text-ink-500 dark:text-parchment-300/70">{t('events.loadFailBody')}</p>
         </div>
       </div>
     )
@@ -151,7 +153,7 @@ export default function PublicEvents() {
             {data.church.name}
           </h1>
           <p className="mt-3 text-sm md:text-base text-ink-500 dark:text-parchment-300/70">
-            Upcoming events
+            {t('events.title')}
           </p>
         </div>
 
@@ -160,10 +162,10 @@ export default function PublicEvents() {
           <div className="bg-parchment-100 dark:bg-ink-900/80 rounded-2xl border border-parchment-300/60 dark:border-brass-900/30 shadow-warm p-5 mb-8 flex flex-col sm:flex-row sm:items-center gap-3 sm:justify-between">
             <div>
               <p className="text-sm font-semibold text-ink-900 dark:text-parchment-50">
-                Add to your calendar
+                {t('events.addToCalendar')}
               </p>
               <p className="text-xs text-ink-500 dark:text-parchment-300/70 mt-0.5">
-                Sync with Apple Calendar, Google Calendar, or Outlook.
+                {t('events.calendarHelp')}
               </p>
             </div>
             <div className="flex items-center gap-2 shrink-0">
@@ -171,7 +173,7 @@ export default function PublicEvents() {
                 href={webcalUrl}
                 className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-church-900 dark:bg-church-700 text-parchment-50 text-sm font-semibold shadow-warm hover:bg-church-800 dark:hover:bg-church-600 transition-colors"
               >
-                Subscribe
+                {t('events.subscribe')}
               </a>
               <a
                 href={icsHttpUrl}
@@ -188,10 +190,10 @@ export default function PublicEvents() {
           <div className="text-center py-16">
             <Calendar size={28} className="mx-auto text-brass-600 dark:text-brass-300 mb-4 opacity-60" />
             <p className="text-sm text-ink-500 dark:text-parchment-300/70">
-              No upcoming public events scheduled.
+              {t('events.emptyTitle')}
             </p>
             <p className="text-xs text-ink-500 dark:text-parchment-300/70 mt-1">
-              Check back soon, or contact the church for the latest schedule.
+              {t('events.emptyBody')}
             </p>
           </div>
         ) : (
@@ -199,7 +201,7 @@ export default function PublicEvents() {
             {groups.map(group => (
               <li key={group.date}>
                 <h2 className="font-display text-lg font-semibold text-ink-900 dark:text-parchment-50 mb-3">
-                  {fmtDate(group.date)}
+                  {fmtDate(group.date, dateLocale)}
                 </h2>
                 <ul className="space-y-3">
                   {group.items.map(ev => (
@@ -229,7 +231,7 @@ export default function PublicEvents() {
                         {ev.time && (
                           <span className="inline-flex items-center gap-1.5">
                             <Clock size={13} className="text-ink-400 dark:text-parchment-400/60" />
-                            {fmtTime(ev.time)}
+                            {fmtTime(ev.time, dateLocale)}
                           </span>
                         )}
                         {ev.location && (
@@ -249,7 +251,7 @@ export default function PublicEvents() {
 
         {/* Footer attribution — quiet */}
         <p className="mt-12 text-center text-[11px] text-ink-500 dark:text-parchment-300/70">
-          Powered by OpenChurch
+          {t('events.powered')}
         </p>
       </motion.div>
     </div>

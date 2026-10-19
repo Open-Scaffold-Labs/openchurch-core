@@ -28,7 +28,13 @@ function encodeForm(params, prefix = '', out = []) {
 // POST (or GET with null params) to https://api.stripe.com/v1/<path>.
 // Throws on non-2xx with Stripe's error message so callers can log it;
 // returns the parsed JSON body on success.
-export async function stripeRequest(path, params, secretKey, { method } = {}) {
+//
+// idempotencyKey, when given, is sent as Stripe's `Idempotency-Key` header:
+// Stripe replays the FIRST response to every later request carrying the
+// same key (24h), so a retried or concurrent call for the same operation
+// is one movement of money at the provider, not two. Callers derive the
+// key from the thing being paid or refunded, never from the request.
+export async function stripeRequest(path, params, secretKey, { method, idempotencyKey } = {}) {
   if (!secretKey) throw new Error('stripeRequest: missing secret key')
   const m = method ?? (params ? 'POST' : 'GET')
   const res = await fetch(`https://api.stripe.com/v1/${path}`, {
@@ -36,6 +42,7 @@ export async function stripeRequest(path, params, secretKey, { method } = {}) {
     headers: {
       'Authorization': `Bearer ${secretKey}`,
       ...(m === 'POST' ? { 'Content-Type': 'application/x-www-form-urlencoded' } : {}),
+      ...(idempotencyKey ? { 'Idempotency-Key': String(idempotencyKey) } : {}),
     },
     ...(m === 'POST' && params ? { body: encodeForm(params).join('&') } : {}),
   })

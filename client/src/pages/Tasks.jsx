@@ -13,6 +13,8 @@ import { apiUrl } from '../api'
 import { initials } from '../utils/format'
 import { celebrateFirstAction } from '../utils/firstActionToast'
 import { useConfirm } from '../components/ConfirmProvider'
+import { formatStoredDate } from '../utils/dates'
+import { useLocale } from '../i18n'
 
 // ── Constants ────────────────────────────────────────────────
 const CATEGORIES = ['OPENING', 'CLOSING', 'DAILY_OPS', 'CLEANING', 'SERVICE_PREP', 'MAINTENANCE', 'COMMUNICATIONS']
@@ -260,7 +262,8 @@ function TaskCard({ task, onStatusChange, onDelete, onEdit, canWrite }) {
 // Mirrors LinkedTasks in Events.jsx, and must keep mirroring it: three
 // states, not two. "isn't on any events yet" is a claim about the parish's
 // calendar; a failed request is not entitled to make it.
-function LinkedEvents({ taskId, assignedMemberId }) {
+export function LinkedEvents({ taskId, assignedMemberId }) {
+  const { t } = useLocale()
   const [events, setEvents] = useState(null)
   const [eventsFailed, setEventsFailed] = useState(false)
 
@@ -291,7 +294,7 @@ function LinkedEvents({ taskId, assignedMemberId }) {
   if (eventsFailed) {
     return (
       <p role="status" className="text-xs text-amber-700 dark:text-amber-400">
-        We couldn't check which events this member is on. This is a connection problem, not an empty calendar.
+        {t('dash.upcomingUnread')}
       </p>
     )
   }
@@ -305,7 +308,9 @@ function LinkedEvents({ taskId, assignedMemberId }) {
   return (
     <ul className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
       {events.map(e => {
-        const when = e.date ? new Date(e.date).toLocaleDateString() : null
+        const when = e.date
+          ? formatStoredDate(e.date, { month: 'numeric', day: 'numeric', year: 'numeric' })
+          : null
         return (
           <li key={e.id} className="flex items-start gap-2 px-2.5 py-2 rounded-lg bg-parchment-100 dark:bg-ink-800/60 border border-parchment-300/60 dark:border-brass-900/30">
             <Calendar size={14} className="shrink-0 text-church-700 dark:text-brass-300 mt-0.5" />
@@ -329,6 +334,7 @@ function LinkedEvents({ taskId, assignedMemberId }) {
 
 // ── Modal form ───────────────────────────────────────────────
 function TaskModal({ task, onClose, onSave }) {
+  const { t } = useLocale()
   const [form, setForm] = useState(() => {
     const base = task ?? EMPTY_FORM
     return { ...base, checklist: normalizeChecklist(base.checklist) }
@@ -402,7 +408,7 @@ function TaskModal({ task, onClose, onSave }) {
             <label className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1.5">Assign To</label>
             {membersFailed && (
               <p role="status" className="mb-2 text-xs text-amber-700 dark:text-amber-400">
-                The member list didn't load, so this may be incomplete. It is not a sign that your parish has no members.
+                {t('mem.listFailed')}
               </p>
             )}
             {selectedMember ? (
@@ -562,6 +568,7 @@ export default function Tasks() {
   const { canWrite } = useAuth()
   const toast = useToast()
   const ask = useConfirm()
+  const { t } = useLocale()
 
   const PAGE_SIZE = 50
 
@@ -608,7 +615,7 @@ export default function Tasks() {
     // A silent return here is FAILED presented as NONE: the spinner
     // stops, no rows appear, and the person concludes they have reached
     // the end of their own records. Say it instead.
-    if (!ok) { toast.error("Couldn't load more tasks. Nothing was lost — try again."); setLoadingMore(false); return }
+    if (!ok) { toast.error(t('np.loadFailed')); setLoadingMore(false); return }
     setTasks(prev => [...prev, ...data])
     setHasMore(data.length === PAGE_SIZE)
     setLoadingMore(false)
@@ -653,7 +660,7 @@ export default function Tasks() {
     }
     setModal(null)
     load()
-    if (!isEdit) celebrateFirstAction('task', toast)
+    if (!isEdit) celebrateFirstAction('task', toast, stats?.total)
   }
 
   // Group tasks
@@ -752,10 +759,10 @@ export default function Tasks() {
               <AlertCircle size={18} className="shrink-0 mt-0.5 text-amber-700 dark:text-amber-400" aria-hidden="true" />
               <div className="flex-1 min-w-0">
                 <p className="text-sm font-semibold text-ink-900 dark:text-parchment-50">
-                  Some tasks didn't load.
+                  {t('load.failedTitle')}
                 </p>
                 <p className="text-sm text-ink-600 dark:text-parchment-300/80 mt-0.5">
-                  Nothing was lost — this is a connection problem, not your parish's data. What's shown below may be incomplete.
+                  {t('load.failedBody')}
                 </p>
               </div>
               <button
@@ -763,7 +770,7 @@ export default function Tasks() {
                 onClick={load}
                 className="shrink-0 text-sm font-semibold text-church-700 dark:text-brass-300 hover:underline focus:outline-none focus:ring-2 focus:ring-church-500 rounded px-2 py-1"
               >
-                Try again
+                {t('error.tryAgain')}
               </button>
             </div>
           )}
@@ -829,7 +836,7 @@ export default function Tasks() {
                 disabled={loadingMore}
                 className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold text-church-800 dark:text-brass-200 bg-parchment-100 dark:bg-ink-800/80 border border-parchment-300/60 dark:border-brass-900/30 hover:bg-parchment-200 dark:hover:bg-ink-800 transition-colors disabled:opacity-50"
               >
-                {loadingMore ? 'Loading…' : 'Load more'}
+                {loadingMore ? t('mem.loading') : t('mem.loadMore')}
               </button>
             </div>
           )}

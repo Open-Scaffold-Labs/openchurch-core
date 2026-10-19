@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Search, Plus, X, Pencil, Trash2, Feather, CheckCircle2, Clock, Circle, Link2, Users, Upload, AlertCircle, Loader2 } from 'lucide-react'
@@ -12,11 +12,12 @@ import AttendanceSection from '../components/AttendanceSection'
 import MemberPicker from '../components/MemberPicker'
 import { useAuth } from '../context/AuthContext'
 import { useToast } from '../components/ToastProvider'
+import { useLocale } from '../i18n'
 import { mutate, loadList } from '../utils/format'
 import { apiUrl } from '../api'
 import { celebrateFirstAction } from '../utils/firstActionToast'
 import { initials } from '../utils/format'
-import { formatLocalDate } from '../utils/dates'
+import { formatStoredDate } from '../utils/dates'
 import { LIT_COLOR_DOT as COLOR_DOT, LIT_COLOR_TEXT as COLOR_TEXT, LIT_COLOR_STRIPE as COLOR_STRIPE, LIT_COLOR_DOT_NONE } from '../utils/liturgicalColors'
 import { useConfirm } from '../components/ConfirmProvider'
 
@@ -54,6 +55,7 @@ async function enrichEventWithLiturgical(eventDate) {
 
 // ── Linked Tasks (auto-synced by shared member) ──────────────
 function LinkedTasks({ eventId }) {
+  const { t } = useLocale()
   const [tasks, setTasks] = useState(null)
   // null = still asking · tasksFailed = we asked and failed · [] = genuinely none.
   const [tasksFailed, setTasksFailed] = useState(false)
@@ -77,10 +79,11 @@ function LinkedTasks({ eventId }) {
   if (tasksFailed) {
     // Without this branch a failed lookup rendered "No tasks are assigned",
     // which is a claim about the parish's data made on the strength of a
-    // request that never came back.
+    // request that never came back. The sentence is the shared tasks-unread
+    // line so a Spanish session does not hear that claim in English either.
     return (
       <p role="status" className="text-xs text-amber-700 dark:text-amber-400">
-        Linked tasks didn't load — this isn't a sign there are none.
+        {t('dash.tasksUnread')}
       </p>
     )
   }
@@ -93,17 +96,17 @@ function LinkedTasks({ eventId }) {
   }
   return (
     <ul className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
-      {tasks.map(t => (
-        <li key={t.id} className="flex items-start gap-2 px-2.5 py-2 rounded-lg bg-parchment-100 dark:bg-ink-800/60 border border-parchment-300/60 dark:border-brass-900/30">
-          {STATUS_ICON[t.status] ?? STATUS_ICON.PENDING}
+      {tasks.map(task => (
+        <li key={task.id} className="flex items-start gap-2 px-2.5 py-2 rounded-lg bg-parchment-100 dark:bg-ink-800/60 border border-parchment-300/60 dark:border-brass-900/30">
+          {STATUS_ICON[task.status] ?? STATUS_ICON.PENDING}
           <div className="flex-1 min-w-0">
-            <p className={`text-xs font-medium truncate ${t.status === 'COMPLETED' ? 'line-through text-ink-500 dark:text-parchment-300/70' : 'text-ink-800 dark:text-parchment-100'}`}>
-              {t.title}
+            <p className={`text-xs font-medium truncate ${task.status === 'COMPLETED' ? 'line-through text-ink-500 dark:text-parchment-300/70' : 'text-ink-800 dark:text-parchment-100'}`}>
+              {task.title}
             </p>
             <p className="text-[10px] text-ink-500 dark:text-parchment-300/70 truncate">
-              {t.assigned_member_name ?? 'Unassigned'}
-              {t.due_date ? ` · due ${formatLocalDate(t.due_date, { month: 'numeric', day: 'numeric', year: 'numeric' })}` : ''}
-              {t.priority ? ` · ${t.priority}` : ''}
+              {task.assigned_member_name ?? 'Unassigned'}
+              {task.due_date ? ` · due ${formatStoredDate(task.due_date, { month: 'numeric', day: 'numeric', year: 'numeric' })}` : ''}
+              {task.priority ? ` · ${task.priority}` : ''}
             </p>
           </div>
         </li>
@@ -135,13 +138,23 @@ export default function Events() {
   // the last page came back full — a short page means we've hit the end.
   const [hasMore, setHasMore] = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
+  // R309-1: how many events the parish has, known ONLY from the latest
+  // settled, successful, unfiltered first-page read. null while a read is
+  // pending, after a failure, or when the list on screen came from a search
+  // (clearing the box does not make a filtered list unfiltered). The
+  // first-event toast reads this, never `events.length`.
+  const [unfilteredCount, setUnfilteredCount] = useState(null)
+  const fetchGen = useRef(0)
   const { canWrite } = useAuth()
   const toast = useToast()
   const ask = useConfirm()
+  const { t } = useLocale()
 
   const PAGE_SIZE = 50
 
   useEffect(() => { fetchEvents() }, [])
+  // Unmount retires any read still in flight (no late list/count writes).
+  useEffect(() => () => { fetchGen.current += 1 }, [])
   // An empty picker reads as "this parish has no members". A failed roster
   // call is not that fact, so it is not allowed to look like it.
   //
@@ -164,11 +177,18 @@ export default function Events() {
   // boundary reading "events.map is not a function". loadList refuses to
   // hand back a non-array, and the failure becomes a sentence instead.
   async function fetchEvents() {
+    const gen = ++fetchGen.current
+    const query = search
+    setUnfilteredCount(null)
     const params = new URLSearchParams()
-    if (search) params.set('search', search)
+    if (query) params.set('search', query)
     params.set('limit', String(PAGE_SIZE))
     params.set('offset', '0')
     const { ok, data } = await loadList(apiUrl(`/api/events?${params}`))
+    // Latest request wins: a slower, older read (e.g. the filtered one)
+    // must not overwrite the list or the count of a newer one.
+    if (gen !== fetchGen.current) return
+    setUnfilteredCount(ok && !query ? data.length : null)
     setEvents(data)
     setEventsFailed(!ok)
     setInitialLoading(false)
@@ -189,7 +209,7 @@ export default function Events() {
     // A silent return here is FAILED presented as NONE: the spinner
     // stops, no rows appear, and the person concludes they have reached
     // the end of their own records. Say it instead.
-    if (!ok) { toast.error("Couldn't load more events. Nothing was lost — try again."); setLoadingMore(false); return }
+    if (!ok) { toast.error(t('err.load')); setLoadingMore(false); return }
     setEvents(prev => [...prev, ...data])
     setHasMore(data.length === PAGE_SIZE)
     setLoadingMore(false)
@@ -275,7 +295,7 @@ export default function Events() {
     setLoading(false)
     setShowForm(false)
     fetchEvents()
-    if (!editing) celebrateFirstAction('event', toast)
+    if (!editing) celebrateFirstAction('event', toast, unfilteredCount)
   }
 
   async function remove(id) {
@@ -320,12 +340,12 @@ export default function Events() {
         <motion.div variants={itemVariants} role="status" className="mb-5 flex items-start gap-3 rounded-2xl border border-amber-300/70 dark:border-amber-700/40 bg-amber-50/70 dark:bg-amber-900/15 px-5 py-4">
           <AlertCircle size={18} className="shrink-0 mt-0.5 text-amber-700 dark:text-amber-400" aria-hidden="true" />
           <div className="flex-1 min-w-0">
-            <p className="text-sm font-semibold text-ink-900 dark:text-parchment-50">Some events didn't load.</p>
+            <p className="text-sm font-semibold text-ink-900 dark:text-parchment-50">{t('load.failedTitle')}</p>
             <p className="text-sm text-ink-600 dark:text-parchment-300/80 mt-0.5">
-              Nothing was lost — this is a connection problem, not your parish's calendar. What's shown below may be incomplete.
+              {t('load.failedBody')}
             </p>
           </div>
-          <button onClick={fetchEvents} className="shrink-0 text-sm font-medium text-church-700 dark:text-brass-300 underline min-h-[32px]">Try again</button>
+          <button onClick={fetchEvents} className="shrink-0 text-sm font-medium text-church-700 dark:text-brass-300 underline min-h-[32px]">{t('error.tryAgain')}</button>
         </motion.div>
       )}
 
@@ -352,7 +372,7 @@ export default function Events() {
           <tbody className="divide-y divide-parchment-200/60 dark:divide-brass-900/30">
             {events.length === 0 && (
               <tr><td colSpan={8} className="px-4 py-10 text-center text-ink-500 dark:text-parchment-300/70">
-                {eventsFailed ? "We couldn't load the calendar just now." : 'No events found.'}
+                {eventsFailed ? t('dash.upcomingUnread') : 'No events found.'}
               </td></tr>
             )}
             <AnimatePresence>
@@ -377,7 +397,7 @@ export default function Events() {
                         </span>
                       ) : '—'}
                     </td>
-                    <td className="px-4 py-3 text-ink-600 dark:text-parchment-300">{ev.date ? formatLocalDate(ev.date, { month: 'numeric', day: 'numeric', year: 'numeric' }) : '—'}</td>
+                    <td className="px-4 py-3 text-ink-600 dark:text-parchment-300">{ev.date ? formatStoredDate(ev.date, { month: 'numeric', day: 'numeric', year: 'numeric' }) : '—'}</td>
                     <td className="px-4 py-3 text-ink-600 dark:text-parchment-300">{ev.time || '—'}</td>
                     <td className="px-4 py-3 text-ink-600 dark:text-parchment-300">{ev.location || '—'}</td>
                     <td className="px-4 py-3">
@@ -425,7 +445,7 @@ export default function Events() {
             disabled={loadingMore}
             className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold text-church-800 dark:text-brass-200 bg-parchment-100 dark:bg-ink-800/80 border border-parchment-300/60 dark:border-brass-900/30 hover:bg-parchment-200 dark:hover:bg-ink-800 transition-colors disabled:opacity-50"
           >
-            {loadingMore ? 'Loading…' : 'Load more'}
+            {loadingMore ? t('mem.loading') : t('mem.loadMore')}
           </button>
         </div>
       )}
@@ -480,8 +500,8 @@ export default function Events() {
                   </label>
                   {membersFailed && (
                     <p role="status" className="mb-1.5 text-[11px] text-amber-700 dark:text-amber-400">
-                      The member list didn't load, so this may be incomplete. It is not a sign that your parish has no members.{' '}
-                      <button type="button" onClick={loadMembers} className="underline font-medium">Try again</button>
+                      {t('mem.listFailed')}{' '}
+                      <button type="button" onClick={loadMembers} className="underline font-medium">{t('error.tryAgain')}</button>
                     </p>
                   )}
                   <MemberPicker

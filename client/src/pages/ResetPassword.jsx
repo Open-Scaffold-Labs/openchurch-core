@@ -3,6 +3,7 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import { Lock, Loader2, Eye, EyeOff, AlertTriangle } from 'lucide-react'
 import { apiUrl } from '../api'
+import { useLocale } from '../i18n'
 import TextField from '../components/TextField'
 
 // Step 2 of password reset. Reads the one-shot token from the URL,
@@ -13,6 +14,7 @@ import TextField from '../components/TextField'
 const MIN_PW = 8
 
 export default function ResetPassword() {
+  const { t, locale, setLocale } = useLocale()
   const [params]   = useSearchParams()
   const navigate   = useNavigate()
   const token      = useMemo(() => params.get('token') || '', [params])
@@ -33,17 +35,34 @@ export default function ResetPassword() {
             <AlertTriangle size={20} />
           </div>
           <h1 className="font-display text-2xl font-semibold text-ink-900 dark:text-parchment-50">
-            Reset link missing
+            {t('reset.missingTitle')}
           </h1>
           <p className="mt-3 text-sm text-ink-500 dark:text-parchment-300/70 leading-relaxed">
-            This page is only reachable from a password-reset email. If you came here directly, request a new link.
+            {t('reset.missingBody')}
           </p>
           <Link
             to="/forgot"
             className="tap mt-6 inline-flex items-center justify-center px-5 py-2.5 rounded-lg bg-church-900 dark:bg-church-700 text-parchment-50 text-sm font-semibold shadow-warm hover:bg-church-800 dark:hover:bg-church-600 transition-colors"
           >
-            Send a reset link
+            {t('reset.sendLink')}
           </Link>
+          <p className="mt-6 text-center text-xs text-ink-400 dark:text-parchment-400/60">
+            <button
+              type="button"
+              onClick={() => setLocale('en')}
+              className={`tap-auth px-1 transition-colors ${locale === 'en' ? 'text-church-800 dark:text-brass-300 font-semibold' : 'hover:text-ink-600 dark:hover:text-parchment-200'}`}
+            >
+              English
+            </button>
+            {' · '}
+            <button
+              type="button"
+              onClick={() => setLocale('es')}
+              className={`tap-auth px-1 transition-colors ${locale === 'es' ? 'text-church-800 dark:text-brass-300 font-semibold' : 'hover:text-ink-600 dark:hover:text-parchment-200'}`}
+            >
+              Español
+            </button>
+          </p>
         </div>
       </div>
     )
@@ -53,10 +72,10 @@ export default function ResetPassword() {
     e.preventDefault()
     setError('')
     if (password.length < MIN_PW) {
-      return setError(`Password must be at least ${MIN_PW} characters`)
+      return setError(t('signup.passwordMin', { min: MIN_PW }))
     }
     if (password !== confirm) {
-      return setError('Passwords do not match')
+      return setError(t('reset.mismatch'))
     }
     setLoading(true)
     try {
@@ -66,7 +85,7 @@ export default function ResetPassword() {
         body: JSON.stringify({ token, password }),
       })
       const data = await res.json().catch(() => ({}))
-      if (!res.ok) throw new Error(data.error || "That didn't save — nothing was lost. Please try again.")
+      if (!res.ok) throw new Error(data.error || t('err.save'))
       navigate('/login', { replace: true, state: { passwordReset: true } })
     } catch (err) {
       setError(err.message)
@@ -97,30 +116,29 @@ export default function ResetPassword() {
 
         <div className="bg-parchment-100 dark:bg-ink-900/80 rounded-2xl border border-parchment-300/60 dark:border-brass-900/30 shadow-warm-md p-7">
           <h1 className="font-display text-2xl font-semibold text-ink-900 dark:text-parchment-50">
-            Choose a new password
+            {t('reset.title')}
           </h1>
           <p className="text-sm text-ink-500 dark:text-parchment-300/70 mt-1">
-            Make it at least {MIN_PW} characters. You&rsquo;ll be signed in fresh after.
+            {t('reset.sub', { min: MIN_PW })}
           </p>
 
           <form onSubmit={onSubmit} className="mt-6 space-y-4">
             <TextField
-              label="New password"
+              label={t('reset.newPassword')}
               type={showPw ? 'text' : 'password'}
               required
               minLength={MIN_PW}
               autoComplete="new-password"
               value={password}
               onChange={e => setPassword(e.target.value)}
-              placeholder={`At least ${MIN_PW} characters`}
+              placeholder={t('signup.passwordPh', { min: MIN_PW })}
               leadingIcon={Lock}
               trailing={
                 <button
                   type="button"
                   onClick={() => setShowPw(s => !s)}
-                  className="tap-reach text-ink-400 dark:text-parchment-400/60 hover:text-ink-600 dark:hover:text-parchment-200 transition-colors"
-                  tabIndex={-1}
-                  aria-label={showPw ? 'Hide password' : 'Show password'}
+                  className="tap-auth text-ink-400 dark:text-parchment-400/60 hover:text-ink-600 dark:hover:text-parchment-200 transition-colors"
+                  aria-label={showPw ? t('login.hidePassword') : t('login.showPassword')}
                 >
                   {showPw ? <EyeOff size={15} /> : <Eye size={15} />}
                 </button>
@@ -128,19 +146,19 @@ export default function ResetPassword() {
             />
 
             <TextField
-              label="Confirm new password"
+              label={t('reset.confirmPassword')}
               type={showPw ? 'text' : 'password'}
               required
               minLength={MIN_PW}
               autoComplete="new-password"
               value={confirm}
               onChange={e => setConfirm(e.target.value)}
-              placeholder="Re-enter the new password"
+              placeholder={t('reset.confirmPh')}
               leadingIcon={Lock}
             />
 
             {error && (
-              <div className="text-xs text-rose-700 dark:text-rose-300 bg-rose-50 dark:bg-rose-900/20 border border-rose-100 dark:border-rose-800/30 rounded-lg px-3 py-2">
+              <div role="alert" className="text-xs text-rose-700 dark:text-rose-300 bg-rose-50 dark:bg-rose-900/20 border border-rose-100 dark:border-rose-800/30 rounded-lg px-3 py-2">
                 {error}
               </div>
             )}
@@ -151,10 +169,28 @@ export default function ResetPassword() {
               className="tap w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-church-900 dark:bg-church-700 text-parchment-50 text-sm font-semibold shadow-warm hover:bg-church-800 dark:hover:bg-church-600 transition-colors disabled:opacity-50"
             >
               {loading ? <Loader2 size={15} className="animate-spin" /> : null}
-              {loading ? 'Updating…' : 'Set new password'}
+              {loading ? t('reset.submitting') : t('reset.submit')}
             </button>
           </form>
         </div>
+
+        <p className="mt-5 text-center text-xs text-ink-400 dark:text-parchment-400/60">
+          <button
+            type="button"
+            onClick={() => setLocale('en')}
+            className={`tap-auth px-1 transition-colors ${locale === 'en' ? 'text-church-800 dark:text-brass-300 font-semibold' : 'hover:text-ink-600 dark:hover:text-parchment-200'}`}
+          >
+            English
+          </button>
+          {' · '}
+          <button
+            type="button"
+            onClick={() => setLocale('es')}
+            className={`tap-auth px-1 transition-colors ${locale === 'es' ? 'text-church-800 dark:text-brass-300 font-semibold' : 'hover:text-ink-600 dark:hover:text-parchment-200'}`}
+          >
+            Español
+          </button>
+        </p>
       </motion.div>
     </div>
   )

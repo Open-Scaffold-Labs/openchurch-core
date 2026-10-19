@@ -3,6 +3,20 @@ import { Loader2, Send, RotateCcw, ShieldCheck } from 'lucide-react'
 import { apiUrl } from '../api'
 import { loadOne, postJson } from '../utils/format'
 import LoadError from '../components/LoadError'
+import { useConfirm } from '../components/ConfirmProvider'
+import { STRINGS } from '../i18n/strings'
+import ClosureReceipt from '../components/ClosureReceipt'
+
+function t(key, vars) {
+  let locale = 'en'
+  try {
+    const stored = localStorage.getItem('ochr_locale')
+    if (stored && STRINGS[stored]) locale = stored
+  } catch { /* private mode — stay on English */ }
+  let s = STRINGS[locale]?.[key] ?? STRINGS.en[key] ?? key
+  if (vars) for (const [name, value] of Object.entries(vars)) s = s.replaceAll(`{${name}}`, String(value))
+  return s
+}
 
 // The chancery's own people (PILOT.2).
 //
@@ -32,6 +46,12 @@ export default function Team() {
   const [invite, setInvite] = useState(null)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const [closureNote, setClosureNote] = useState(null)
+  const [closureBusy, setClosureBusy] = useState(null)
+  const [roleBusy, setRoleBusy] = useState(null)
+  const [restoreBusy, setRestoreBusy] = useState(null)
+  const [restoreUnknown, setRestoreUnknown] = useState(() => new Set())
+  const ask = useConfirm()
 
   // `Array.isArray(d) ? d : []` swallowed a 500 too — an error body is not
   // an array, so a failed load rendered as a chancery with nobody in it,
@@ -59,6 +79,92 @@ export default function Team() {
       setForm({ name: '', email: '', role: 'staff', pastoral_lead: false })
       await load()
     } finally { setBusy(false) }
+  }
+
+  const closeLogin = async (u) => {
+    const display = u.closed ? t('team.formerOperator') : u.name
+    const ok = await ask({
+      title: t('team.closeTitle', { name: display }),
+      body: t('team.closeBody'),
+      confirmLabel: t('team.closeConfirm'),
+      cancelLabel: t('team.closeCancel'),
+      tone: 'destructive',
+    })
+    if (!ok) return
+    setError('')
+    setClosureBusy(u.id)
+    setClosureNote(null)
+    try {
+      const res = await fetch(apiUrl(`/api/users/${u.id}/close`), { method: 'POST' })
+      if (res.status === 409) { setError(t('team.closeLastAdmin')); return }
+      const body = await res.json().catch(() => null)
+      if (res.status === 200 && body?.closed === true) {
+        setClosureNote(body)
+        await load()
+        if (!Array.isArray(body.reviews)) await showClosure(u, true)
+        return
+      }
+      setError(t('team.closeFailed'))
+    } catch {
+      setError(t('team.closeFailed'))
+    } finally { setClosureBusy(null) }
+  }
+
+  const showClosure = async (u, knownClosed = u.closed === true) => {
+    setError('')
+    setClosureBusy(u.id)
+    try {
+      const res = await fetch(apiUrl(`/api/users/${u.id}/closure`))
+      const body = await res.json().catch(() => null)
+      if (res.status === 200 && body?.closed === true) { setClosureNote(body); return }
+      setError(t(knownClosed ? 'team.receiptFailed' : 'team.closeFailed'))
+    } catch {
+      setError(t(knownClosed ? 'team.receiptFailed' : 'team.closeFailed'))
+    } finally { setClosureBusy(null) }
+  }
+
+  const changeRole = async (u, role) => {
+    if (role === u.role) return
+    setError('')
+    setRoleBusy(u.id)
+    try {
+      const res = await fetch(apiUrl(`/api/users/${u.id}/role`), {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ role }),
+      })
+      const body = await res.json().catch(() => null)
+      if (res.status !== 200 || body?.id !== u.id || body?.role !== role) {
+        setError(t('team.roleFailed')); return
+      }
+      await load()
+    } catch { setError(t('team.roleFailed')) }
+    finally { setRoleBusy(null) }
+  }
+
+  const restoreLogin = async (u) => {
+    if (!(await ask({
+      title: t('team.turnOnTitle', { name: u.name }),
+      body: t('team.turnOnBody'),
+      confirmLabel: t('team.turnOnConfirm'),
+    }))) return
+    setError('')
+    setRestoreBusy(u.id)
+    try {
+      const res = await fetch(apiUrl(`/api/users/${u.id}/reactivate`), { method: 'POST' })
+      const body = await res.json().catch(() => null)
+      if (res.status !== 200 || !(body?.reactivated === true || (body?.reactivated === false && body?.already === true))) {
+        setRestoreUnknown(current => new Set(current).add(u.id))
+        setError(t('team.turnOnFailed')); return
+      }
+      setRestoreUnknown(current => {
+        const next = new Set(current); next.delete(u.id); return next
+      })
+      await load()
+    } catch {
+      setRestoreUnknown(current => new Set(current).add(u.id))
+      setError(t('team.turnOnFailed'))
+    }
+    finally { setRestoreBusy(null) }
   }
 
   const resend = async (u) => {
@@ -153,7 +259,8 @@ export default function Team() {
           </p>
         </form>
 
-        {error && <p className="mt-3 text-[13px] text-church-700">{error}</p>}
+        {error && <p role="alert" className="mt-3 text-[13px] text-church-700">{error}</p>}
+        <ClosureReceipt receipt={closureNote} t={t} />
 
         {/* Until an email provider is picked, the link is shown so it can be
             passed along by hand. It is a one-time link, not a password —
@@ -188,7 +295,14 @@ export default function Team() {
               <li key={u.id} className="bg-parchment-50 px-4 py-3 flex flex-wrap items-start justify-between gap-3">
                 <div className="min-w-0">
                   <p className="text-[13.5px] font-medium text-ink-900">
-                    {u.name}
+                    {u.closed ? t('team.formerOperator') : u.name}
+                    {u.closed && (
+                      <span className="ml-2 inline-block px-2 py-0.5 rounded-full text-[11px] font-semibold bg-parchment-200/80 text-ink-600">
+                        {t('team.loginClosed')}
+                      </span>
+                    )}
+                    {restoreUnknown.has(u.id) && !u.closed ? <span className="ml-2 text-[11px] text-ink-600">{t('team.loginUnknown')}</span> :
+                      u.deactivated && !u.closed && <span className="ml-2 text-[11px] text-ink-600">{t('team.loginOff')}</span>}
                     {u.pending && (
                       <span className="ml-2 inline-block px-2 py-0.5 rounded-full text-[11px] font-semibold bg-parchment-200/80 text-ink-600">
                         invitation not accepted yet
@@ -196,23 +310,53 @@ export default function Team() {
                     )}
                   </p>
                   <p className="text-[12px] text-ink-500 mt-0.5">
-                    {[u.email, u.role,
+                    {[u.closed ? null : u.email, u.role,
                       u.pending && u.invited_by_name && `invited by ${u.invited_by_name}`,
                      ].filter(Boolean).join(' · ')}
                   </p>
                 </div>
 
                 <div className="flex items-center gap-3 shrink-0">
+                  <select value={u.role}
+                    aria-label={t('team.roleFor', { name: u.closed ? t('team.formerOperator') : u.name })}
+                    disabled={u.closed || roleBusy !== null}
+                    onChange={e => changeRole(u, e.target.value)}
+                    className="min-h-[44px] rounded-lg border border-parchment-300 bg-parchment-50 text-ink-900 px-2 focus:ring-2 focus:ring-brass-400">
+                    {['admin', 'staff', 'viewer'].map(role => <option key={role} value={role}>{t('team.role.' + role)}</option>)}
+                  </select>
+                  {roleBusy === u.id && <span role="status">{t('team.roleSaving')}</span>}
                   <label className="flex items-center gap-1.5 text-[12px] text-ink-600">
-                    <input type="checkbox" checked={u.pastoral_lead}
+                    <input type="checkbox" checked={u.pastoral_lead} disabled={u.closed}
                       onChange={e => setLead(u, e.target.checked)} />
                     <ShieldCheck size={13} className="text-brass-600" aria-hidden="true" />
                     Pastoral leadership
                   </label>
-                  {u.pending && (
+                  {u.pending && !u.closed && (
                     <button type="button" onClick={() => resend(u)}
                       className="inline-flex items-center gap-1 text-[12px] text-church-700 hover:underline">
                       <RotateCcw size={12} /> Resend
+                    </button>
+                  )}
+                  {(u.deactivated || restoreUnknown.has(u.id)) && !u.closed && (
+                    <button type="button" onClick={() => restoreLogin(u)}
+                      disabled={restoreBusy !== null}
+                      aria-label={t('team.turnOnName', { name: u.name })}
+                      className="min-h-[44px] px-2 text-[12px] text-church-700 hover:underline">
+                      {t(restoreBusy === u.id ? 'team.turnOnSaving' : 'team.turnOn')}
+                    </button>
+                  )}
+                  {u.closed ? (
+                    <button type="button" onClick={() => showClosure(u)}
+                      disabled={closureBusy !== null}
+                      className="min-h-[44px] px-2 text-[12px] text-church-700 hover:underline">
+                      {t(closureBusy === u.id ? 'team.receiptLoading' : 'team.closureStatus')}
+                    </button>
+                  ) : (
+                    <button type="button" onClick={() => closeLogin(u)}
+                      disabled={closureBusy !== null}
+                      className="min-h-[44px] px-2 text-[12px] text-rose-800 hover:underline"
+                      aria-label={t('team.closeName', { name: u.name })}>
+                      {t(closureBusy === u.id ? 'team.closeSaving' : 'team.closeConfirm')}
                     </button>
                   )}
                 </div>
@@ -224,3 +368,4 @@ export default function Team() {
     </div>
   )
 }
+

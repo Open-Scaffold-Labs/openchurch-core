@@ -49,6 +49,39 @@ export function parseLocalDate(str) {
   return new Date(str)
 }
 
+// A bare civil day: 'YYYY-MM-DD'. A timestamp is an instant, including
+// one that happens to fall on exact midnight UTC. created_at backfills
+// of that shape must stay instants (the next local day west of UTC is
+// the real clock, not a DATE column).
+const BARE_DAY = /^(\d{4})-(\d{2})-(\d{2})$/
+
+// Known DATE columns also arrive as the old node-pg JSON of a DATE on a
+// UTC server: 'YYYY-MM-DDT00:00:00.000Z'. That Z is midnight of the
+// stored day, not a time of day. Only parseStoredDate accepts it.
+const STORED_DATE = /^(\d{4})-(\d{2})-(\d{2})(?:$|T00:00:00(?:\.000)?Z$)/
+
+function dateFromParts(year, month, day) {
+  const date = new Date(year, month - 1, day)
+  // Overflow (31 Apr, 29 Feb in a common year) must not roll forward.
+  if (date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day) return null
+  return date
+}
+
+export function parseCivilDay(value) {
+  if (value == null || value === '') return null
+  const m = BARE_DAY.exec(String(value).trim())
+  if (!m) return null
+  return dateFromParts(Number(m[1]), Number(m[2]), Number(m[3]))
+}
+
+// A stored DATE column: bare civil day, or the legacy UTC-midnight JSON.
+export function parseStoredDate(value) {
+  if (value == null || value === '') return null
+  const m = STORED_DATE.exec(String(value).trim())
+  if (!m) return null
+  return dateFromParts(Number(m[1]), Number(m[2]), Number(m[3]))
+}
+
 // Range-bound helpers for date-input filters that get sent to the
 // server as ISO instants. A bare 'YYYY-MM-DD' parsed with `new Date()`
 // is UTC midnight, so an `until` bound would exclude everything logged
@@ -77,8 +110,40 @@ export function endOfLocalDayISO(str) {
 // language-aware month and weekday names.
 export function formatLocalDate(str, opts, locale = 'en-US') {
   if (!str) return ''
-  return parseLocalDate(str).toLocaleDateString(
+  const civil = typeof str === 'string' ? parseCivilDay(str) : null
+  return (civil ?? parseLocalDate(str)).toLocaleDateString(
     locale,
     opts ?? { month: 'short', day: 'numeric', year: 'numeric' },
   )
+}
+
+// Same display as formatLocalDate, but for a known DATE column. Accepts
+// the legacy midnight-Z JSON of that column. Do not use this for
+// created_at or any other timestamp.
+export function formatStoredDate(str, opts, locale = 'en-US') {
+  if (!str) return ''
+  const civil = typeof str === 'string' ? parseStoredDate(str) : null
+  return (civil ?? parseLocalDate(str)).toLocaleDateString(
+    locale,
+    opts ?? { month: 'short', day: 'numeric', year: 'numeric' },
+  )
+}
+
+// Parish calendar day stored on a DATE column (ochr_calendar_events.date,
+// mass_date). The column has no time and no zone — it is the day the
+// office typed, not an instant in the browser's timezone.
+//
+// JSON is either "YYYY-MM-DD" or the UTC-midnight form
+// "YYYY-MM-DDT00:00:00.000Z". The first ten characters of that form are
+// the stored day. Do not re-read them through local Date fields: west
+// of UTC, local fields name the day before.
+export function calendarDay(value) {
+  if (value == null || value === '') return ''
+  const s = value instanceof Date && !Number.isNaN(value.getTime())
+    ? value.toISOString()
+    : String(value).trim()
+  const bare = /^(\d{4}-\d{2}-\d{2})$/.exec(s)
+  if (bare) return bare[1]
+  const utcMidnight = /^(\d{4}-\d{2}-\d{2})T00:00:00(?:\.0+)?Z$/.exec(s)
+  return utcMidnight ? utcMidnight[1] : ''
 }

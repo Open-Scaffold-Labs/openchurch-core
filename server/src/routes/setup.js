@@ -106,15 +106,14 @@ async function inPlace(orgId, role) {
   // address actually being there. Delete the address and this entry goes
   // away, which is the point of deriving it.
   //
-  // NOT `o.address && o.timezone`. `timezone` is NOT NULL DEFAULT 'UTC'
-  // (migration 040) and signup never sets it, so it is truthy for every
-  // parish that ever existed and the condition silently collapsed to
-  // `o.address`. Worse, the same expression suppressed the "confirm the
-  // parish details" suggestion, so a Californian parish that entered only
-  // a street address was told its details were on file, never asked for a
-  // timezone, and quietly ran its schedule on UTC. Exactly the class of
-  // default-read-as-choice the tradition check above exists to prevent —
-  // one column over.
+  // NOT `o.address && o.timezone`. `timezone` is NOT NULL (migration
+  // 040). Signup stores the browser zone, or UTC when that zone is
+  // missing or one this database cannot use, and staff can change it
+  // in Org details. The column is therefore truthy for every parish,
+  // and a stored zone is not "the parish confirmed its details." The
+  // address is that confirmation. Folding timezone into the check
+  // collapsed it to `o.address` and hid the suggestion. Same class of
+  // default-read-as-choice as the tradition check above.
   if (o.address) {
     entries.push({ key: 'setup.inPlace.context', on: null })
   }
@@ -157,6 +156,21 @@ async function inPlace(orgId, role) {
   if (r.funds > 0)   entries.push({ key: 'setup.inPlace.funds',   on: null, detail: { count: r.funds } })
 
   return { entries, org: o, latestImport: imp, people: people.rows, counts: r }
+}
+
+// R288-1: what a Viewer's Getting settled ledger may carry. An explicit
+// ALLOW list, so a future entry is withheld from Viewers until it is added
+// here on purpose. Import (source name, receipt counts) and funds are
+// Migration Studio / Finance facts, both outside Viewer scope.
+export const VIEWER_SETUP_IN_PLACE = new Set([
+  'setup.inPlace.workspace', 'setup.inPlace.context', 'setup.inPlace.tradition',
+  'setup.inPlace.people', 'setup.inPlace.members', 'setup.inPlace.events',
+])
+export function projectInPlace(entries, role) {
+  if (role !== 'viewer') return entries
+  return entries
+    .filter(e => VIEWER_SETUP_IN_PLACE.has(e.key))
+    .map(e => (e.key === 'setup.inPlace.people' ? { ...e, detail: { count: e.detail?.count ?? null } } : e))
 }
 
 // ── a good place to begin ────────────────────────────────────────────────
@@ -286,7 +300,7 @@ router.get('/', async (req, res) => {
       // the Dashboard. The PAGE itself is always reachable — dismissing
       // hides a suggestion, never a destination.
       dismissed_at: dismissal.rows[0]?.dismissed_at ?? null,
-      in_place: state.entries,
+      in_place: projectInPlace(state.entries, role),
       begin_here: beginHere({
         role, org: state.org, latestImport: state.latestImport,
         counts: state.counts, marks: liveMarks, orgType,

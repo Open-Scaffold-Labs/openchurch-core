@@ -4,7 +4,7 @@
 // server/src/routes/auth.js:
 //
 //   200  { user }                    the session is valid
-//   401  five distinct paths — no header, bad/expired token, unknown user,
+//   401  five distinct paths — no cookie, bad/expired token, unknown user,
 //        token_version bumped (revoked). ALL positive rejections.
 //   500  'Authentication check failed' / 'Failed to load account' — the
 //        database threw. The server is saying it COULD NOT CHECK.
@@ -13,16 +13,14 @@
 // Elsewhere 403 means authenticated-but-not-permitted, which is never a
 // reason to end a session.
 //
-// The client collapsed all of that into `if (!res.ok) throw` and cleared
-// the session in the catch. So a database hiccup signed the secretary out
-// and sent her to /login — the app asserting her session was invalid when
-// what it actually knew was nothing.
+// The session lives in an httpOnly cookie. A 5xx must not bounce the
+// secretary to /login — the cookie is still there, we just could not
+// confirm it.
 
 import { render, screen, waitFor, fireEvent, act } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { AuthProvider, useAuth } from './AuthContext'
 
-const TOKEN = 'stored.jwt.value'
 const USER = {
   id: 1, email: 'secretary@sttest.org', name: 'Secretary', role: 'admin',
   organization: { id: 1, name: 'St Test', slug: 'st-test' },
@@ -37,7 +35,7 @@ function Probe() {
       <span data-testid="authed">{String(isAuthenticated)}</span>
       <span data-testid="loading">{String(loading)}</span>
       <span data-testid="user">{user?.name ?? '(no user)'}</span>
-      <span data-testid="token">{localStorage.getItem('ochr_token') ?? '(cleared)'}</span>
+      <span data-testid="legacy">{localStorage.getItem('ochr_token') ?? '(cleared)'}</span>
       {retryAuth && <button onClick={retryAuth}>Retry</button>}
     </div>
   )
@@ -70,25 +68,34 @@ const settled = async () =>
 
 beforeEach(() => {
   vi.unstubAllGlobals()
-  localStorage.setItem('ochr_token', TOKEN)
+  localStorage.removeItem('ochr_token')
 })
 afterEach(() => localStorage.clear())
 
 describe('CONTROL — a valid session', () => {
-  it('resolves to authenticated and keeps the token', async () => {
-    stub('ok'); mount(); await settled()
+  it('resolves to authenticated from the cookie session and stores no JWT', async () => {
+    const f = stub('ok'); mount(); await settled()
     expect(screen.getByTestId('authed')).toHaveTextContent('true')
     expect(screen.getByTestId('user')).toHaveTextContent('Secretary')
-    expect(screen.getByTestId('token')).toHaveTextContent(TOKEN)
+    expect(screen.getByTestId('legacy')).toHaveTextContent('(cleared)')
+    expect(f).toHaveBeenCalled()
+  })
+
+  it('wipes a leftover pre-cookie ochr_token so XSS cannot steal it', async () => {
+    localStorage.setItem('ochr_token', 'stolen.jwt.value')
+    stub('ok'); mount(); await settled()
+    expect(localStorage.getItem('ochr_token')).toBeNull()
+    expect(screen.getByTestId('legacy')).toHaveTextContent('(cleared)')
   })
 })
 
 describe('POSITIVE REJECTION — the session must end', () => {
   for (const kind of ['rejected', 'revoked']) {
-    it(`a 401 (${kind}) clears the session and the stored token`, async () => {
+    it(`a 401 (${kind}) is unauthenticated and stores no JWT`, async () => {
       stub(kind); mount(); await settled()
       expect(screen.getByTestId('authed')).toHaveTextContent('false')
-      expect(screen.getByTestId('token')).toHaveTextContent('(cleared)')
+      expect(screen.getByTestId('status')).toHaveTextContent('unauthenticated')
+      expect(screen.getByTestId('legacy')).toHaveTextContent('(cleared)')
     })
   }
 })
@@ -101,23 +108,21 @@ describe('COULD NOT VERIFY — the session must survive', () => {
     ['malformed', 'a body that is not JSON'],
     ['noUserKey', 'a 200 that carries no user'],
   ]) {
-    it(`${label} must not sign the user out`, async () => {
+    it(`${label} must not claim the user is signed out`, async () => {
       stub(kind); mount(); await settled()
-      // The credential is untouched — nothing has rejected it.
-      expect(screen.getByTestId('token')).toHaveTextContent(TOKEN)
       expect(screen.getByTestId('status')).toHaveTextContent('unknown')
-      // And the app must not believe it has an authenticated user.
       expect(screen.getByTestId('authed')).toHaveTextContent('false')
     })
   }
 
-  it('a 403 is not an auth rejection and must not sign the user out', async () => {
+  it('a 403 is not an auth rejection and must not claim signed-out', async () => {
     // /api/auth/me cannot return 403 today — it carries requireAuth and no
     // role gate. Pinned anyway: 403 means authenticated-but-not-permitted,
     // and if a future gate lands on this route it must not read as "your
     // session is invalid".
     stub('forbidden'); mount(); await settled()
-    expect(screen.getByTestId('token')).toHaveTextContent(TOKEN)
+    expect(screen.getByTestId('status')).toHaveTextContent('unknown')
+    expect(screen.getByTestId('authed')).toHaveTextContent('false')
   })
 
   it('recovers on retry once the server answers, with no page reload', async () => {
@@ -135,11 +140,11 @@ describe('COULD NOT VERIFY — the session must survive', () => {
   })
 })
 
-describe('no stored token at all', () => {
-  it('is unauthenticated without asking the server', async () => {
-    localStorage.removeItem('ochr_token')
-    const f = stub('ok'); mount(); await settled()
+describe('no cookie session at all', () => {
+  it('asks /me and becomes unauthenticated on 401', async () => {
+    const f = stub('rejected'); mount(); await settled()
     expect(screen.getByTestId('authed')).toHaveTextContent('false')
-    expect(f).not.toHaveBeenCalled()
+    expect(screen.getByTestId('status')).toHaveTextContent('unauthenticated')
+    expect(f).toHaveBeenCalled()
   })
 })

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { Landmark, Loader2, Plus, Upload, RefreshCw } from 'lucide-react'
 import PageWrapper from '../components/PageWrapper'
 import EmptyState from '../components/EmptyState'
@@ -38,6 +38,53 @@ const fmtMoney = v => {
   return n.toLocaleString('en-US', { style: 'currency', currency: 'USD' })
 }
 
+// A refund that landed inside an already-approved period (migration 099).
+// The list API ships `open_adjustment_count` / `open_adjustment_amount` as
+// STRINGS — "0" is truthy, so this must go through Number(). An older server
+// that does not send the fields resolves to 0 here and shows nothing; it
+// must never be read as "nothing open", only as "nothing known".
+function openAdjustment(sub) {
+  const count = Number(sub?.open_adjustment_count)
+  const amount = Number(sub?.open_adjustment_amount)
+  if (!Number.isFinite(count) || count <= 0) return null
+  return { count, amount: Number.isFinite(amount) ? amount : NaN }
+}
+
+function appliedCredit(sub) {
+  const count = Number(sub?.applied_credit_count)
+  const amount = Number(sub?.applied_credit_amount)
+  if (!Number.isFinite(count) || count <= 0) return null
+  const payable = Number(sub?.payable_base)
+  return {
+    count,
+    amount: Number.isFinite(amount) ? amount : NaN,
+    payable: Number.isFinite(payable) ? payable : NaN,
+  }
+}
+
+// A non-ok response is not an answer. Callers distinguish a missing body
+// (undefined) from a real null affiliation or a real empty submissions list.
+async function readOkObject(res) {
+  if (!res?.ok) throw new Error('Failed')
+  const body = await res.json()
+  return body
+}
+
+function affiliationFrom(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return undefined
+  if (!Object.prototype.hasOwnProperty.call(body, 'affiliation')) return undefined
+  const affiliation = body.affiliation
+  if (affiliation === null) return null
+  if (typeof affiliation !== 'object' || Array.isArray(affiliation)) return undefined
+  return affiliation
+}
+
+function submissionsFrom(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return undefined
+  if (!Array.isArray(body.submissions)) return undefined
+  return body.submissions
+}
+
 export default function Finance() {
   const { user } = useAuth()
   const { t } = useLocale()
@@ -52,28 +99,58 @@ export default function Finance() {
   const [csvText, setCsvText] = useState('')
   const [asOf, setAsOf] = useState('')
 
-  // Diocese submissions (DIO.2) — present only when affiliated.
+  // Diocese submissions (DIO.2) — present only when we have actually read
+  // an active affiliation. A refused or malformed read is `affFailed`,
+  // which is not the same as `affiliation: null`. A refused submissions
+  // read is `subsFailed`, which is not the same as an empty list.
   const [aff, setAff] = useState(null)
+  const [affLoaded, setAffLoaded] = useState(false)
+  const [affFailed, setAffFailed] = useState(false)
   const [subs, setSubs] = useState([])
-  // NOT migrated, deliberately. This block has the same shape —
-  // `r.ok ? r.json() : { submissions: [] }` — and so the same defect, but
-  // Pass 7 pilots the load contract where it proves the semantics and does
-  // not rewrite Finance. Carried forward in the report.
+  const [subsFailed, setSubsFailed] = useState(false)
+  const dioceseGen = useRef(0)
+
   const loadDiocese = useCallback(() => {
-    fetch(apiUrl('/api/affiliation'))
-      .then(r => (r.ok ? r.json() : { affiliation: null }))
-      .then(d => {
-        setAff(d.affiliation ?? null)
-        if (d.affiliation?.status === 'active') {
-          fetch(apiUrl('/api/finance/submissions'))
-            .then(r => (r.ok ? r.json() : { submissions: [] }))
-            .then(x => setSubs(x.submissions ?? []))
-            .catch(() => {})
+    const gen = ++dioceseGen.current
+    const stale = () => gen !== dioceseGen.current
+    ;(async () => {
+      try {
+        const res = await fetch(apiUrl('/api/affiliation'))
+        const affiliation = affiliationFrom(await readOkObject(res))
+        if (affiliation === undefined) throw new Error('Failed')
+        if (stale()) return
+        setAff(affiliation)
+        setAffLoaded(true)
+        setAffFailed(false)
+        if (affiliation?.status !== 'active') {
+          setSubs([])
+          setSubsFailed(false)
+          return
         }
-      })
-      .catch(() => {})
+        try {
+          const sres = await fetch(apiUrl('/api/finance/submissions'))
+          const list = submissionsFrom(await readOkObject(sres))
+          if (list === undefined) throw new Error('Failed')
+          if (stale()) return
+          setSubs(list)
+          setSubsFailed(false)
+        } catch {
+          if (stale()) return
+          setSubsFailed(true)
+        }
+      } catch {
+        if (stale()) return
+        setAff(null)
+        setAffLoaded(false)
+        setAffFailed(true)
+        setSubsFailed(false)
+      }
+    })()
   }, [])
-  useEffect(() => { loadDiocese() }, [loadDiocese])
+  useEffect(() => {
+    loadDiocese()
+    return () => { dioceseGen.current += 1 }
+  }, [loadDiocese])
 
   const submitPeriod = async () => {
     if (!(await ask({
@@ -302,11 +379,13 @@ export default function Finance() {
             <div className={cardCls}>
               <p className="text-[11px] font-semibold uppercase tracking-widest text-brass-700 dark:text-brass-300 mb-1">{t('fin.fundMappings')}</p>
               <p className="text-xs text-ink-500 dark:text-parchment-300/70 mb-1">{t('fin.fundMappingsSub')}</p>
-              <p className="text-xs text-ink-500 dark:text-parchment-300/70 mb-3">
-                {aff?.status === 'active'
-                  ? t('fin.fundMappingsDiocese', { diocese: aff.diocese_name })
-                  : t('fin.fundMappingsNoDiocese')}
-              </p>
+              {affLoaded && !affFailed && (
+                <p className="text-xs text-ink-500 dark:text-parchment-300/70 mb-3">
+                  {aff?.status === 'active'
+                    ? t('fin.fundMappingsDiocese', { diocese: aff.diocese_name })
+                    : t('fin.fundMappingsNoDiocese')}
+                </p>
+              )}
               <div className="space-y-2">
                 {funds.map(f => {
                   const code = mappingFor('fund', String(f.id))
@@ -369,8 +448,18 @@ export default function Finance() {
             </div>
           )}
 
+          {/* A refused affiliation read is not "this parish is independent".
+              The strip uses the shared unread copy: a connection problem,
+              not an empty answer. fin.loadError names the ledger, which
+              may have loaded, so it is not the sentence for this read. */}
+          {canWrite && affFailed && (
+            <div data-testid="finance-affiliation-unread">
+              <LoadFailure variant="strip" body={t('load.failedBody')} onRetry={loadDiocese} />
+            </div>
+          )}
+
           {/* Diocese submissions (DIO.2) */}
-          {canWrite && aff?.status === 'active' && (
+          {canWrite && affLoaded && !affFailed && aff?.status === 'active' && (
             <div className={cardCls}>
               <div className="flex items-center justify-between gap-3 flex-wrap">
                 <div>
@@ -384,10 +473,17 @@ export default function Finance() {
                   Submit {start} → {end}
                 </button>
               </div>
-              {subs.length > 0 && (
+              {subsFailed ? (
+                <div data-testid="finance-submissions-unread" className="mt-3">
+                  <LoadFailure variant="strip" body={t('load.failedBody')} onRetry={loadDiocese} />
+                </div>
+              ) : subs.length > 0 ? (
                 <table className="w-full text-sm mt-3">
                   <tbody>
-                    {subs.slice(0, 8).map(sub => (
+                    {subs.slice(0, 8).map(sub => {
+                      const adj = openAdjustment(sub)
+                      const credit = appliedCredit(sub)
+                      return (
                       <tr key={sub.id} className="border-t border-parchment-300/50 dark:border-brass-900/25 text-ink-800 dark:text-parchment-100">
                         <td className="py-1.5 pr-2 whitespace-nowrap">{sub.period_start} → {sub.period_end}</td>
                         <td className="py-1.5 pr-2 text-right whitespace-nowrap">{fmtMoney(sub.totals?.revenue)} rev</td>
@@ -398,12 +494,33 @@ export default function Finance() {
                             : 'bg-parchment-200/80 text-ink-700 dark:bg-ink-800 dark:text-parchment-200'
                           }`}>{sub.status}</span>
                           {sub.review_note && <span className="block text-[11px] font-normal text-ink-500 dark:text-parchment-300/70">{sub.review_note}</span>}
+                          {/* Not part of the status badge, on purpose: "approved"
+                              is still true. What is ALSO true is that the frozen
+                              total behind it includes money the parish has since
+                              refunded, and nobody has settled that yet. */}
+                          {adj && (
+                            <span role="note" data-testid={`open-adjustment-${sub.id}`}
+                              className="block mt-1 text-[11px] font-normal leading-snug text-rose-700 dark:text-rose-300 max-w-[22rem] ml-auto">
+                              <span className="font-semibold">{t('fin.adjOpen')}</span>
+                              {' · '}
+                              {t(adj.count > 1 ? 'fin.adjBodyMany' : 'fin.adjBody', { amount: fmtMoney(adj.amount), n: adj.count })}
+                            </span>
+                          )}
+                          {credit && (
+                            <span role="note" data-testid={`applied-credit-${sub.id}`}
+                              className="block mt-1 text-[11px] font-normal leading-snug text-ink-500 dark:text-parchment-300/70 max-w-[22rem] ml-auto">
+                              <span className="font-semibold">{t('fin.adjCredit')}</span>
+                              {' · '}
+                              {t('fin.adjCreditBody', { payable: fmtMoney(credit.payable) })}
+                            </span>
+                          )}
                         </td>
                       </tr>
-                    ))}
+                      )
+                    })}
                   </tbody>
                 </table>
-              )}
+              ) : null}
             </div>
           )}
 

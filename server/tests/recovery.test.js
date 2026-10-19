@@ -6,7 +6,7 @@
 // parish and shares nothing with the rest of the suite. Nothing about them
 // changed in the move — same assertions, same fixtures, same names.
 
-import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
 import request from 'supertest'
 import 'dotenv/config'
 
@@ -45,9 +45,9 @@ describe('the weekly backup refuses rather than lying', () => {
     delete process.env.BACKUP_DIR
 
     const res = await runWeeklyBackupDigest()
-    // Skipped, and the reason names both halves so an operator knows
-    // which one to fix.
-    expect(res.skipped).toMatch(/nowhere to deliver/i)
+    // Skipped, and the reason names what is missing. Storage is the only
+    // destination for parish data (#214), so no storage = no export built.
+    expect(res.skipped).toMatch(/no backup storage/i)
     expect(res.storage).toBeTruthy()
     expect(res.email).toBeTruthy()
     // And emphatically NOT the success shape, which is what it used to
@@ -69,6 +69,16 @@ describe('the weekly backup refuses rather than lying', () => {
     const dir = await mkdtemp(join(tmpdir(), 'ochr-digest-'))
     process.env.BACKUP_STORAGE = 'file'
     process.env.BACKUP_DIR = dir
+
+    // Own fixtures (flake fix): two parishes this test creates and nobody
+    // else touches. The assertions that matter are made about THEM.
+    const own = []
+    for (const tag of ['a', 'b']) {
+      const { rows: [o] } = await pool.query(
+        `INSERT INTO ochr_organizations (name, slug) VALUES ($1, $2) RETURNING id`,
+        [`Recovery fixture ${tag} ${RUN_ID}`, `recovery-fixture-${tag}-${RUN_ID}`.toLowerCase().replace(/[^a-z0-9-]/g, '-')])
+      own.push(String(o.id))
+    }
 
     const res = await runWeeklyBackupDigest()
     expect(res.skipped).toBeUndefined()
@@ -93,16 +103,37 @@ describe('the weekly backup refuses rather than lying', () => {
     // that refuses rather than lying — and it is strictly stronger than
     // the equality it replaces, which could be satisfied by a digest that
     // dropped an org from both counts.
-    expect(res.stored + res.store_failures.length + res.failed).toBe(res.orgs)
+    // FLAKE (83 vs 84): the identity above was asserted over EVERY org in
+    // the shared database. A parish another file places on HOLD after the
+    // list is read is skipped by the digest's per-org HOLD re-check and
+    // lands in no bucket, so the global sum came up one short. Globally we
+    // can only say nothing was double-counted; exact accounting is asserted
+    // for this test's own parishes below.
+    expect(res.stored + res.store_failures.length + res.failed).toBeLessThanOrEqual(res.orgs)
+    for (const id of own) {
+      expect(res.store_failures.some(f => f.startsWith(`org ${id}:`))).toBe(false)
+    }
     expect(res.notified).toBe(false)      // truthfully: nobody was told
     expect(res.attached).toBe(0)
 
     // And the artifacts are really on disk — one per parish that stored,
     // not per parish that existed when the list was taken.
+    // Tenant-separated (#214): orgs/<orgId>/<date>.json.gz — one prefix
+    // per parish, keyed by id, never by name or slug.
     const stamp = new Date().toISOString().slice(0, 10)
-    const files = await readdir(join(dir, stamp))
+    const orgDirs = await readdir(join(dir, 'orgs'))
+    const files = []
+    for (const id of orgDirs) {
+      expect(id).toMatch(/^\d+$/)
+      for (const f of await readdir(join(dir, 'orgs', id))) files.push(f)
+    }
     expect(files.length).toBe(res.stored)
-    expect(files.every(f => f.endsWith('.json.gz'))).toBe(true)
+    expect(files.every(f => f === `${stamp}.json.gz`)).toBe(true)
+    for (const id of own) {
+      expect(orgDirs).toContain(id)
+      expect(await readdir(join(dir, 'orgs', id))).toEqual([`${stamp}.json.gz`])
+    }
+    await pool.query('DELETE FROM ochr_organizations WHERE id = ANY($1::int[])', [own.map(Number)])
 
     delete process.env.BACKUP_STORAGE
     delete process.env.BACKUP_DIR
@@ -133,19 +164,89 @@ describe('the weekly backup refuses rather than lying', () => {
     process.env.BACKUP_S3_KEY_ID = 'AKIAIOSFODNN7EXAMPLE'
     process.env.BACKUP_S3_SECRET = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY'
 
+    // Own fixtures (flake fix, same as the test above): two parishes only
+    // this test creates. Exact accounting is asserted for THEM.
+    const own = []
+    for (const tag of ['a', 'b']) {
+      const { rows: [o] } = await pool.query(
+        `INSERT INTO ochr_organizations (name, slug) VALUES ($1, $2) RETURNING id`,
+        [`Recovery verify fixture ${tag} ${RUN_ID}`, `recovery-verify-fixture-${tag}-${RUN_ID}`.toLowerCase().replace(/[^a-z0-9-]/g, '-')])
+      own.push(o.id)
+    }
+
+    // Fixture-level proof that the scoped assertions survive concurrent
+    // churn, made deterministic: two OUTSIDE parishes are in the org list,
+    // and at the digest's per-org HOLD re-check one is held and the other
+    // deleted, exactly what parallel files do. Both fall out of every bucket,
+    // which is what made the old global equality come up short.
+    const outside = []
+    for (const tag of ['held', 'gone']) {
+      const { rows: [o] } = await pool.query(
+        `INSERT INTO ochr_organizations (name, slug) VALUES ($1, $2) RETURNING id`,
+        [`Recovery outside ${tag} ${RUN_ID}`, `recovery-outside-${tag}-${RUN_ID}`.toLowerCase().replace(/[^a-z0-9-]/g, '-')])
+      outside.push(o.id)
+    }
+    const [heldOutside, goneOutside] = outside
+    const realQuery = pool.query.bind(pool)
+    const churn = vi.spyOn(pool, 'query').mockImplementation(async (sql, params) => {
+      if (typeof sql === 'string' && sql.includes('WHERE id = $1 AND held_at IS NULL') && Array.isArray(params)) {
+        if (params[0] === heldOutside) await realQuery('UPDATE ochr_organizations SET held_at = NOW() WHERE id = $1', [heldOutside])
+        if (params[0] === goneOutside) await realQuery('DELETE FROM ochr_organizations WHERE id = $1', [goneOutside])
+      }
+      return realQuery(sql, params)
+    })
+
+    const { monitor } = await import('../src/monitoring/index.js')
+    const verifyLog = vi.spyOn(monitor, 'error')
     try {
       const { runWeeklyBackupDigest } = await import('../src/services/backupDigest.js')
       const res = await runWeeklyBackupDigest()
+      churn.mockRestore()
       expect(res.skipped).toBeUndefined()
       // Nothing counted as stored, and every parish named as a problem.
       expect(res.stored).toBe(0)
       // Same three-bucket accounting as above: a parish deleted by another
       // test file mid-loop lands in `failed`, never reaching the store at
       // all, so it cannot appear in store_failures.
-      expect(res.store_failures.length + res.failed).toBe(res.orgs)
+      // FLAKE (93 vs 94): asserted over EVERY org in the shared database, a
+      // parish another file holds after the list is read is skipped by the
+      // digest's per-org HOLD re-check and lands in no bucket. Globally only
+      // "nothing double-counted" holds; each of this test's own parishes
+      // must be named as a verify failure.
+      // No org counted twice: every store failure names a distinct org.
+      const failedOrgIds = res.store_failures.map(f => Number(/^org (\d+):/.exec(f)?.[1]))
+      expect(failedOrgIds.every(Number.isInteger)).toBe(true)
+      expect(new Set(failedOrgIds).size).toBe(failedOrgIds.length)
+      // Globally only "nothing double-counted" holds: the buckets never sum
+      // past the org list. The two outside parishes are in that list and in
+      // no bucket, so the old equality could not hold here.
+      expect(res.store_failures.length + res.failed).toBeLessThanOrEqual(res.orgs - 2)
+      expect(failedOrgIds).not.toContain(heldOutside)
+      expect(failedOrgIds).not.toContain(goneOutside)
+      // Exact accounting for this test's own parishes: each named once, as a
+      // verify failure, and none in `failed` (verify calls name each once).
+      for (const id of own) {
+        const mine = res.store_failures.filter(f => f.startsWith(`org ${id}:`))
+        expect(mine).toHaveLength(1)
+        expect(mine[0]).toMatch(/not found after writing/)
+      }
       expect(res.store_failures.length).toBeGreaterThan(0)
       expect(res.store_failures[0]).toMatch(/not found after writing/)
+      // The heartbeat says "details are in the monitor log". A verify
+      // failure has to write that log, once per store failure.
+      const verifyCalls = verifyLog.mock.calls.filter(c => c[0] === 'backup.digest.verify')
+      expect(verifyCalls.length).toBe(res.store_failures.length)
+      for (const id of own) expect(verifyCalls.filter(([, , ctx]) => ctx.orgId === id)).toHaveLength(1)
+      for (const [, err, ctx] of verifyCalls) {
+        expect(err.message).toMatch(/not found after writing/)
+        expect(ctx.orgId).toEqual(expect.any(Number))
+        expect(ctx.key).toMatch(/^orgs\/\d+\/\d{4}-\d{2}-\d{2}\.json\.gz$/)
+        expect(ctx).toEqual({ orgId: ctx.orgId, key: ctx.key })
+      }
     } finally {
+      churn.mockRestore()
+      verifyLog.mockRestore()
+      await pool.query('DELETE FROM ochr_organizations WHERE id = ANY($1::int[])', [[...own, ...outside]]).catch(() => {})
       await new Promise(r => server.close(r))
       for (const v of ['BACKUP_STORAGE', 'BACKUP_S3_ENDPOINT', 'BACKUP_S3_BUCKET',
                        'BACKUP_S3_REGION', 'BACKUP_S3_KEY_ID', 'BACKUP_S3_SECRET']) delete process.env[v]
@@ -158,9 +259,10 @@ describe('the weekly backup refuses rather than lying', () => {
     process.env[KEY] = 'test-key-not-used-for-delivery'
     delete process.env.BACKUP_STORAGE
     delete process.env.BACKUP_DIR
-    // A key with no recipient is still nowhere to deliver.
+    // A key with no recipient and no storage: skipped, nothing built,
+    // and the missing recipient is named.
     const res = await runWeeklyBackupDigest()
-    expect(res.skipped).toMatch(/nowhere to deliver/i)
+    expect(res.skipped).toMatch(/no backup storage/i)
     expect(res.email).toMatch(/SUPER_ADMIN_EMAIL/)
   })
 
@@ -462,7 +564,7 @@ describe('Continuity Vault — a whole recurring series', () => {
     email: `series_admin_${RUN_ID}@example.com`, password: 'smoke-test-pw-series-1',
   }
   let tok, orgId
-  let seedId, occurrenceIds, intentionId, checkinId, entryId
+  let seedId, occurrenceIds, intentionId, entryId
 
   beforeAll(async () => {
     const r = await request(server).post('/api/auth/signup')
@@ -498,15 +600,10 @@ describe('Continuity Vault — a whole recurring series', () => {
        VALUES ($1, $2, $3, $4, 'scheduled') RETURNING id`,
       [orgId, `+Series Test ${RUN_ID}`, '2026-09-15', occurrenceIds[2]])
     intentionId = mi.rows[0].id
-
-    // A check-in on the SECOND — CASCADE, so it goes and has to be
-    // brought back as a captured child.
-    const ci = await pool.query(
-      `INSERT INTO ochr_checkins
-         (organization_id, calendar_event_id, person_name, kind)
-       VALUES ($1, $2, $3, 'guest') RETURNING id`,
-      [orgId, occurrenceIds[1], `Series Guest ${RUN_ID}`])
-    checkinId = ci.rows[0].id
+    // CHK-05: a series with check-ins cannot be deleted. This block
+    // proves multi-root capture and the Mass-intention relink, so it
+    // keeps the series empty of attendance. The attendance refusal
+    // lives in chk05EventAttendance.test.js.
   })
 
   it('DELETING THE SERIES CAPTURES EVERY OCCURRENCE, NOT ONE WITH CHILDREN', async () => {
@@ -537,8 +634,7 @@ describe('Continuity Vault — a whole recurring series', () => {
     // `seen` with every root — this count would be non-zero and the
     // restore would try to insert each occurrence twice.
     expect(rows[0].summary.cascaded.ochr_calendar_events ?? 0).toBe(0)
-    // The check-in is a genuine cascade child and must be in there.
-    expect(rows[0].summary.cascaded.ochr_checkins).toBe(1)
+    expect(rows[0].summary.cascaded.ochr_checkins ?? 0).toBe(0)
   })
 
   it('the surviving Mass intention is left with a hole, and the entry knows about it', async () => {
@@ -546,9 +642,6 @@ describe('Continuity Vault — a whole recurring series', () => {
       'SELECT calendar_event_id FROM ochr_mass_intentions WHERE id = $1', [intentionId])
     expect(mi.rowCount).toBe(1)
     expect(mi.rows[0].calendar_event_id).toBeNull()
-
-    const gone = await pool.query('SELECT 1 FROM ochr_checkins WHERE id = $1', [checkinId])
-    expect(gone.rowCount).toBe(0)
 
     const res = await request(server).get(`/api/vault/${entryId}`).set('Authorization', `Bearer ${tok}`)
     expect(res.status).toBe(200)
@@ -573,11 +666,6 @@ describe('Continuity Vault — a whole recurring series', () => {
     // itself. Insert the siblings first and this is a foreign-key error,
     // not a wrong number — which is why orderRoots exists.
     for (const row of back.rows) expect(row.recurrence_parent_id).toBe(seedId)
-
-    const ci = await pool.query(
-      'SELECT calendar_event_id FROM ochr_checkins WHERE id = $1', [checkinId])
-    expect(ci.rowCount).toBe(1)
-    expect(ci.rows[0].calendar_event_id).toBe(occurrenceIds[1])
   })
 
   it('THE MASS INTENTION RECONNECTS TO ITS OWN TUESDAY, NOT THE FIRST ONE', async () => {

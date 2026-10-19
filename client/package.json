@@ -9,8 +9,9 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "vitest run",
-    "test:watch": "vitest"
+    "test": "vitest run && TZ=Pacific/Auckland vitest run src/pages/Signup.test.jsx",
+    "test:watch": "vitest",
+    "test:golden": "node ../scripts/golden-journeys.mjs"
   },
   "dependencies": {
     "@fontsource/cormorant-garamond": "^5.3.0",

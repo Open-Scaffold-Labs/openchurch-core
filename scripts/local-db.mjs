@@ -30,6 +30,7 @@
 import { execFileSync, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
+import { classifyDatabaseUrl } from './lib/db-target-guard.mjs'
 
 // WHERE POSTGRES LIVES IS DISCOVERED. WHAT THIS TOOL TOUCHES IS NOT.
 //
@@ -87,13 +88,15 @@ const URL = `postgresql://${PGUSER}@localhost:${PGPORT}/${DBNAME}`
 // A last line of defence in case someone edits the constants above: the host
 // must be loopback and the database name must be the local one. A URL that
 // fails this is refused rather than corrected, because a tool that quietly
-// rewrites the database you asked for is worse than one that stops.
+// rewrites the database you asked for is worse than one that stops. libpq
+// ?host= / ?hostaddr= overrides are treated as the real host (RECOVERY-L3-05).
 function assertLocal(url) {
-  const u = new URL_(url)
-  const localHost = ['localhost', '127.0.0.1', '::1'].includes(u.hostname)
-  const localName = u.pathname === `/${DBNAME}`
-  if (!localHost || !localName) {
-    console.error(`\nlocal-db: refusing to act on ${u.hostname}${u.pathname}`)
+  const cls = classifyDatabaseUrl(url)
+  let pathname = ''
+  try { pathname = new URL_(url).pathname } catch { /* invalid handled below */ }
+  const localName = pathname === `/${DBNAME}`
+  if (cls.kind !== 'local' || !localName) {
+    console.error(`\nlocal-db: refusing to act on ${cls.hostname || '(unparseable)'}${pathname}`)
     console.error(`This tool only ever touches ${DBNAME} on loopback.\n`)
     process.exit(2)
   }

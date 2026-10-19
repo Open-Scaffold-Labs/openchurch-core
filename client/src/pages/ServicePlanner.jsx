@@ -10,6 +10,7 @@ import { useToast } from '../components/ToastProvider'
 import { useAuth } from '../context/AuthContext'
 import { useLocale } from '../i18n'
 import { apiUrl } from '../api'
+import { loadList } from '../utils/format'
 import { LIT_COLOR_TEXT, LIT_COLOR_DOT, LIT_COLOR_DOT_NONE } from '../utils/liturgicalColors'
 import { seasonLabel } from '../i18n/liturgical'
 import { useConfirm } from '../components/ConfirmProvider'
@@ -128,7 +129,7 @@ function printOrderOfWorship({ orgName, plan, lit, t, dateLocale, tradition }) {
 }
 
 // Add / edit element modal.
-function ElementModal({ element, members, onClose, onSave }) {
+function ElementModal({ element, members, membersFailed = false, onClose, onSave }) {
   const { t, tradition } = useLocale()
   const isEdit = !!element?.id
   const [form, setForm] = useState(() => ({
@@ -186,6 +187,9 @@ function ElementModal({ element, members, onClose, onSave }) {
             <option value="">{t('plan.noOne')}</option>
             {members.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
           </select>
+          {membersFailed && (
+            <p role="status" className="mt-1.5 text-xs text-amber-700 dark:text-amber-400">{t('mem.listFailed')}</p>
+          )}
         </div>
         <div>
           <label className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">{t('plan.notes')}</label>
@@ -209,41 +213,86 @@ export default function ServicePlanner() {
   const { t, dateLocale, tradition } = useLocale()
 
   const [plans, setPlans]     = useState([])
+  const [plansFailed, setPlansFailed] = useState(false)
+  const [detailFailed, setDetailFailed] = useState(false)
   const [members, setMembers] = useState([])
+  const [membersFailed, setMembersFailed] = useState(false)
   const [orgName, setOrgName] = useState('')
+  const [orgFailed, setOrgFailed] = useState(false)
   const [loading, setLoading] = useState(true)
 
   const [selectedId, setSelectedId] = useState(null)
   const [plan, setPlan]   = useState(null)   // full selected plan + elements
   const [lit, setLit]     = useState(null)
+  const [litFailed, setLitFailed] = useState(false)
   const [modal, setModal] = useState(null)   // { element } | { element: null } for new
   const [newDate, setNewDate] = useState(() => upcomingSundayISO())
 
   useEffect(() => {
+    let cancelled = false
+    const readPlans = fetch(apiUrl('/api/service-plans')).then(async r => {
+      // `{ plans: [] }` on a 500 used to read as a parish with no order of worship.
+      if (!r.ok) throw new Error('unread')
+      const body = await r.json()
+      if (!body || !Array.isArray(body.plans)) throw new Error('shape')
+      return body.plans
+    }).then(
+      plans => ({ ok: true, plans }),
+      () => ({ ok: false, plans: [] }),
+    )
     Promise.all([
-      fetch(apiUrl('/api/service-plans')).then(r => (r.ok ? r.json() : { plans: [] })),
-      fetch(apiUrl('/api/clients')).then(r => (r.ok ? r.json() : [])),
-      fetch(apiUrl('/api/organization')).then(r => (r.ok ? r.json() : {})),
-    ]).then(([p, mem, org]) => {
-      setPlans(p.plans ?? [])
-      setMembers(Array.isArray(mem) ? mem : (mem.clients ?? []))
-      setOrgName(org?.name ?? '')
-      if (p.plans?.length) setSelectedId(p.plans[0].id)
-    }).catch(() => {}).finally(() => setLoading(false))
+      readPlans,
+      // A 200 of `{}` used to become an empty assignee list. That reads as
+      // a parish with nobody to assign, and the select had no failure line.
+      loadList(apiUrl('/api/clients')),
+      // `{}` on a 500 left the printed order with a blank parish name.
+      fetch(apiUrl('/api/organization')).then(async r => {
+        if (!r.ok) return { ok: false, name: '' }
+        const body = await r.json()
+        if (!body || typeof body !== 'object' || Array.isArray(body) || typeof body.name !== 'string') {
+          return { ok: false, name: '' }
+        }
+        return { ok: true, name: body.name }
+      }).catch(() => ({ ok: false, name: '' })),
+    ]).then(([p, roster, org]) => {
+      if (cancelled) return
+      setPlans(p.plans)
+      setPlansFailed(!p.ok)
+      setMembers(roster.data)
+      setMembersFailed(!roster.ok)
+      setOrgName(org.name)
+      setOrgFailed(!org.ok)
+      if (p.ok && p.plans.length) setSelectedId(p.plans[0].id)
+    }).catch(() => { if (!cancelled) setMembersFailed(true) }).finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
   }, [])
 
   // Load the selected plan in full + its liturgical day.
   useEffect(() => {
-    if (!selectedId) { setPlan(null); return }
+    if (!selectedId) { setPlan(null); setDetailFailed(false); setLit(null); setLitFailed(false); return }
     let cancelled = false
+    setDetailFailed(false)
+    setLitFailed(false)
     fetch(apiUrl(`/api/service-plans/${selectedId}`))
-      .then(r => (r.ok ? r.json() : null))
-      .then(p => {
-        if (cancelled || !p) return
-        setPlan(p)
-        fetch(apiUrl(`/api/liturgical?date=${p.date}`)).then(r => (r.ok ? r.json() : null)).then(d => { if (!cancelled) setLit(d) }).catch(() => {})
+      .then(r => {
+        if (!r.ok) throw new Error('unread')
+        return r.json()
       })
-      .catch(() => {})
+      .then(p => {
+        if (cancelled) return
+        if (!p || typeof p !== 'object' || Array.isArray(p) || p.id == null) throw new Error('shape')
+        setPlan(p)
+        setDetailFailed(false)
+        // `null` on a 500 looked like a service with no feast or season.
+        fetch(apiUrl(`/api/liturgical?date=${p.date}`)).then(async r => {
+          if (!r.ok) throw new Error('unread')
+          const d = await r.json()
+          if (!d || typeof d !== 'object' || Array.isArray(d)) throw new Error('shape')
+          return d
+        }).then(d => { if (!cancelled) { setLit(d); setLitFailed(false) } })
+          .catch(() => { if (!cancelled) { setLit(null); setLitFailed(true) } })
+      })
+      .catch(() => { if (!cancelled) { setDetailFailed(true); setPlan(null) } })
     return () => { cancelled = true }
   }, [selectedId])
 
@@ -361,6 +410,9 @@ export default function ServicePlanner() {
               <h1 className="font-display text-3xl font-semibold text-ink-900 dark:text-parchment-50 tracking-tight">{t('plan.title')}</h1>
             </div>
             <p className="text-sm text-ink-500 dark:text-parchment-300/70 mt-1">{t('plan.sub')}</p>
+            {orgFailed && (
+              <p role="status" className="text-xs text-amber-800 dark:text-amber-300 mt-1">{t('plan.orgUnread')}</p>
+            )}
           </div>
           {plan && (
             <button
@@ -384,7 +436,9 @@ export default function ServicePlanner() {
                   <button onClick={createPlan} className="shrink-0 flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold rounded-lg bg-church-900 dark:bg-parchment-100 text-parchment-50 dark:text-church-900 hover:opacity-90 transition-opacity"><Plus size={13} /> {t('plan.new')}</button>
                 </div>
               )}
-              {plans.length === 0 ? (
+              {plansFailed ? (
+                <p role="status" className="text-xs text-amber-800 dark:text-amber-300 py-1">{t('plan.unread')}</p>
+              ) : plans.length === 0 ? (
                 <p className="text-xs text-ink-400 dark:text-parchment-300/60 py-1">{t('plan.none')}</p>
               ) : (
                 <ul className="space-y-1 max-h-96 overflow-y-auto">
@@ -403,7 +457,11 @@ export default function ServicePlanner() {
 
           {/* Plan editor */}
           <div className="order-2">
-            {!plan ? (
+            {plansFailed ? (
+              <p role="status" className="text-sm text-amber-800 dark:text-amber-300">{t('plan.unread')}</p>
+            ) : detailFailed ? (
+              <p role="status" className="text-sm text-amber-800 dark:text-amber-300">{t('plan.detailUnread')}</p>
+            ) : !plan ? (
               <EmptyState icon={ListMusic} title={t('plan.noneSelected')} body={canWrite ? t('plan.noneSelectedBody') : t('plan.noneViewer')} />
             ) : (
               <div className="space-y-4">
@@ -424,7 +482,7 @@ export default function ServicePlanner() {
                     {/* Sunday Packet — the printable everything-sheet for
                         this plan's date (SPK.1, "the Thursday Button"). */}
                     <Link
-                      to={`/packet?date=${plan.date}`}
+                      to={`/packet?date=${plan.date}&from=planner`}
                       className="shrink-0 flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border border-parchment-300/70 dark:border-brass-900/40 text-ink-700 dark:text-parchment-200 hover:bg-parchment-100 dark:hover:bg-ink-800/60 transition-colors"
                     >
                       <Printer size={13} /> {t('plan.packet')}
@@ -446,7 +504,9 @@ export default function ServicePlanner() {
                     <CalendarIcon size={14} className="text-ink-400" />
                     <input type="date" defaultValue={plan.date} disabled={!canWrite} onBlur={e => { if (e.target.value && e.target.value !== plan.date) patchPlan({ date: e.target.value }) }} aria-label={t('plan.date')} className="px-2 py-1 text-sm rounded-lg bg-parchment-50 dark:bg-ink-800 border border-parchment-300/70 dark:border-brass-900/40 text-ink-900 dark:text-parchment-50 focus:outline-none focus:ring-2 focus:ring-brass-400" />
                     <span className="text-ink-500 dark:text-parchment-300/70">{fmtLong(plan.date, dateLocale)}</span>
-                    {litLabel && (
+                    {litFailed ? (
+                      <span role="status" className="text-xs text-amber-800 dark:text-amber-300">{t('plan.litUnread')}</span>
+                    ) : litLabel && (
                       <span className={`inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-md border ${LIT_COLOR_TEXT[lit?.color] ?? LIT_COLOR_TEXT.White}`}>
                         <span className={`w-1.5 h-1.5 rounded-full ${LIT_COLOR_DOT[lit?.color] ?? LIT_COLOR_DOT_NONE}`} />
                         {litLabel}
@@ -509,7 +569,7 @@ export default function ServicePlanner() {
 
       <AnimatePresence>
         {modal && canWrite && (
-          <ElementModal element={modal.element} members={members} onClose={() => setModal(null)} onSave={saveElement} />
+          <ElementModal element={modal.element} members={members} membersFailed={membersFailed} onClose={() => setModal(null)} onSave={saveElement} />
         )}
       </AnimatePresence>
     </PageWrapper>

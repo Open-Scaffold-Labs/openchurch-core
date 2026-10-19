@@ -59,7 +59,21 @@ router.post('/subscribe', async (req, res) => {
 
   const userAgent = req.get('user-agent')?.slice(0, 500) ?? null
 
+  const client = await pool.connect()
   try {
+    await client.query('BEGIN')
+    // Same login row closeLogin locks, so a subscribe already past
+    // requireAuth cannot clear removed_at after the closure commits.
+    const { rows: logins } = await client.query(
+      `SELECT closed_at FROM ochr_users
+        WHERE id = $1 AND organization_id = $2
+        FOR UPDATE`,
+      [req.user.id, req.organizationId]
+    )
+    if (!logins.length || logins[0].closed_at != null) {
+      await client.query('ROLLBACK')
+      return res.status(403).json({ error: 'This login is closed. Push is not available.' })
+    }
     // Upsert on endpoint. If the same browser re-subscribes (after a
     // permission reset, for example) we update keys + user_id +
     // org_id + last_seen_at rather than orphan the old row.
@@ -72,7 +86,7 @@ router.post('/subscribe', async (req, res) => {
     // exploitable cross-tenant: endpoints are unguessable capability
     // URLs and no API ever returns another tenant's endpoint. Revisit
     // only if an endpoint-listing surface is ever added.
-    const { rows } = await pool.query(
+    const { rows } = await client.query(
       `INSERT INTO ochr_push_subscriptions
          (organization_id, user_id, endpoint, p256dh, auth, user_agent)
        VALUES ($1, $2, $3, $4, $5, $6)
@@ -87,10 +101,14 @@ router.post('/subscribe', async (req, res) => {
        RETURNING id, last_seen_at`,
       [req.organizationId, req.user.id, endpoint, p256dh, auth, userAgent]
     )
+    await client.query('COMMIT')
     res.status(201).json({ id: rows[0].id, last_seen_at: rows[0].last_seen_at })
   } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
     monitor.error('push.subscribe', err, { userId: req.user?.id })
     res.status(500).json({ error: 'Failed to save push subscription' })
+  } finally {
+    client.release()
   }
 })
 

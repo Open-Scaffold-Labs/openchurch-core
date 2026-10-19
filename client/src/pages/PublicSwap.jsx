@@ -38,10 +38,12 @@ function fmtTime(hms) {
 }
 
 export default function PublicSwap() {
-  // Not for t() — these pages are still English (the string pass is
-  // separate work). This is the switch that lets the parish's language
-  // reach a page nobody signs in to.
-  const { setPublicLocale } = useLocale()
+  // Remaining chrome (greeting, serving reminders on/off, toggle aria,
+  // request button, request-a-swap sheet, Close aria, name/note
+  // placeholders) goes through t(). Member names, event titles, and
+  // request notes stay API data. setPublicLocale is the switch that
+  // lets the parish's language reach a page nobody signs in to.
+  const { t, setPublicLocale } = useLocale()
   const { token } = useParams()
   const [data,    setData]    = useState(null)
   const [loading, setLoading] = useState(true)
@@ -229,7 +231,7 @@ export default function PublicSwap() {
         <header className="text-center pb-2">
           <p className="text-[11px] uppercase tracking-widest text-brass-600 dark:text-brass-300 font-semibold">OpenChurch</p>
           <h1 className="text-2xl font-display text-ink-900 dark:text-parchment-50 mt-1">
-            Hello, {data.me.name}
+            {t('swap.hello', { name: data.me.name })}
           </h1>
           <p className="text-sm text-ink-500 dark:text-parchment-300/70 mt-1">
             Your upcoming events and swap requests
@@ -245,11 +247,11 @@ export default function PublicSwap() {
         {/* Serving reminders preference (RM.2). */}
         <section className="bg-parchment-50 dark:bg-ink-900 rounded-2xl border border-parchment-300/60 dark:border-brass-900/30 shadow-warm px-5 py-3 flex items-center justify-between gap-3">
           <div className="min-w-0">
-            <p className="text-sm font-semibold text-ink-900 dark:text-parchment-50">Serving reminders</p>
+            <p className="text-sm font-semibold text-ink-900 dark:text-parchment-50">{t('swap.reminders')}</p>
             <p className="text-xs text-ink-500 dark:text-parchment-300/70">
               {data.me.reminders_opt_out
-                ? "Off — you won't get reminders before events you're serving."
-                : "On — we'll remind you about a day before events you're serving."}
+                ? t('swap.remindersOff')
+                : t('swap.remindersOn')}
             </p>
           </div>
           <button
@@ -257,7 +259,7 @@ export default function PublicSwap() {
             onClick={toggleReminders}
             disabled={savingPref}
             aria-pressed={!data.me.reminders_opt_out}
-            aria-label="Toggle serving reminders"
+            aria-label={t('swap.toggleReminders')}
             className={`relative w-11 h-6 rounded-full transition-colors shrink-0 disabled:opacity-50 ${
               !data.me.reminders_opt_out ? 'bg-church-700' : 'bg-parchment-300 dark:bg-ink-700'
             }`}
@@ -343,7 +345,7 @@ export default function PublicSwap() {
                         }}
                         className="px-3 py-1.5 text-xs font-semibold rounded-lg border border-church-900 dark:border-parchment-100 text-church-900 dark:text-parchment-100 hover:bg-church-900 hover:text-parchment-50 dark:hover:bg-parchment-100 dark:hover:text-church-900 transition-colors shrink-0"
                       >
-                        Request swap
+                        {t('swap.request')}
                       </button>
                     )}
                   </li>
@@ -429,11 +431,11 @@ export default function PublicSwap() {
               className="w-full md:max-w-md bg-parchment-50 dark:bg-ink-900 rounded-t-2xl md:rounded-2xl shadow-warm border border-parchment-300/60 dark:border-brass-900/30 p-5 space-y-3"
             >
               <div className="flex items-center justify-between">
-                <h2 className="text-base font-bold text-ink-900 dark:text-parchment-50">Request a swap</h2>
+                <h2 className="text-base font-bold text-ink-900 dark:text-parchment-50">{t('swap.requestTitle')}</h2>
                 <button
                   onClick={() => setRequestModal(null)}
                   className="-m-2 p-2 text-ink-400 hover:text-ink-700 dark:hover:text-parchment-50"
-                  aria-label="Close"
+                  aria-label={t('swap.close')}
                 >
                   <X size={18} />
                 </button>
@@ -465,7 +467,7 @@ export default function PublicSwap() {
                       type="text"
                       value={memberQuery}
                       onChange={e => setMemberQuery(e.target.value)}
-                      placeholder="Start typing a name…"
+                      placeholder={t('swap.namePh')}
                       autoComplete="off"
                       aria-describedby="swap-ask-help"
                       className="w-full px-3 py-2 text-sm rounded-lg border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-100 dark:bg-ink-800 text-ink-900 dark:text-parchment-50 placeholder-ink-400 dark:placeholder-parchment-400/50 focus:outline-none focus:ring-2 focus:ring-church-500"
@@ -512,7 +514,7 @@ export default function PublicSwap() {
                   onChange={e => setRequestForm(f => ({ ...f, note: e.target.value }))}
                   rows={3}
                   maxLength={500}
-                  placeholder="A short note — work conflict, family thing, etc."
+                  placeholder={t('swap.notePh')}
                   className="w-full px-3 py-2 text-sm rounded-lg border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-100 dark:bg-ink-800 text-ink-900 dark:text-parchment-50 focus:outline-none focus:ring-2 focus:ring-church-500"
                 />
               </div>

@@ -1,0 +1,693 @@
+{
+  "version": 1,
+  "task": "I18N-L1-13",
+  "rubric": "Manual classes for the critical-surface scan. proper-noun: wordmark, publisher, language endonym. identifier: key fragment, React key, stored enum, or code query — not prose. format-sample: an example in a field, not a sentence. hold: user-facing English left in place. Missing en/es keys are never classified; they fail the gate. Translation quality of existing pairs is NOT MEASURED.",
+  "entries": {
+    "client/src/App.jsx|prop:label|Dashboard": {
+      "class": "identifier",
+      "note": "Nav key fragment. The sidebar renders t(`nav.${label}`), so this English word is the key, not a second label. Spanish is the nav.* string."
+    },
+    "client/src/App.jsx|prop:label|Members": {
+      "class": "identifier",
+      "note": "Nav key fragment. The sidebar renders t(`nav.${label}`), so this English word is the key, not a second label. Spanish is the nav.* string."
+    },
+    "client/src/App.jsx|prop:label|Groups": {
+      "class": "identifier",
+      "note": "Nav key fragment. The sidebar renders t(`nav.${label}`), so this English word is the key, not a second label. Spanish is the nav.* string."
+    },
+    "client/src/App.jsx|prop:label|Schedule": {
+      "class": "identifier",
+      "note": "Nav key fragment. The sidebar renders t(`nav.${label}`), so this English word is the key, not a second label. Spanish is the nav.* string."
+    },
+    "client/src/App.jsx|prop:label|Check-in": {
+      "class": "identifier",
+      "note": "Nav key fragment. The sidebar renders t(`nav.${label}`), so this English word is the key, not a second label. Spanish is the nav.* string."
+    },
+    "client/src/App.jsx|prop:label|Register": {
+      "class": "identifier",
+      "note": "Nav key fragment. The sidebar renders t(`nav.${label}`), so this English word is the key, not a second label. Spanish is the nav.* string."
+    },
+    "client/src/App.jsx|prop:label|Intentions": {
+      "class": "identifier",
+      "note": "Nav key fragment. The sidebar renders t(`nav.${label}`), so this English word is the key, not a second label. Spanish is the nav.* string."
+    },
+    "client/src/App.jsx|prop:label|Worship": {
+      "class": "identifier",
+      "note": "Nav key fragment. The sidebar renders t(`nav.${label}`), so this English word is the key, not a second label. Spanish is the nav.* string."
+    },
+    "client/src/App.jsx|prop:label|Conflicts": {
+      "class": "identifier",
+      "note": "Nav key fragment. The sidebar renders t(`nav.${label}`), so this English word is the key, not a second label. Spanish is the nav.* string."
+    },
+    "client/src/App.jsx|prop:label|Events": {
+      "class": "identifier",
+      "note": "Nav key fragment. The sidebar renders t(`nav.${label}`), so this English word is the key, not a second label. Spanish is the nav.* string."
+    },
+    "client/src/App.jsx|prop:label|Daily Tasks": {
+      "class": "identifier",
+      "note": "Nav key fragment. The sidebar renders t(`nav.${label}`), so this English word is the key, not a second label. Spanish is the nav.* string."
+    },
+    "client/src/App.jsx|prop:label|Forms": {
+      "class": "identifier",
+      "note": "Nav key fragment. The sidebar renders t(`nav.${label}`), so this English word is the key, not a second label. Spanish is the nav.* string."
+    },
+    "client/src/App.jsx|prop:label|Bulletin": {
+      "class": "identifier",
+      "note": "Nav key fragment. The sidebar renders t(`nav.${label}`), so this English word is the key, not a second label. Spanish is the nav.* string."
+    },
+    "client/src/App.jsx|prop:label|Donations": {
+      "class": "identifier",
+      "note": "Nav key fragment. The sidebar renders t(`nav.${label}`), so this English word is the key, not a second label. Spanish is the nav.* string."
+    },
+    "client/src/App.jsx|prop:label|Pledges": {
+      "class": "identifier",
+      "note": "Nav key fragment. The sidebar renders t(`nav.${label}`), so this English word is the key, not a second label. Spanish is the nav.* string."
+    },
+    "client/src/App.jsx|prop:label|Offerings": {
+      "class": "identifier",
+      "note": "Nav key fragment. The sidebar renders t(`nav.${label}`), so this English word is the key, not a second label. Spanish is the nav.* string."
+    },
+    "client/src/App.jsx|prop:label|Payroll": {
+      "class": "identifier",
+      "note": "Nav key fragment. The sidebar renders t(`nav.${label}`), so this English word is the key, not a second label. Spanish is the nav.* string."
+    },
+    "client/src/App.jsx|prop:label|Finance": {
+      "class": "identifier",
+      "note": "Nav key fragment. The sidebar renders t(`nav.${label}`), so this English word is the key, not a second label. Spanish is the nav.* string."
+    },
+    "client/src/App.jsx|prop:label|Diocese": {
+      "class": "identifier",
+      "note": "Nav key fragment. The sidebar renders t(`nav.${label}`), so this English word is the key, not a second label. Spanish is the nav.* string."
+    },
+    "client/src/App.jsx|prop:label|AI Studio": {
+      "class": "identifier",
+      "note": "Nav key fragment. The sidebar renders t(`nav.${label}`), so this English word is the key, not a second label. Spanish is the nav.* string."
+    },
+    "client/src/App.jsx|prop:label|Library": {
+      "class": "identifier",
+      "note": "Nav key fragment. The sidebar renders t(`nav.${label}`), so this English word is the key, not a second label. Spanish is the nav.* string."
+    },
+    "client/src/App.jsx|prop:label|Getting settled": {
+      "class": "identifier",
+      "note": "Nav key fragment. The sidebar renders t(`nav.${label}`), so this English word is the key, not a second label. Spanish is the nav.* string."
+    },
+    "client/src/App.jsx|prop:label|Insights": {
+      "class": "identifier",
+      "note": "Nav key fragment. The sidebar renders t(`nav.${label}`), so this English word is the key, not a second label. Spanish is the nav.* string."
+    },
+    "client/src/App.jsx|prop:label|Team": {
+      "class": "identifier",
+      "note": "Nav key fragment. The sidebar renders t(`nav.${label}`), so this English word is the key, not a second label. Spanish is the nav.* string."
+    },
+    "client/src/App.jsx|prop:label|Org details": {
+      "class": "identifier",
+      "note": "Nav key fragment. The sidebar renders t(`nav.${label}`), so this English word is the key, not a second label. Spanish is the nav.* string."
+    },
+    "client/src/App.jsx|prop:label|Billing": {
+      "class": "identifier",
+      "note": "Nav key fragment. The sidebar renders t(`nav.${label}`), so this English word is the key, not a second label. Spanish is the nav.* string."
+    },
+    "client/src/App.jsx|prop:label|Audit log": {
+      "class": "identifier",
+      "note": "Nav key fragment. The sidebar renders t(`nav.${label}`), so this English word is the key, not a second label. Spanish is the nav.* string."
+    },
+    "client/src/App.jsx|prop:label|Archive": {
+      "class": "identifier",
+      "note": "Nav key fragment. The sidebar renders t(`nav.${label}`), so this English word is the key, not a second label. Spanish is the nav.* string."
+    },
+    "client/src/App.jsx|prop:label|Support": {
+      "class": "identifier",
+      "note": "Nav key fragment. The sidebar renders t(`nav.${label}`), so this English word is the key, not a second label. Spanish is the nav.* string."
+    },
+    "client/src/App.jsx|prop:label|Migration": {
+      "class": "identifier",
+      "note": "Nav key fragment. The sidebar renders t(`nav.${label}`), so this English word is the key, not a second label. Spanish is the nav.* string."
+    },
+    "client/src/App.jsx|prop:label|Notifications": {
+      "class": "identifier",
+      "note": "Nav key fragment. The sidebar renders t(`nav.${label}`), so this English word is the key, not a second label. Spanish is the nav.* string."
+    },
+    "client/src/App.jsx|prop:label|Preferences": {
+      "class": "identifier",
+      "note": "Nav key fragment. The sidebar renders t(`nav.${label}`), so this English word is the key, not a second label. Spanish is the nav.* string."
+    },
+    "client/src/App.jsx|jsx-text|OpenChurch": {
+      "class": "proper-noun",
+      "note": "Product wordmark or the publisher’s place name. Not a sentence to translate."
+    },
+    "client/src/App.jsx|attr:aria-label|OpenChurch": {
+      "class": "proper-noun",
+      "note": "Accessible name of the sidebar wordmark, added in A11Y-L2-14. Same product name as the visible word. Not a sentence to translate."
+    },
+    "client/src/App.jsx|jsx-text|Open Scaffold Labs, LLC": {
+      "class": "proper-noun",
+      "note": "Product wordmark or the publisher’s place name. Not a sentence to translate."
+    },
+    "client/src/App.jsx|jsx-text|Lafayette, California": {
+      "class": "proper-noun",
+      "note": "Product wordmark or the publisher’s place name. Not a sentence to translate."
+    },
+    "client/src/App.jsx|document-title|OpenChurch": {
+      "class": "proper-noun",
+      "note": "Product wordmark or the publisher’s place name. Not a sentence to translate."
+    },
+    "client/src/pages/Login.jsx|jsx-text|OpenChurch": {
+      "class": "proper-noun",
+      "note": "Product wordmark or the publisher’s place name. Not a sentence to translate."
+    },
+    "client/src/pages/Login.jsx|jsx-text|English": {
+      "class": "proper-noun",
+      "note": "Language endonym on the switcher. The name of the language stays as speakers say it."
+    },
+    "client/src/pages/Login.jsx|jsx-text|Español": {
+      "class": "proper-noun",
+      "note": "Language endonym on the switcher. The name of the language stays as speakers say it."
+    },
+    "client/src/pages/Signup.jsx|jsx-text|OpenChurch": {
+      "class": "proper-noun",
+      "note": "Product wordmark or the publisher’s place name. Not a sentence to translate."
+    },
+    "client/src/pages/Signup.jsx|jsx-text|English": {
+      "class": "proper-noun",
+      "note": "Language endonym on the switcher. The name of the language stays as speakers say it."
+    },
+    "client/src/pages/Signup.jsx|jsx-text|Español": {
+      "class": "proper-noun",
+      "note": "Language endonym on the switcher. The name of the language stays as speakers say it."
+    },
+    "client/src/pages/ForgotPassword.jsx|jsx-text|OpenChurch": {
+      "class": "proper-noun",
+      "note": "Product wordmark or the publisher’s place name. Not a sentence to translate."
+    },
+    "client/src/pages/ForgotPassword.jsx|jsx-text|English": {
+      "class": "proper-noun",
+      "note": "Language endonym on the switcher. The name of the language stays as speakers say it."
+    },
+    "client/src/pages/ForgotPassword.jsx|jsx-text|Español": {
+      "class": "proper-noun",
+      "note": "Language endonym on the switcher. The name of the language stays as speakers say it."
+    },
+    "client/src/pages/ResetPassword.jsx|jsx-text|English": {
+      "class": "proper-noun",
+      "note": "Language endonym on the switcher. The name of the language stays as speakers say it."
+    },
+    "client/src/pages/ResetPassword.jsx|jsx-text|Español": {
+      "class": "proper-noun",
+      "note": "Language endonym on the switcher. The name of the language stays as speakers say it."
+    },
+    "client/src/pages/ResetPassword.jsx|jsx-text|OpenChurch": {
+      "class": "proper-noun",
+      "note": "Product wordmark or the publisher’s place name. Not a sentence to translate."
+    },
+    "client/src/pages/Schedule.jsx|prop:label|Service": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|prop:label|Meeting": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|prop:label|Event": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|meridiem|pm": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|meridiem|am": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|toast|Auto-fill failed ({...})": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|toast|Rotation filled across {...} occurrences ({...} new{...})": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-expr|Edit Event": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-expr|New Event": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-text|Group": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-text|(optional)": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-text|No group": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-text|Offerings & fees": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-expr|settled": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-expr|waived": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-expr|draft": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-expr|${...} remaining": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-text|Open the offerings workbench →": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-text|Assigned Members": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-text|Assigned members see this on their calendar feed and get a serving reminder before the event.": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-expr|Schedule conflict": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-expr|{...} schedule conflicts": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-text|also assigned to": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-expr|Member unavailable": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-expr|{...} members unavailable": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-expr|Member #{...}": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-text|marked themselves unavailable on this date.": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-text|Repeat": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-text|Every": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-text|1 week": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-text|2 weeks": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-text|3 weeks": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-text|4 weeks": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-text|For": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-text|occurrences": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-text|Auto-fill rotation": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-text|Pick members in the order they should serve. Each future occurrence in this series gets the next person on the list (anyone already assigned is skipped).": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-expr|Add at least one member to enable auto-fill.": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-expr|Will rotate {...} member{...} across all future occurrences.": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-text|Filled": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-text|occurrences (": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-text|new": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-expr|, {...} already assigned": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-expr|Filling…": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-expr|Auto-fill rotation": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-text|Delete": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-text|Delete series": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|attr:title|Open check-in for this service": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-text|Check-in": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|attr:title|See every change made to this schedule entry": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-text|History": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-text|Cancel": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|attr:title|Apply this edit to this occurrence and every later one in the series": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-text|Save & apply to following": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-expr|Save anyway": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-expr|Add anyway": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-expr|Save": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-expr|Add Event": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|prop:title|Delete the whole recurring series?": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|prop:body|Every linked occurrence is removed, not just this one.": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|prop:title|Delete this scheduled event?": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|attr:title|{...} intention(s) awaiting a Mass: {...}": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-expr|12pm": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-expr|{...}pm": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-expr|{...}am": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/Schedule.jsx|jsx-expr|+{...} more": {
+      "class": "hold",
+      "note": "Schedule is still an English island, including hard-coded am/pm and en-US dates, with a few t() strings mixed in. HOLD — not one of the five release fixes."
+    },
+    "client/src/pages/ScheduleConflicts.jsx|meridiem|pm": {
+      "class": "hold",
+      "note": "HOLD — event times still use hard-coded pm. Not page title, section label, empty/error banner, or a primary action."
+    },
+    "client/src/pages/ScheduleConflicts.jsx|meridiem|am": {
+      "class": "hold",
+      "note": "HOLD — event times still use hard-coded am. Not page title, section label, empty/error banner, or a primary action."
+    },
+    "client/src/pages/ScheduleConflicts.jsx|jsx-text|— double-booked": {
+      "class": "hold",
+      "note": "HOLD — row phrase beside the member names. Not the page title, the week heading, the empty state, or View in Schedule."
+    },
+    "client/src/pages/SacristySheet.jsx|jsx-text|· OpenChurch": {
+      "class": "proper-noun",
+      "note": "Product wordmark or the publisher’s place name. Not a sentence to translate."
+    },
+    "client/src/pages/SacristySheet.jsx|jsx-expr|sheet.previouslyRecorded": {
+      "class": "identifier",
+      "note": "Translation key passed to priorFulfilmentText, which renders t(key). The English and Spanish sentences are sheet.previouslyRecorded. This literal is not shown."
+    },
+    "client/src/pages/MassIntentions.jsx|jsx-expr|mi.previouslyRecorded": {
+      "class": "identifier",
+      "note": "Translation key passed to priorFulfilmentText, which renders t(key). The English and Spanish sentences are mi.previouslyRecorded. This literal is not shown."
+    },
+    "client/src/pages/Clients.jsx|attr:alt|{...}'s photo": {
+      "class": "hold",
+      "note": "Member list or member detail chrome still English outside strings already on t(). Includes accessible names, placeholders, and failure sentences. HOLD."
+    },
+    "client/src/pages/Clients.jsx|attr:alt|Member photo": {
+      "class": "hold",
+      "note": "Member list or member detail chrome still English outside strings already on t(). Includes accessible names, placeholders, and failure sentences. HOLD."
+    },
+    "client/src/pages/Clients.jsx|attr:aria-label|Member actions": {
+      "class": "hold",
+      "note": "Member list or member detail chrome still English outside strings already on t(). Includes accessible names, placeholders, and failure sentences. HOLD."
+    },
+    "client/src/pages/Clients.jsx|jsx-expr|active": {
+      "class": "identifier",
+      "note": "Not rendered as its own caption. Email/Phone are React keys on a row that shows the value; active/Member are canonical stored values passed through statusLabel/roleLabel."
+    },
+    "client/src/pages/Clients.jsx|jsx-expr|Member": {
+      "class": "identifier",
+      "note": "Not rendered as its own caption. Email/Phone are React keys on a row that shows the value; active/Member are canonical stored values passed through statusLabel/roleLabel."
+    },
+    "client/src/pages/Clients.jsx|jsx-expr|Email": {
+      "class": "identifier",
+      "note": "Not rendered as its own caption. Email/Phone are React keys on a row that shows the value; active/Member are canonical stored values passed through statusLabel/roleLabel."
+    },
+    "client/src/pages/Clients.jsx|jsx-expr|Phone": {
+      "class": "identifier",
+      "note": "Not rendered as its own caption. Email/Phone are React keys on a row that shows the value; active/Member are canonical stored values passed through statusLabel/roleLabel."
+    },
+    "client/src/pages/Clients.jsx|prop:label|Email": {
+      "class": "identifier",
+      "note": "Not rendered as its own caption. Email/Phone are React keys on a row that shows the value; active/Member are canonical stored values passed through statusLabel/roleLabel."
+    },
+    "client/src/pages/Clients.jsx|prop:label|Phone": {
+      "class": "identifier",
+      "note": "Not rendered as its own caption. Email/Phone are React keys on a row that shows the value; active/Member are canonical stored values passed through statusLabel/roleLabel."
+    },
+    "client/src/pages/Clients.jsx|attr:placeholder|email@church.org": {
+      "class": "format-sample",
+      "note": "Example address in the email field. A sample, not a sentence. Left as a format hint."
+    },
+    "client/src/pages/MemberDetail.jsx|jsx-text|A private link": {
+      "class": "hold",
+      "note": "Member list or member detail chrome still English outside strings already on t(). Includes accessible names, placeholders, and failure sentences. HOLD."
+    },
+    "client/src/pages/MemberDetail.jsx|jsx-text|can use to view their upcoming events and request swaps — no login required. Rotating invalidates the old link.": {
+      "class": "hold",
+      "note": "Member list or member detail chrome still English outside strings already on t(). Includes accessible names, placeholders, and failure sentences. HOLD."
+    },
+    "client/src/pages/MemberDetail.jsx|jsx-text|Save this somewhere — the link won't be shown again after you leave the page. Rotating any time produces a fresh one.": {
+      "class": "hold",
+      "note": "Member list or member detail chrome still English outside strings already on t(). Includes accessible names, placeholders, and failure sentences. HOLD."
+    },
+    "client/src/pages/MemberDetail.jsx|jsx-text|No link generated this session.": {
+      "class": "hold",
+      "note": "Member list or member detail chrome still English outside strings already on t(). Includes accessible names, placeholders, and failure sentences. HOLD."
+    },
+    "client/src/pages/MemberDetail.jsx|attr:title|Open check-in for {...}": {
+      "class": "hold",
+      "note": "Member list or member detail chrome still English outside strings already on t(). Includes accessible names, placeholders, and failure sentences. HOLD."
+    },
+    "client/src/pages/MemberDetail.jsx|jsx-text|service": {
+      "class": "hold",
+      "note": "Member list or member detail chrome still English outside strings already on t(). Includes accessible names, placeholders, and failure sentences. HOLD."
+    },
+    "client/src/pages/MemberDetail.jsx|jsx-text|attended": {
+      "class": "hold",
+      "note": "Member list or member detail chrome still English outside strings already on t(). Includes accessible names, placeholders, and failure sentences. HOLD."
+    },
+    "client/src/pages/MemberDetail.jsx|jsx-text|Dates": {
+      "class": "hold",
+      "note": "Member list or member detail chrome still English outside strings already on t(). Includes accessible names, placeholders, and failure sentences. HOLD."
+    },
+    "client/src/pages/MemberDetail.jsx|jsx-text|can't serve. The rotation auto-fill skips these, and the schedule warns if you assign them anyway.": {
+      "class": "hold",
+      "note": "Member list or member detail chrome still English outside strings already on t(). Includes accessible names, placeholders, and failure sentences. HOLD."
+    },
+    "client/src/pages/MemberDetail.jsx|jsx-text|No blackout dates.": {
+      "class": "hold",
+      "note": "Member list or member detail chrome still English outside strings already on t(). Includes accessible names, placeholders, and failure sentences. HOLD."
+    },
+    "client/src/pages/MemberDetail.jsx|attr:aria-label|Remove blackout date": {
+      "class": "hold",
+      "note": "Member list or member detail chrome still English outside strings already on t(). Includes accessible names, placeholders, and failure sentences. HOLD."
+    },
+    "client/src/pages/MemberDetail.jsx|jsx-text|From": {
+      "class": "hold",
+      "note": "Member list or member detail chrome still English outside strings already on t(). Includes accessible names, placeholders, and failure sentences. HOLD."
+    },
+    "client/src/pages/MemberDetail.jsx|jsx-text|To": {
+      "class": "hold",
+      "note": "Member list or member detail chrome still English outside strings already on t(). Includes accessible names, placeholders, and failure sentences. HOLD."
+    },
+    "client/src/pages/MemberDetail.jsx|jsx-text|(optional)": {
+      "class": "hold",
+      "note": "Member list or member detail chrome still English outside strings already on t(). Includes accessible names, placeholders, and failure sentences. HOLD."
+    },
+    "client/src/pages/MemberDetail.jsx|attr:placeholder|Reason (optional) — e.g. Vacation": {
+      "class": "hold",
+      "note": "Member list or member detail chrome still English outside strings already on t(). Includes accessible names, placeholders, and failure sentences. HOLD."
+    },
+    "client/src/pages/MemberDetail.jsx|attr:placeholder|Fr. …": {
+      "class": "format-sample",
+      "note": "Minister field hint. The ellipsis is a form cue, not prose to translate this pass."
+    },
+    "client/src/pages/MemberDetail.jsx|attr:placeholder|Parish / church": {
+      "class": "hold",
+      "note": "Member list or member detail chrome still English outside strings already on t(). Includes accessible names, placeholders, and failure sentences. HOLD."
+    },
+    "client/src/pages/MemberDetail.jsx|attr:placeholder|Sponsor, godparents, etc.": {
+      "class": "hold",
+      "note": "Member list or member detail chrome still English outside strings already on t(). Includes accessible names, placeholders, and failure sentences. HOLD."
+    },
+    "client/src/pages/MemberDetail.jsx|jsx-text|Reason for this correction": {
+      "class": "hold",
+      "note": "Member list or member detail chrome still English outside strings already on t(). Includes accessible names, placeholders, and failure sentences. HOLD."
+    },
+    "client/src/pages/MemberDetail.jsx|attr:placeholder|e.g. minister's name was misspelled in the original entry": {
+      "class": "hold",
+      "note": "Member list or member detail chrome still English outside strings already on t(). Includes accessible names, placeholders, and failure sentences. HOLD."
+    },
+    "client/src/pages/MemberDetail.jsx|jsx-text|Kept with the entry, dated and attributed, so the register shows what changed and why.": {
+      "class": "hold",
+      "note": "Member list or member detail chrome still English outside strings already on t(). Includes accessible names, placeholders, and failure sentences. HOLD."
+    },
+    "client/src/pages/MemberDetail.jsx|attr:alt|{...}'s photo": {
+      "class": "hold",
+      "note": "Member list or member detail chrome still English outside strings already on t(). Includes accessible names, placeholders, and failure sentences. HOLD."
+    },
+    "client/src/pages/MemberDetail.jsx|jsx-expr|email": {
+      "class": "identifier",
+      "note": "React key on the contact row. The row renders the address or number, not this token."
+    },
+    "client/src/pages/MemberDetail.jsx|jsx-expr|phone": {
+      "class": "identifier",
+      "note": "React key on the contact row. The row renders the address or number, not this token."
+    },
+    "client/src/pages/MemberDetail.jsx|jsx-expr|ministry": {
+      "class": "identifier",
+      "note": "React key on the contact row. The row renders the address or number, not this token."
+    },
+    "client/src/pages/MemberDetail.jsx|prop:label|email": {
+      "class": "identifier",
+      "note": "React key on the contact row. The row renders the address or number, not this token."
+    },
+    "client/src/pages/MemberDetail.jsx|prop:label|phone": {
+      "class": "identifier",
+      "note": "React key on the contact row. The row renders the address or number, not this token."
+    },
+    "client/src/pages/MemberDetail.jsx|prop:label|ministry": {
+      "class": "identifier",
+      "note": "React key on the contact row. The row renders the address or number, not this token."
+    },
+    "client/src/pages/MemberDetail.jsx|jsx-text|gift": {
+      "class": "hold",
+      "note": "Member list or member detail chrome still English outside strings already on t(). Includes accessible names, placeholders, and failure sentences. HOLD."
+    },
+    "client/src/pages/MemberDetail.jsx|jsx-text|No gifts recorded for this member.": {
+      "class": "hold",
+      "note": "Member list or member detail chrome still English outside strings already on t(). Includes accessible names, placeholders, and failure sentences. HOLD."
+    },
+    "client/src/pages/MemberDetail.jsx|jsx-expr|Donations are matched by email ({...}).": {
+      "class": "hold",
+      "note": "Member list or member detail chrome still English outside strings already on t(). Includes accessible names, placeholders, and failure sentences. HOLD."
+    },
+    "client/src/pages/MemberDetail.jsx|jsx-expr|Add an email to this member so future gifts auto-match.": {
+      "class": "hold",
+      "note": "Member list or member detail chrome still English outside strings already on t(). Includes accessible names, placeholders, and failure sentences. HOLD."
+    },
+    "client/src/pages/MemberDetail.jsx|jsx-expr|Donation": {
+      "class": "hold",
+      "note": "Member list or member detail chrome still English outside strings already on t(). Includes accessible names, placeholders, and failure sentences. HOLD."
+    },
+    "client/src/pages/MemberDetail.jsx|jsx-expr|[Sample]": {
+      "class": "hold",
+      "note": "Member list or member detail chrome still English outside strings already on t(). Includes accessible names, placeholders, and failure sentences. HOLD."
+    },
+    "client/src/pages/MemberDetail.jsx|jsx-text|of": {
+      "class": "hold",
+      "note": "Member list or member detail chrome still English outside strings already on t(). Includes accessible names, placeholders, and failure sentences. HOLD."
+    },
+    "client/src/pages/MemberDetail.jsx|jsx-text|expected": {
+      "class": "hold",
+      "note": "Member list or member detail chrome still English outside strings already on t(). Includes accessible names, placeholders, and failure sentences. HOLD."
+    },
+    "client/src/components/InstallPrompt.jsx|return|(display-mode: standalone)": {
+      "class": "identifier",
+      "note": "matchMedia query inside InstallPrompt. Not shown to the parish."
+    }
+  },
+  "unresolved": [
+    {
+      "id": "client/src/pages/Clients.jsx|t(key)|key",
+      "reason": "NOT MEASURED. localize() takes a key argument. Callers pass mem.role/status/tag templates over ROLES, STATUSES, and TAG_OPTIONS, but the harness cannot bind t(key) to that enum. A missing mem.role.* key humanizes the stored English token instead of showing the raw key."
+    },
+    {
+      "id": "client/src/pages/MemberDetail.jsx|mem.status.${member.status}|member.status",
+      "reason": "NOT MEASURED. Status is the member row, not a closed array in this file. The screen shows the raw status when mem.status.* is missing, so an unknown stored value stays English on purpose."
+    },
+    {
+      "id": "client/src/pages/MemberDetail.jsx|mem.role.${member.role}|member.role",
+      "reason": "NOT MEASURED. Role is the member row, not a closed array in this file. Same fallback as status: a role with no mem.role.* key is shown as stored."
+    }
+  ]
+}

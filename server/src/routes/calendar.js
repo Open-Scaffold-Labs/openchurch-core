@@ -4,11 +4,11 @@ import { requireIntParam, parsePagination } from '../utils/params.js'
 import { monitor } from '../monitoring/index.js'
 import {
   syncEventReminders, syncSeriesReminders,
-  cancelEventReminders, cancelSeriesReminders,
+  cancelEventReminders,
   notifyAssignmentAdded,
 } from '../notifications/calendarReminders.js'
 import { resolveLiturgicalContext, resolveLiturgicalBatch } from './liturgical.js'
-import { captureAndDelete, captureAndDeleteMany, VaultError } from '../vault/index.js'
+import { captureAndDelete, captureAndDeleteMany, VaultError, vaultErrorPayload } from '../vault/index.js'
 
 const router = Router()
 
@@ -30,6 +30,62 @@ function normalizeGroupId(raw) {
   if (raw === undefined || raw === null || raw === '') return null
   const n = Number(raw)
   return Number.isInteger(n) && n > 0 ? n : null
+}
+
+// The Mass is the authority for date (MI.4). An offered intention copies
+// mass_date at assign time; if the Mass later moves, open/scheduled rows
+// must follow or the book, weekly sheet, and Packet keep the old week
+// while the schedule tile follows the event. Fulfilled stays put — that
+// date is a historical fact, and fulfilled_mass_* (INT-01) are not
+// written here. No new constraint; application-level only.
+async function followOpenScheduledToMassDate(eventId, orgId, date) {
+  const iso = typeof date === 'string' && /^\d{4}-\d{2}-\d{2}/.test(date) ? date.slice(0, 10) : null
+  if (!iso || !eventId) return
+  await pool.query(
+    `UPDATE ochr_mass_intentions
+        SET mass_date = $1::date, updated_at = NOW()
+      WHERE calendar_event_id = $2 AND organization_id = $3
+        AND status IN ('open', 'scheduled')`,
+    [iso, eventId, orgId]
+  )
+}
+
+// Deleting a Mass SET NULL on calendar_event_id and used to leave
+// status = scheduled — an impossible pair. Capture the linked rows
+// before the vault delete, then demote scheduled → open (same as
+// release) after the Mass is gone. Dated-but-never-linked scheduled
+// rows are not in this id list and stay put.
+async function intentionIdsOnEvents(eventIds, orgId) {
+  const ids = eventIds.map(Number).filter(n => Number.isInteger(n) && n > 0)
+  if (!ids.length) return []
+  const { rows } = await pool.query(
+    `SELECT id FROM ochr_mass_intentions
+      WHERE organization_id = $1 AND calendar_event_id = ANY($2::int[])`,
+    [orgId, ids]
+  )
+  return rows.map(r => Number(r.id))
+}
+
+async function releaseScheduledAfterMassGone(intentionIds, orgId) {
+  if (!intentionIds.length) return
+  await pool.query(
+    `UPDATE ochr_mass_intentions
+        SET status = CASE WHEN status = 'scheduled' THEN 'open' ELSE status END,
+            updated_at = NOW()
+      WHERE id = ANY($1::int[]) AND organization_id = $2`,
+    [intentionIds, orgId]
+  )
+}
+
+// A seed delete cascades later occurrences. Collect every event id that
+// will disappear so their intentions are released too.
+async function eventsRemovedWith(id, orgId) {
+  const { rows } = await pool.query(
+    `SELECT id FROM ochr_calendar_events
+      WHERE organization_id = $1 AND (id = $2 OR recurrence_parent_id = $2)`,
+    [orgId, id]
+  )
+  return rows.map(r => Number(r.id))
 }
 
 // Tenant guard for group_id. A4.3 lets an event point at a group;
@@ -273,6 +329,43 @@ router.get('/', async (req, res) => {
   } catch (err) {
     monitor.error('calendar.list', err, { orgId: req.organizationId })
     res.status(500).json({ error: 'Failed to load events' })
+  }
+})
+
+// GET /api/calendar/:id — one service, by the id another surface is holding.
+//
+// The list above answers "what is in this window". That is the wrong question
+// for a surface that already knows WHICH service it means: check-in opened for
+// a named service, a member's attendance row pointing at the Mass they were at.
+// Those ids are authoritative (ochr_checkins.calendar_event_id is NOT NULL with
+// a composite tenant FK) but the service they name can sit outside any window a
+// picker happens to load — last Sunday's Mass, a Mass from March.
+//
+// Registered AFTER '/conflicts' and '/conflicts/scan' so it cannot shadow them.
+//
+// A service from another parish answers 404, exactly as a made-up id does. The
+// tenant predicate is in the SQL, not in the caller: this route is the reason a
+// deep link can be trusted, so it cannot be the place that trusts one.
+router.get('/:id', async (req, res) => {
+  const id = Number(req.params.id)
+  if (!Number.isInteger(id) || id < 1) {
+    return res.status(400).json({ error: 'A numeric event id is required' })
+  }
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, title, to_char(date, 'YYYY-MM-DD') AS date, start_time, end_time,
+              type, assigned_to, language, liturgical_season, liturgical_color, feast_name
+         FROM ochr_calendar_events
+        WHERE id = $1 AND organization_id = $2`,
+      [id, req.organizationId]
+    )
+    // Not found and not yours are the same answer on purpose — a 403 would
+    // confirm the row exists to somebody who cannot see it.
+    if (!rows.length) return res.status(404).json({ error: 'Event not found' })
+    res.json(rows[0])
+  } catch (err) {
+    monitor.error('calendar.get', err, { orgId: req.organizationId, id })
+    res.status(500).json({ error: 'Failed to load event' })
   }
 })
 
@@ -613,6 +706,7 @@ router.patch('/:id', async (req, res) => {
            lit.season, lit.color, lit.feast_name, id, req.organizationId]
         )
         if (!rows.length) return res.status(404).json({ error: 'Not found' })
+        await followOpenScheduledToMassDate(id, req.organizationId, date)
         await syncEventReminders(req.organizationId, id)
         await notifyAssignmentAdded(req.organizationId, id, addedFollowing)
         return res.json(rows[0])
@@ -667,6 +761,7 @@ router.patch('/:id', async (req, res) => {
        lit.season, lit.color, lit.feast_name, id, req.organizationId]
     )
     if (!rows.length) return res.status(404).json({ error: 'Not found' })
+    await followOpenScheduledToMassDate(id, req.organizationId, date)
     await syncEventReminders(req.organizationId, id)
     const prevIds = Array.isArray(prevRows[0]?.assigned_to) ? prevRows[0].assigned_to : []
     const added = (assigned_to || []).filter(x => !prevIds.includes(x))
@@ -696,8 +791,11 @@ router.patch('/:id', async (req, res) => {
 // as cascade children and the entry says how many, which is the first
 // time that behaviour has been visible to anyone.
 //
-// Reminders are cancelled BEFORE capture, while the occurrence ids still
-// resolve. They are not restored; the registry says so on the entry.
+// Reminders are cancelled AFTER a successful capture. CHK-05 may refuse
+// the delete; cancelling first would drop pending notices for a Mass
+// that is still on the schedule. They are not restored; the registry
+// says so on the entry. The collected ids are passed to cancel so a
+// series delete does not have to re-read rows that just disappeared.
 router.delete('/:id', async (req, res) => {
   const id = requireIntParam(req, res); if (id === null) return
   const seriesScope = req.query.scope === 'series'
@@ -715,28 +813,39 @@ router.delete('/:id', async (req, res) => {
         'SELECT id FROM ochr_calendar_events WHERE recurrence_parent_id = $1 AND organization_id = $2',
         [parentId, req.organizationId]
       )
-      await cancelSeriesReminders(req.organizationId, parentId)
+      const siblingIds = siblings.map(r => r.id)
+      const linked = await intentionIdsOnEvents(siblingIds, req.organizationId)
+      // CHK-05: do not cancel reminders until the vault has locked the
+      // set and confirmed there is no attendance. cancelSeriesReminders
+      // reads live event ids, so after a successful delete we cancel
+      // from the ids we already collected.
       const captured = await captureAndDeleteMany({
         kind: 'event',
-        ids: siblings.map(r => r.id),
+        ids: siblingIds,
         orgId: req.organizationId,
         user: req.user,
         reason,
       })
       if (!captured) return res.status(404).json({ error: 'Not found' })
+      await cancelEventReminders(req.organizationId, siblingIds)
+      await releaseScheduledAfterMassGone(linked, req.organizationId)
       return res.status(204).end()
     }
 
     // Either a one-off, or series scope on a row that is not recurring.
-    await cancelEventReminders(req.organizationId, id)
+    // A seed delete cascades later occurrences — collect those too.
+    const disappearing = await eventsRemovedWith(id, req.organizationId)
+    const linked = await intentionIdsOnEvents(disappearing, req.organizationId)
     const captured = await captureAndDelete({
       kind: 'event', id, orgId: req.organizationId, user: req.user, reason,
     })
     if (!captured) return res.status(404).json({ error: 'Not found' })
+    await cancelEventReminders(req.organizationId, id)
+    await releaseScheduledAfterMassGone(linked, req.organizationId)
     res.status(204).end()
   } catch (err) {
     if (err instanceof VaultError) {
-      return res.status(err.status).json({ error: err.message, code: err.code })
+      return res.status(err.status).json(vaultErrorPayload(err))
     }
     monitor.error('calendar.delete', err, { orgId: req.organizationId, id, seriesScope })
     res.status(500).json({ error: 'Failed to delete event' })

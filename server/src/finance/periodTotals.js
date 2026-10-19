@@ -9,7 +9,13 @@ import { EFFECTIVE_COA } from './effectiveCoa.js'
 
 
 // → { groups, accounts, totals } — all amounts as fixed-2 strings.
-export async function computePeriodTotals(orgId, start, end) {
+//
+// `db` is whatever answers .query(): the pool by default, or the CLIENT of
+// an open transaction. The submit route passes its client so the totals it
+// freezes and the submitted_at it stamps come from ONE snapshot — see
+// routes/finance.js POST /submissions for the gap that closed. Every other
+// caller keeps the pool and is unchanged.
+export async function computePeriodTotals(orgId, start, end, db = pool) {
   // LEFT JOIN, not INNER — a ledger row whose account_code is not in the
   // parish's CURRENT effective chart must never be dropped from the money.
   // The import validates codes against the chart AT IMPORT TIME, but a code
@@ -29,7 +35,7 @@ export async function computePeriodTotals(orgId, start, end) {
   // money is assessable, and to whom it belongs once an affiliation ends, is
   // a policy decision for the parish and chancery to make by MAPPING the
   // code; this function's job is only to stop the loss being silent.
-  const { rows: accounts } = await pool.query(
+  const { rows: accounts } = await db.query(
     `SELECT l.account_code                       AS code,
             c.name                               AS name,
             COALESCE(c.acct_type, 'unmapped')    AS acct_type,

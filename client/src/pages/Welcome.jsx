@@ -2,6 +2,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import { Users, Calendar, CheckSquare, Feather, ArrowRight } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
+import { useLocale } from '../i18n'
 
 // One-time welcome screen shown immediately after signup. Intentionally
 // minimal — no sidebar, no header — so first impression is focus, not
@@ -12,23 +13,30 @@ import { useAuth } from '../context/AuthContext'
 //
 // Not in the sidebar; only reachable via post-signup redirect or a
 // direct URL. That's deliberate — it's a moment, not a destination.
+//
+// Card titles and bodies go through t(). The four modules and their
+// destinations are unchanged: Dashboard `/` and add-member `/clients?new=1`.
 
-const ORIENTATION = [
-  { icon: Users,       title: 'Members',   body: 'Your directory of parishioners, volunteers, and staff. Add roles, tags, and contact info.' },
-  { icon: Calendar,    title: 'Events',    body: 'Services, feast days, meetings, and one-offs. Assign members so each event knows who’s responsible.' },
-  { icon: CheckSquare, title: 'Tasks',     body: 'The rolling checklist of things to do before, during, and after service. Grouped by category.' },
-  { icon: Feather,    title: 'AI Studio', body: 'Generate bulletins, newsletters, and announcements from a short prompt — in English or Spanish.' },
-]
+function orientation(t) {
+  return [
+    { id: 'members', icon: Users,       title: t('welcome.members'), body: t('welcome.membersBody') },
+    { id: 'events',  icon: Calendar,    title: t('welcome.events'),  body: t('welcome.eventsBody') },
+    { id: 'tasks',   icon: CheckSquare, title: t('welcome.tasks'),   body: t('welcome.tasksBody') },
+    { id: 'studio',  icon: Feather,     title: t('welcome.studio'),  body: t('welcome.studioBody') },
+  ]
+}
 
 function firstName(full) {
-  if (!full) return 'there'
+  if (!full) return ''
   return String(full).trim().split(/\s+/)[0]
 }
 
 export default function Welcome() {
   const { user } = useAuth()
   const navigate = useNavigate()
-  const orgName  = user?.organization?.name || 'your church'
+  const { t } = useLocale()
+  const orgName  = user?.organization?.name || t('welcome.orgFallback')
+  const name = firstName(user?.name)
 
   return (
     <div className="min-h-screen flex items-center justify-center px-4 py-12 bg-parchment-50 dark:bg-ink-950">
@@ -52,22 +60,24 @@ export default function Welcome() {
 
         <div className="text-center mb-10">
           <h1 className="font-display text-4xl md:text-5xl font-semibold text-ink-900 dark:text-parchment-50 leading-tight">
-            Welcome, {firstName(user?.name)}.
+            {name ? t('welcome.hello', { name }) : t('welcome.helloAnon')}
           </h1>
           <p className="mt-4 text-base md:text-lg text-ink-600 dark:text-parchment-300/80 max-w-xl mx-auto leading-relaxed">
-            Your workspace for <span className="font-semibold text-church-800 dark:text-brass-200">{orgName}</span> is ready.
-            We've filled it with a few sample rows so the pages aren't empty,
-            and the Dashboard has a short checklist to guide your first steps.
+            {t('welcome.bodyBefore')}
+            <span className="font-semibold text-church-800 dark:text-brass-200">{orgName}</span>
+            {t('welcome.bodyAfter')}
+            {' '}
+            {t('welcome.bodyHelp')}
           </p>
         </div>
 
         <div className="bg-parchment-100 dark:bg-ink-900/80 rounded-2xl border border-parchment-300/60 dark:border-brass-900/30 shadow-warm-md p-6 md:p-8">
           <p className="text-xs font-semibold uppercase tracking-wider text-brass-600 dark:text-brass-300 mb-4">
-            Here’s what’s inside
+            {t('welcome.inside')}
           </p>
           <div className="grid sm:grid-cols-2 gap-5">
-            {ORIENTATION.map(({ icon: Icon, title, body }) => (
-              <div key={title} className="flex gap-3">
+            {orientation(t).map(({ id, icon: Icon, title, body }) => (
+              <div key={id} className="flex gap-3">
                 <div className="shrink-0 w-9 h-9 rounded-lg bg-church-50 dark:bg-church-900/40 flex items-center justify-center text-church-800 dark:text-brass-300">
                   <Icon size={17} />
                 </div>
@@ -90,7 +100,7 @@ export default function Welcome() {
             onClick={() => navigate('/', { replace: true })}
             className="inline-flex items-center gap-2 px-6 py-3 rounded-lg bg-church-900 dark:bg-church-700 text-parchment-50 text-sm font-semibold shadow-warm hover:bg-church-800 dark:hover:bg-church-600 transition-colors"
           >
-            Go to my dashboard & checklist
+            {t('welcome.cta')}
             <ArrowRight size={15} />
           </button>
           <Link
@@ -98,7 +108,7 @@ export default function Welcome() {
             replace
             className="text-xs font-medium text-ink-500 hover:text-church-800 dark:text-parchment-300/60 dark:hover:text-brass-200 transition-colors"
           >
-            Or jump straight to adding a member
+            {t('welcome.addMember')}
           </Link>
         </div>
       </motion.div>

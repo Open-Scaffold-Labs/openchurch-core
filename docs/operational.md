@@ -9,28 +9,35 @@ this on?" form.
 
 ## Activating Vercel cron
 
-Three cron entries are pre-declared in `vercel.json`. They do nothing until
-two conditions hold:
+Eight cron entries are pre-declared in `vercel.json` (drain, birthdays,
+retention, sacrament anniversaries, backup digest, charge-recurring,
+nudge-swaps, weekly serving digest). They do nothing until two conditions
+hold:
 
 1. The Vercel project has the `CRON_SECRET` env var set (any random hex string
    — `openssl rand -hex 32` is fine).
 2. A push to `main` triggers a new deploy. Vercel reads `vercel.json` on
    deploy and registers the schedule. The cron tab on the Vercel dashboard
-   will show all three entries.
+   will show all eight entries.
 
 Vercel sends `Authorization: Bearer ${CRON_SECRET}` on every invocation.
 `requireCronAuth` (server/src/middleware/cronAuth.js) rejects anything else
 with 401 and returns 503 when `CRON_SECRET` isn't set so misconfigured
 deploys surface loudly instead of silently no-op'ing.
 
-The same underlying functions are reachable via `/api/admin/...` paths for
-manual operator pokes from the UI:
+Three of the eight also have `/api/admin/...` manual-poke counterparts
+(admin JWT / super-admin as wired). The other five are cron-only today:
 
 | Cron path | Admin path | Used by |
 |---|---|---|
 | `POST /api/cron/drain-notifications` | `POST /api/admin/notifications/drain` | Notifications scheduler |
 | `POST /api/cron/enqueue-birthdays` | `POST /api/admin/notifications/enqueue-birthdays` | Birthday + anniversary helper |
 | `POST /api/cron/retention-prune` | `POST /api/admin/maintenance/retention-prune` | Daily retention prune |
+| `POST /api/cron/enqueue-sacrament-anniversaries` | *(none — cron-only)* | Weekly sacrament-anniversary digests |
+| `POST /api/cron/backup-digest` | *(none — cron-only)* | Weekly off-site backup digest |
+| `POST /api/cron/charge-recurring` | *(none — cron-only)* | Recurring-gift charger |
+| `POST /api/cron/nudge-swaps` | *(none — cron-only)* | Stale swap-request nudge |
+| `POST /api/cron/weekly-serving-digest` | *(none — cron-only)* | Weekly serving digest |
 
 ## Email provider swap
 
@@ -143,6 +150,9 @@ Env:
   that user a support *vendor* (cross-org queue, full triage). Fail-closed.
 - `VENDOR_ADMIN_EMAILS` — optional comma-separated additional vendor
   triagers (for when OSL grows past one).
+- `AI_SWITCH_OPERATOR_USER_IDS` — comma-separated `ochr_users.id`s allowed
+  to read/stop/resume platform AI at `/api/admin/ai-switch`. Bound to the
+  user id, not the JWT email. Unset → nobody (404). Fail-closed.
 - `SUPPORT_EMAIL` — if set, every new ticket is forwarded there through the
   vendor-neutral `sendEmail()` seam (Resend when `RESEND_API_KEY` is set,
   console stub otherwise). Best-effort; never blocks submission.
@@ -160,7 +170,7 @@ migration for the PR-tracking columns.
 
 ## Registry audit
 
-An upstream audit verifies on every push that four conventions still hold:
+An upstream audit verifies that four conventions still hold:
 
 - Client port `5202`
 - Server port `3034`

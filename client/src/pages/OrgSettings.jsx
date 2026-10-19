@@ -11,6 +11,7 @@ import { apiUrl } from '../api'
 import { LIT_COLOR_DOT, LIT_COLORS, LIT_COLOR_DOT_NONE } from '../utils/liturgicalColors'
 import { useConfirm } from '../components/ConfirmProvider'
 import { useLocale } from '../i18n'
+import { offeredParishTimeZones } from '../utils/parishTimeZone'
 
 // The parish's clock (C4). ochr_organizations.timezone has driven the
 // kiosk's "today" since CHK.7 and defaulted to UTC, and until this field no
@@ -30,10 +31,10 @@ const COMMON_TIMEZONES = [
 function allTimezones() {
   try {
     if (typeof Intl.supportedValuesOf === 'function') {
-      return Array.from(new Set(['UTC', ...Intl.supportedValuesOf('timeZone')]))
+      return offeredParishTimeZones(['UTC', ...Intl.supportedValuesOf('timeZone')])
     }
   } catch { /* fall through to the short list */ }
-  return COMMON_TIMEZONES
+  return offeredParishTimeZones(COMMON_TIMEZONES)
 }
 const TIMEZONES = allTimezones()
 
@@ -91,16 +92,27 @@ function DataExportCard() {
 function DioceseCard() {
   const toast = useToast()
   const ask = useConfirm()
+  const { t } = useLocale()
   const [aff, setAff]         = useState(null)
+  const [affFailed, setAffFailed] = useState(false)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy]       = useState(false)
   const [grant, setGrant]     = useState('summary')
 
   const load = () => {
+    setAffFailed(false)
     fetch(apiUrl('/api/affiliation'))
-      .then(r => (r.ok ? r.json() : { affiliation: null }))
-      .then(d => setAff(d.affiliation ?? null))
-      .catch(() => {})
+      .then(async r => {
+        // `{ affiliation: null }` on a 500 said "This parish is independent."
+        if (!r.ok) throw new Error('unread')
+        const d = await r.json()
+        if (!d || typeof d !== 'object' || Array.isArray(d) || !Object.prototype.hasOwnProperty.call(d, 'affiliation')) {
+          throw new Error('shape')
+        }
+        setAff(d.affiliation ?? null)
+        setAffFailed(false)
+      })
+      .catch(() => { setAff(null); setAffFailed(true) })
       .finally(() => setLoading(false))
   }
   useEffect(load, [])
@@ -121,8 +133,8 @@ function DioceseCard() {
   }
 
   const GRANT_HELP = {
-    summary: 'The diocese sees period-level financial summaries only.',
-    detail:  'The diocese may also drill into account-level lines.',
+    summary: 'The diocese sees period-level financial summaries, and the names and roles of your parish leadership.',
+    detail:  'The diocese may also drill into account-level lines, and the names and roles of your parish leadership.',
   }
 
   return (
@@ -139,6 +151,8 @@ function DioceseCard() {
 
       {loading ? (
         <div className="flex justify-center py-4"><Loader2 size={16} className="animate-spin text-brass-500" /></div>
+      ) : affFailed ? (
+        <p role="status" className="text-sm text-amber-800 dark:text-amber-300">{t('org.affUnread')}</p>
       ) : !aff ? (
         <p className="text-sm text-ink-500 dark:text-parchment-300/70">
           This parish is independent. If your diocese uses OpenDiocese, an
@@ -215,7 +229,9 @@ function DioceseCard() {
 function AIProviderCard() {
   const toast = useToast()
   const ask = useConfirm()
+  const { t } = useLocale()
   const [cfg, setCfg]         = useState(null)   // { source, provider, model, key_last4 }
+  const [cfgFailed, setCfgFailed] = useState(false)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy]       = useState(false)
   const [editing, setEditing] = useState(false)
@@ -223,9 +239,17 @@ function AIProviderCard() {
 
   useEffect(() => {
     fetch(apiUrl('/api/ai/provider'))
-      .then(r => (r.ok ? r.json() : null))
-      .then(d => setCfg(d))
-      .catch(() => {})
+      .then(async r => {
+        // `null` on a 500 said the parish was on the built-in assistant.
+        if (!r.ok) throw new Error('unread')
+        const d = await r.json()
+        if (!d || typeof d !== 'object' || Array.isArray(d) || (d.source !== 'platform' && d.source !== 'org')) {
+          throw new Error('shape')
+        }
+        setCfg(d)
+        setCfgFailed(false)
+      })
+      .catch(() => { setCfg(null); setCfgFailed(true) })
       .finally(() => setLoading(false))
   }, [])
 
@@ -284,6 +308,8 @@ function AIProviderCard() {
 
       {loading ? (
         <div className="flex justify-center py-4"><Loader2 size={16} className="animate-spin text-brass-500" /></div>
+      ) : cfgFailed ? (
+        <p role="status" className="text-sm text-amber-800 dark:text-amber-300">{t('org.aiUnread')}</p>
       ) : (
         <div className="space-y-3">
           {cfg?.source === 'org' ? (
@@ -366,7 +392,9 @@ function fmtFeastDate(iso) {
 // delete against /api/parish-feasts (admin-only, like this whole page).
 function ParishFeastsCard() {
   const toast = useToast()
+  const { t } = useLocale()
   const [feasts, setFeasts]   = useState([])
+  const [failed, setFailed]   = useState(false)
   const [loading, setLoading] = useState(true)
   const [form, setForm]       = useState({ date: '', feast_name: '', liturgical_color: 'White' })
   const [saving, setSaving]   = useState(false)
@@ -374,9 +402,17 @@ function ParishFeastsCard() {
   useEffect(() => {
     let cancelled = false
     fetch(apiUrl('/api/parish-feasts'))
-      .then(r => (r.ok ? r.json() : { feasts: [] }))
-      .then(d => { if (!cancelled) setFeasts(d.feasts ?? []) })
-      .catch(() => {})
+      .then(r => {
+        if (!r.ok) throw new Error('unread')
+        return r.json()
+      })
+      .then(d => {
+        if (cancelled) return
+        if (!d || !Array.isArray(d.feasts)) throw new Error('shape')
+        setFeasts(d.feasts)
+        setFailed(false)
+      })
+      .catch(() => { if (!cancelled) { setFailed(true); setFeasts([]) } })
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
   }, [])
@@ -434,6 +470,8 @@ function ParishFeastsCard() {
 
       {loading ? (
         <div className="flex justify-center py-4"><Loader2 size={16} className="animate-spin text-brass-500" /></div>
+      ) : failed ? (
+        <p role="status" className="text-sm text-amber-800 dark:text-amber-300">{t('feast.unread')}</p>
       ) : feasts.length === 0 ? (
         <p className="text-sm text-ink-500 dark:text-parchment-300/70">No parish feasts yet.</p>
       ) : (
@@ -605,9 +643,20 @@ export default function OrgSettings() {
       // absolutely nothing on screen changes until they happen to reload.
       // A save that reports success and visibly does nothing is the same
       // lie as a failure that reports nothing at all.
-      if (saved?.locale && saved.locale !== user?.organization?.locale) {
-        updateUser({ organization: { ...user.organization, locale: saved.locale } })
+      const org = { ...user?.organization }
+      let sessionChanged = false
+      if (saved?.locale && saved.locale !== org.locale) {
+        org.locale = saved.locale
+        sessionChanged = true
       }
+      // The sacristy sheet reads this same in-memory zone for its window.
+      // A saved timezone that stays on the old session until reload prints
+      // one week and stamps another.
+      if (typeof saved?.timezone === 'string' && saved.timezone !== org.timezone) {
+        org.timezone = saved.timezone
+        sessionChanged = true
+      }
+      if (sessionChanged) updateUser({ organization: org })
       // Subtle confirmation — SaveButton's checkmark covers the
       // primary signal; the toast is for the rare case a screen
       // reader doesn't catch the inline state change.

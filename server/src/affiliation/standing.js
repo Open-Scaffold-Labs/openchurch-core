@@ -36,10 +36,9 @@ import pool from '../db.js'
 // downstream does arithmetic on "1200.00" and gets a surprise.
 const money = (v) => (v == null ? 0 : Number(v))
 
-// A DATE column comes back from pg as a JS Date and serialises to
-// "2026-08-17T00:00:00.000Z" — which rendered, verbatim, on the parish's
-// page. A timestamp with a timezone on it is also a small lie about a
-// column that carries no time at all. Send the day.
+// DATE columns arrive as 'YYYY-MM-DD' (db.js, oid 1082). A timestamp is
+// still a Date; its ISO day is the UTC day of that instant. Either form's
+// first ten characters are the day this surface shows.
 const day = (v) => (v == null ? null : String(v instanceof Date ? v.toISOString() : v).slice(0, 10))
 
 // The parish's own assessment lines, for years the diocese has actually
@@ -151,7 +150,7 @@ export async function standingFor(parishOrgId, dioceseOrgId) {
       // assessment taken on trust is the one people resent.
       because: `Assessed on ${money(l.base).toFixed(2)} of ${
         l.basis === 'assessable_revenue' ? 'assessable income' : String(l.basis).replaceAll('_', ' ')
-      } reported for ${l.base_year}.`,
+      } reported for ${l.base_year} (approved figures minus any recorded credits).`,
       // The slice-by-slice working, where the diocese uses a rate ladder.
       // A parish should be able to arrive at its own number with a pen
       // rather than take it on trust — an assessment taken on trust is

@@ -202,7 +202,7 @@ export default function Assessments() {
   return (
     <div className="max-w-6xl">
       <h1 className="font-serif text-3xl font-bold text-church-600 mb-1">Assessments</h1>
-      <p className="text-sm text-ink-500 mb-6">Rate × the assessable base from approved submissions. Overrides and waivers are per-parish; publishing freezes the year as the authoritative bill.</p>
+      <p className="text-sm text-ink-500 mb-6">Rate × the payable base (approved figures minus recorded credits). Overrides and waivers are per-parish; publishing freezes the year as the authoritative bill.</p>
       {error && <p className="text-sm text-rose-700 mb-3">{error}</p>}
 
       <form onSubmit={create} className="mb-6">
@@ -408,7 +408,7 @@ export default function Assessments() {
             <thead>
               <tr className="text-left text-[11px] uppercase tracking-widest text-brass-600 border-b border-parchment-300/60">
                 <th className="px-4 py-3 font-bold">Parish</th>
-                <th className="px-4 py-3 font-bold text-right">Base</th>
+                <th className="px-4 py-3 font-bold text-right">Payable base</th>
                 <th className="px-4 py-3 font-bold text-right">Rate</th>
                 <th className="px-4 py-3 font-bold text-right">Assessed</th>
                 <th className="px-4 py-3 font-bold text-right">Paid</th>

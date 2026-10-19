@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { X } from 'lucide-react'
+import { STRINGS } from '../i18n/strings'
 
 // Quiet orientation (PILOT.4).
 //
@@ -14,6 +15,16 @@ import { X } from 'lucide-react'
 // again.
 
 const KEY = 'ochr_diocese_first_use_dismissed'
+
+// Device override only. Do not import parish useLocale / LocaleProvider.
+function t(key) {
+  let locale = 'en'
+  try {
+    const stored = localStorage.getItem('ochr_locale')
+    if (stored && STRINGS[stored]) locale = stored
+  } catch { /* private mode — stay on English */ }
+  return STRINGS[locale]?.[key] ?? STRINGS.en[key] ?? key
+}
 
 const STEPS = [
   ['Parish Care', 'Where the office works from. Who needs attention, why, and what the next step might be.'],
@@ -36,7 +47,7 @@ export default function FirstUse() {
 
   return (
     <aside className="print:hidden mb-7 rounded-xl border border-parchment-300/70 bg-parchment-50 p-5 relative">
-      <button type="button" onClick={dismiss} aria-label="Dismiss this orientation"
+      <button type="button" onClick={dismiss} aria-label={t('firstUse.dismiss')}
         className="tap-reach absolute top-3 right-3 text-ink-400 hover:text-ink-700">
         <X size={15} />
       </button>

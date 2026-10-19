@@ -9,7 +9,10 @@
 //       under a name that was never baptised, and an unlinked historic
 //       subject could not be found at all
 //   D3  a correction could leave an entry naming nobody, and a row with no
-//       stored snapshot silently took on whichever member it was relinked to
+//       stored snapshot silently took on whichever member it was relinked to.
+//       Filling that gap from the live roster was the next form of the same
+//       defect: the book then said a name nobody had recorded. A missing
+//       snapshot stays missing until someone types the name from the page.
 //   D4  dates were handed to Postgres as free text under DateStyle MDY, so a
 //       DD/MM register digitised as "10/05/1953" stored 5 October for a
 //       10 May baptism, and "1953" was a 500
@@ -210,36 +213,33 @@ describe('D3. an entry always names its subject', () => {
     })
   })
 
-  describe('(b) a NULL-snapshot row keeps the identity it has been showing', () => {
-    it('relink stamps the CURRENT member\'s name first and the history shows it', async () => {
+  describe('(b) a NULL-snapshot row does not acquire a name from the roster', () => {
+    it('the read shows no subject, and a relink may not invent one', async () => {
       const oldId = await newMember('Snapshotless Original')
       const newId = await newMember('Snapshotless Newcomer')
       const recId = await nullSnapshotRecord(oldId)
 
       const shown = await readRecord(recId)
-      expect(shown.body.member_name).toBe('Snapshotless Original')   // via the COALESCE fallback
+      expect(shown.body.member_name).toBeNull()
 
       const res = await patchRecord(recId, { client_id: newId, reason: 'Matched to the right member.' })
-      expect(res.status).toBe(200)
-      // The relink must not redefine who was baptised.
-      expect(res.body.client_id).toBe(newId)
-      expect(res.body.member_name).toBe('Snapshotless Original')
+      expect(res.status).toBe(400)
+      expect(res.body.error).toMatch(/must name its subject/i)
 
-      const hist = await amendments(recId)
-      const last = hist.at(-1)
-      expect(last.kind).toBe('correction')
-      expect(last.before_json.member_name).toBe('Snapshotless Original')
-      expect(last.after_json.member_name).toBe('Snapshotless Original')
-      expect(last.after_json.client_id).toBe(newId)
+      const still = await readRecord(recId)
+      expect(still.body.client_id).toBe(oldId)
+      expect(still.body.member_name).toBeNull()
+      expect(await amendments(recId)).toEqual([])
     })
 
-    it('unlink stamps the name before the link goes away', async () => {
+    it('unlink is refused until the page supplies the name', async () => {
       const oldId = await newMember('Snapshotless Unlinked')
       const recId = await nullSnapshotRecord(oldId)
       const res = await patchRecord(recId, { client_id: null, reason: 'Wrong member matched.' })
-      expect(res.status).toBe(200)
-      expect(res.body.client_id).toBeNull()
-      expect(res.body.member_name).toBe('Snapshotless Unlinked')
+      expect(res.status).toBe(400)
+      const still = await readRecord(recId)
+      expect(still.body.client_id).toBe(oldId)
+      expect(still.body.member_name).toBeNull()
     })
 
     it('a true orphan (no snapshot, no link) cannot be relinked without a name', async () => {

@@ -372,7 +372,11 @@ export default function Clients() {
   // a measurement that came back empty. loadOne keeps `stats` null on
   // failure, which the tiles already render as "—", and the flag says why.
   async function fetchStats() {
-    const { ok, data } = await loadOne(apiUrl('/api/clients/stats'))
+    // A 200 that is merely an object is not a count. `{}` used to pass
+    // loadOne and the growth tile rendered the literal "undefined%".
+    const counts = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
+      && ['total', 'newWeek', 'active', 'growth'].every((k) => Number.isFinite(v[k]))
+    const { ok, data } = await loadOne(apiUrl('/api/clients/stats'), null, counts)
     setStats(ok ? data : null)
     setStatsFailed(!ok)
   }
@@ -467,7 +471,7 @@ export default function Clients() {
         return
       }
       setShowForm(false); fetchClients(); fetchStats()
-      if (!editing) celebrateFirstAction('member', toast)
+      if (!editing) celebrateFirstAction('member', toast, statsFailed ? null : stats?.total)
     } catch (err) {
       toast.error(t('err.save'))
     } finally {

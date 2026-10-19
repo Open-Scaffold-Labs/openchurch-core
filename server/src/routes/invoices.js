@@ -483,7 +483,9 @@ router.post('/:id/issue', async (req, res) => {
 
     // Lock the org row: it owns the counter. Then the invoice.
     const { rows: [org] } = await client.query(
-      `SELECT invoice_next_no FROM ochr_organizations WHERE id = $1 FOR UPDATE`,
+      // NO KEY UPDATE serializes numbering without conflicting with the KEY SHARE
+      // admission lock tenant writes take (migration 114); only HOLD uses FOR UPDATE.
+      `SELECT invoice_next_no FROM ochr_organizations WHERE id = $1 FOR NO KEY UPDATE`,
       [req.organizationId]
     )
     const { rows: [inv] } = await client.query(

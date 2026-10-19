@@ -60,7 +60,7 @@ const connectLimiter = rateLimit({
 async function findOrgBySlug(slug) {
   if (!slug || typeof slug !== 'string') return null
   const { rows } = await pool.query(
-    'SELECT id, name, slug, locale FROM ochr_organizations WHERE slug = $1 LIMIT 1',
+    'SELECT id, name, slug, locale FROM ochr_organizations WHERE slug = $1 AND held_at IS NULL LIMIT 1',
     [slug]
   )
   return rows[0] ?? null
@@ -119,7 +119,7 @@ router.get('/:slug/page', async (req, res) => {
       // a reviewer noticing a third query fifteen lines further down.
       `SELECT name, slug, tagline, about, service_times, address, page_published, locale
          FROM ochr_organizations
-        WHERE slug = $1
+        WHERE slug = $1 AND held_at IS NULL
         LIMIT 1`,
       [req.params.slug]
     )
@@ -150,7 +150,7 @@ router.get('/:slug/page', async (req, res) => {
 async function findPublishedOrg(slug) {
   if (!slug || typeof slug !== 'string') return null
   const { rows } = await pool.query(
-    'SELECT id, name, slug, locale FROM ochr_organizations WHERE slug = $1 AND page_published = TRUE LIMIT 1',
+    'SELECT id, name, slug, locale FROM ochr_organizations WHERE slug = $1 AND held_at IS NULL AND page_published = TRUE LIMIT 1',
     [slug]
   )
   return rows[0] ?? null
@@ -396,24 +396,49 @@ router.post('/:slug/give', giveLimiter, async (req, res) => {
       return res.status(402).json({ error: 'Payment could not be processed. No charge was made.' })
     }
 
-    await pool.query(
-      `INSERT INTO ochr_donations
-         (organization_id, donor_name, donor_email, amount, category, method, date,
-          source, fund_id, payment_ref, payment_status, notes)
-       VALUES ($1, $2, $3, $4, $5, 'online', CURRENT_DATE, 'online', $6, $7, $8, $9)`,
-      [org.id, donorName, donorEmail || null, dollars, fund.name, fund.id, charge.id, charge.status, message || null]
-    )
-
-    // Set up the recurring schedule (GIV.7) — the gift above is the first
-    // charge; a cron picks up later cycles from next_charge_date.
-    if (frequency) {
-      const step = frequency === 'weekly' ? "INTERVAL '7 days'" : "INTERVAL '1 month'"
-      await pool.query(
-        `INSERT INTO ochr_recurring_gifts
-           (organization_id, fund_id, donor_name, donor_email, amount, frequency, next_charge_date)
-         VALUES ($1, $2, $3, $4, $5, $6, CURRENT_DATE + ${step})`,
-        [org.id, fund.id, donorName, donorEmail || null, dollars, frequency]
+    // Everything written on the strength of the charge lands in ONE
+    // transaction, the way the recurring cron records its own charges
+    // (services/recurringGifts.js, "Record the donation and advance the
+    // schedule ATOMICALLY"). These used to be two autocommits, and the
+    // recurring INSERT failing after the donation INSERT had committed was
+    // reproduced 4 Sep: 500 "Failed to process gift", the giving page
+    // re-enabled Give, the donor gave again — two charges, two rows, one
+    // gift. Now the response is 201 with both rows or 500 with neither.
+    //
+    // What a 500 here does NOT do is refund the charge. The stub moved no
+    // money and the live path never reaches this code (Checkout + webhook
+    // write the row), so today the question is moot — but if a synchronous
+    // live charge ever lands here, whether to auto-reverse it on a failed
+    // record is a decision for the parish and the provider's fee model, not
+    // for a catch block. Left as an explicit gap rather than a guess.
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      await client.query(
+        `INSERT INTO ochr_donations
+           (organization_id, donor_name, donor_email, amount, category, method, date,
+            source, fund_id, payment_ref, payment_status, notes)
+         VALUES ($1, $2, $3, $4, $5, 'online', CURRENT_DATE, 'online', $6, $7, $8, $9)`,
+        [org.id, donorName, donorEmail || null, dollars, fund.name, fund.id, charge.id, charge.status, message || null]
       )
+
+      // Set up the recurring schedule (GIV.7) — the gift above is the first
+      // charge; a cron picks up later cycles from next_charge_date.
+      if (frequency) {
+        const step = frequency === 'weekly' ? "INTERVAL '7 days'" : "INTERVAL '1 month'"
+        await client.query(
+          `INSERT INTO ochr_recurring_gifts
+             (organization_id, fund_id, donor_name, donor_email, amount, frequency, next_charge_date)
+           VALUES ($1, $2, $3, $4, $5, $6, CURRENT_DATE + ${step})`,
+          [org.id, fund.id, donorName, donorEmail || null, dollars, frequency]
+        )
+      }
+      await client.query('COMMIT')
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {})
+      throw err
+    } finally {
+      client.release()
     }
 
     // Email the donor a receipt (GIV.5) — through the vendor-neutral

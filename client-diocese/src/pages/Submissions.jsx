@@ -13,6 +13,58 @@ const STATUS_CLS = {
   returned:  'bg-rose-50 text-rose-700 border border-rose-200/60',
 }
 
+// A gift refunded AFTER this period was approved (migration 099). The list
+// API ships `open_adjustment_count` / `open_adjustment_amount` as STRINGS —
+// "0" is truthy, so both go through Number(). A server that does not send
+// the fields yields null here: no marker, and never a claim of "settled".
+export function openAdjustment(s) {
+  const count = Number(s?.open_adjustment_count)
+  const amount = Number(s?.open_adjustment_amount)
+  if (!Number.isFinite(count) || count <= 0) return null
+  return { count, amount: Number.isFinite(amount) ? amount : NaN }
+}
+
+export function appliedCredit(s) {
+  const count = Number(s?.applied_credit_count)
+  const amount = Number(s?.applied_credit_amount)
+  if (!Number.isFinite(count) || count <= 0) return null
+  const payable = Number(s?.payable_base)
+  return {
+    count,
+    amount: Number.isFinite(amount) ? amount : NaN,
+    payable: Number.isFinite(payable) ? payable : NaN,
+  }
+}
+
+// Rendered under the status badge, not inside it: "approved" is still true.
+// What is also true is that the approved figure — and any bill rolled up
+// from it — still counts money the parish has since refunded, and nobody
+// has settled that yet.
+export function OpenAdjustmentNote({ row }) {
+  const adj = openAdjustment(row)
+  if (!adj) return null
+  const refunds = adj.count > 1 ? ` across ${adj.count} refunds` : ''
+  return (
+    <span role="note" data-testid={`open-adjustment-${row.id}`}
+      className="block mt-1 text-[11px] leading-snug text-rose-700 max-w-[18rem]">
+      <span className="font-semibold">Unresolved adjustment</span>
+      {' · '}The approved figure and any bill from it still include {fmtMoney(adj.amount)}{refunds} that the parish has since refunded — unresolved
+    </span>
+  )
+}
+
+export function AppliedCreditNote({ row }) {
+  const credit = appliedCredit(row)
+  if (!credit) return null
+  return (
+    <span role="note" data-testid={`applied-credit-${row.id}`}
+      className="block mt-1 text-[11px] leading-snug text-ink-500 max-w-[18rem]">
+      <span className="font-semibold">Credit recorded</span>
+      {' · '}The approved figure stays on file. Payable amount is {fmtMoney(credit.payable)}.
+    </span>
+  )
+}
+
 export default function Submissions() {
   const askFor = usePrompt()
   const ask = useConfirm()
@@ -68,10 +120,40 @@ export default function Submissions() {
       const res = await fetch(apiUrl(`/api/diocese/submissions/${id}`), {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status, note }),
+        // expected_submitted_at is the version of the row this screen
+        // loaded. A returned period is resubmitted IN PLACE — same id, new
+        // figures — so without it a click on a row that had changed
+        // underneath approved totals the chancery never saw. The server
+        // answers 409 if the row moved; the message says to reload.
+        body: JSON.stringify({ status, note, expected_submitted_at: row?.submitted_at ?? undefined }),
       })
       const d = await res.json().catch(() => ({}))
       if (!res.ok) throw new Error(d.error || 'Review failed')
+      load()
+    } catch (err) { setError(err.message) } finally { setBusyId(null) }
+  }
+
+  const recordCredit = async (row) => {
+    const adj = openAdjustment(row)
+    if (!adj) return
+    const approved = fmtMoney(row.totals?.assessable_base)
+    const payable = Number(row.totals?.assessable_base) - adj.amount
+    const ok = await ask({
+      title: 'Record this credit?',
+      body: `The approved figures stay as they were filed (${approved}). Recording the credit reduces the payable amount for the bill by ${fmtMoney(adj.amount)} to ${fmtMoney(Number.isFinite(payable) ? payable : NaN)}. This cannot be undone from this screen.`,
+      confirmLabel: 'Record credit',
+      tone: 'neutral',
+    })
+    if (!ok) return
+    setBusyId(row.id); setError('')
+    try {
+      const res = await fetch(apiUrl(`/api/diocese/submissions/${row.id}/adjustments/settle`), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      })
+      const d = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(d.error || "That didn't save — nothing was lost. Please try again.")
       load()
     } catch (err) { setError(err.message) } finally { setBusyId(null) }
   }
@@ -120,7 +202,7 @@ export default function Submissions() {
                 <th className="px-4 py-3 font-bold">Parish</th>
                 <th className="px-4 py-3 font-bold">Period</th>
                 <th className="px-4 py-3 font-bold text-right">Revenue</th>
-                <th className="px-4 py-3 font-bold text-right">Assessable</th>
+                <th className="px-4 py-3 font-bold text-right">Approved / payable</th>
                 <th className="px-4 py-3 font-bold">Status</th>
                 <th className="px-4 py-3"><span className="sr-only">Review</span></th>
               </tr>
@@ -131,10 +213,19 @@ export default function Submissions() {
                   <td className="px-4 py-2.5 font-medium">{s.parish_name}</td>
                   <td className="px-4 py-2.5 whitespace-nowrap text-ink-600">{s.period_start} → {s.period_end}</td>
                   <td className="px-4 py-2.5 text-right whitespace-nowrap">{fmtMoney(s.totals?.revenue)}</td>
-                  <td className="px-4 py-2.5 text-right whitespace-nowrap">{fmtMoney(s.totals?.assessable_base)}</td>
+                  <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                    <span>{fmtMoney(s.totals?.assessable_base)}</span>
+                    {appliedCredit(s) && (
+                      <span className="block text-[11px] text-ink-500" data-testid={`payable-base-${s.id}`}>
+                        Payable {fmtMoney(s.payable_base)}
+                      </span>
+                    )}
+                  </td>
                   <td className="px-4 py-2.5">
                     <span className={`inline-block px-2 py-0.5 rounded-full text-[11px] font-semibold ${STATUS_CLS[s.status] ?? ''}`}>{s.status}</span>
                     {s.review_note && <span className="block text-[11px] text-ink-400 mt-0.5 max-w-[16rem]">{s.review_note}</span>}
+                    <OpenAdjustmentNote row={s} />
+                    <AppliedCreditNote row={s} />
                   </td>
                   <td className="px-4 py-2.5 text-right whitespace-nowrap space-x-3">
                     {s.status === 'submitted' && (
@@ -143,11 +234,17 @@ export default function Submissions() {
                           className="inline-flex items-center gap-1 text-[12px] font-semibold text-brass-700 hover:underline disabled:opacity-50">
                           <Check size={13} /> Approve
                         </button>
-                        <button disabled={busyId === s.id} onClick={() => review(s.id, 'returned')}
+                        <button disabled={busyId === s.id} onClick={() => review(s.id, 'returned', s)}
                           className="inline-flex items-center gap-1 text-[12px] font-semibold text-rose-700 hover:underline disabled:opacity-50">
                           <Undo2 size={13} /> Return
                         </button>
                       </>
+                    )}
+                    {openAdjustment(s) && (s.status === 'approved' || s.status === 'submitted') && (
+                      <button disabled={busyId === s.id} onClick={() => recordCredit(s)}
+                        className="inline-flex items-center gap-1 text-[12px] font-semibold text-brass-700 hover:underline disabled:opacity-50">
+                        Record credit
+                      </button>
                     )}
                   </td>
                 </tr>

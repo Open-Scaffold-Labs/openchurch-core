@@ -50,7 +50,7 @@ export const sheetOverlayCls =
 export const scrimCls = 'fixed inset-0 bg-black/40 backdrop-blur-sm'
 
 export const sheetPanelCls =
-  'w-full md:max-w-lg bg-parchment-50 dark:bg-ink-900 ' +
+  'w-full md:max-w-lg safe-pb bg-parchment-50 dark:bg-ink-900 ' +
   'rounded-t-2xl md:rounded-2xl shadow-warm-lg ' +
   'border border-parchment-300/50 dark:border-brass-900/30 border-b-0 md:border-b ' +
   'max-h-[92vh] md:max-h-[90vh] flex flex-col'

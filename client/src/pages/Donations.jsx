@@ -1,6 +1,6 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import {
   DollarSign, TrendingUp, Users, Award, Plus, X, Trash2,
   ChevronDown, Banknote, CheckCircle2, Clock, AlertCircle, FileText,
@@ -17,6 +17,7 @@ import { todayLocalISO } from '../utils/dates'
 import { useAuth } from '../context/AuthContext'
 import { useToast } from '../components/ToastProvider'
 import { useConfirm } from '../components/ConfirmProvider'
+import { useLocale } from '../i18n'
 
 // ── Constants ─────────────────────────────────────────────────
 const CATEGORIES = ['tithe', 'offering', 'event', 'building fund', 'missions', 'other']
@@ -73,7 +74,22 @@ function fmtCurrency(n, decimals = 0) {
 }
 function fmtDate(str) {
   if (!str) return '—'
-  return new Date(str + 'T00:00:00').toLocaleDateString('en-US', {
+  // Two shapes reach this. Calendar-day columns arrive as 'YYYY-MM-DD' (the
+  // routes to_char them). Columns that really are moments — last_failed_at —
+  // arrive as a full ISO timestamp. Appending 'T00:00:00' to the second shape
+  // produced an unparseable string, and the donation log showed 'Invalid Date'
+  // on every row (13 of 13, measured 4 Sep) because the routes were sending
+  // the first shape as the second.
+  //
+  // Both shapes start with the calendar day, so take that and read it as a
+  // local day. A date has no time to lose, and doing it this way means a
+  // column that regresses to a timestamp degrades to the right day rather
+  // than to nothing. Anything genuinely unparseable shows the same em-dash an
+  // empty value gets — never the words 'Invalid Date'.
+  const day = String(str).slice(0, 10)
+  const d = new Date(day + 'T00:00:00')
+  if (Number.isNaN(d.getTime())) return '—'
+  return d.toLocaleDateString('en-US', {
     month: 'short', day: 'numeric', year: 'numeric',
   })
 }
@@ -579,8 +595,12 @@ function CashCountRow({ session, onConfirm, onDelete }) {
 // page offers. Create/activate/delete here; online gifts record against
 // the active ones. Shows whether giving is live or on the test stub.
 function FundsDrawer({ onClose }) {
+  const { t } = useLocale()
   const [funds, setFunds]       = useState([])
-  const [provider, setProvider] = useState('stub')
+  const [fundsFailed, setFundsFailed] = useState(false)
+  // Unknown until a read says so. Starting at 'stub' told a refused
+  // drawer that online giving was in test mode.
+  const [provider, setProvider] = useState(null)
   const [loading, setLoading]   = useState(true)
   const [name, setName]         = useState('')
   const [description, setDesc]  = useState('')
@@ -589,21 +609,38 @@ function FundsDrawer({ onClose }) {
   const toast = useToast()
   const ask = useConfirm()
 
+  const loadGen = useRef(0)
   async function load() {
+    // Latest-request guard (defensive; add is also blocked while loading).
+    const gen = ++loadGen.current
     setLoading(true)
     try {
       const res = await fetch(apiUrl('/api/funds'))
-      const d = res.ok ? await res.json() : { funds: [] }
-      setFunds(d.funds ?? [])
-      if (d.provider) setProvider(d.provider)
-    } catch { /* keep what we have */ }
-    finally { setLoading(false) }
+      if (gen !== loadGen.current) return
+      // `{ funds: [] }` on a 500 painted "No funds yet" and, because
+      // provider never arrived, the test-mode banner.
+      if (!res.ok) throw new Error('unread')
+      const d = await res.json()
+      if (gen !== loadGen.current) return
+      const list = d && typeof d === 'object' && !Array.isArray(d) && Array.isArray(d.funds) ? d.funds : null
+      if (!list) throw new Error('shape')
+      setFunds(list)
+      setFundsFailed(false)
+      setProvider(typeof d.provider === 'string' ? d.provider : null)
+    } catch {
+      if (gen !== loadGen.current) return
+      setFunds([])
+      setFundsFailed(true)
+      setProvider(null)
+    } finally { if (gen === loadGen.current) setLoading(false) }
   }
   useEffect(() => { load() }, [])
 
   async function addFund(e) {
     e.preventDefault()
-    if (!name.trim()) return
+    // No write against an unread (or still loading) fund list: a new fund
+    // could duplicate one that exists.
+    if (!name.trim() || loading || fundsFailed) return
     setBusy(true); setError('')
     try {
       const res = await fetch(apiUrl('/api/funds'), {
@@ -703,7 +740,7 @@ function FundsDrawer({ onClose }) {
             {error && <p className="text-xs text-rose-700 dark:text-rose-300">{error}</p>}
             <button
               type="submit"
-              disabled={busy || !name.trim()}
+              disabled={busy || !name.trim() || loading || fundsFailed}
               className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-lg bg-church-800 hover:bg-church-900 text-parchment-50 transition-colors disabled:opacity-40"
             >
               <Plus size={13} /> {busy ? 'Adding…' : 'Add fund'}
@@ -713,6 +750,10 @@ function FundsDrawer({ onClose }) {
           {/* List */}
           {loading ? (
             <SkeletonRowList count={3} withAvatar={false} />
+          ) : fundsFailed ? (
+            <p role="status" className="text-xs text-amber-800 dark:text-amber-300 text-center py-4">
+              {t('giv.fundsUnread')}
+            </p>
           ) : funds.length === 0 ? (
             <p className="text-xs text-ink-500 dark:text-parchment-300/70 text-center py-4">
               No funds yet. Add one above to start collecting designated gifts.
@@ -786,11 +827,31 @@ export default function Donations() {
   const [showFunds, setShowFunds]                 = useState(false)
   const [filter, setFilter]             = useState('all')
   const [sortDesc, setSortDesc]         = useState(true)
+  // ⌘K / global search lands here with ?id= so the gift that was found
+  // stays identifiable — not a blind dump of the log. No new module.
+  const [searchParams] = useSearchParams()
+  const focusId = searchParams.get('id')
+  const focusedRowRef = useRef(null)
   // Pagination (mirrors Clients). The donation log fetches a page at a
   // time; "Load more" appends the next page. `hasMore` is derived from
   // whether the last page came back full — a short page means the end.
   const [hasMore, setHasMore]           = useState(false)
   const [loadingMore, setLoadingMore]   = useState(false)
+  // The last refund that landed inside an already-approved reporting period:
+  // { submission_id, amount, message }. Held on the page, not only in a
+  // toast — the approved totals and any bill drawn from them still include
+  // the gift, and that is the one sentence here somebody has to actually read.
+  const [refundNotice, setRefundNotice] = useState(null)
+  // The notice sits at the top of the page and the person who triggered it
+  // is scrolled to the row they just refunded — measured 738px above the
+  // viewport at 1440, i.e. off-screen. Bring it to them when it appears.
+  const refundNoticeRef = useRef(null)
+  useEffect(() => {
+    const el = refundNoticeRef.current
+    if (refundNotice && el && typeof el.scrollIntoView === 'function') {
+      el.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+    }
+  }, [refundNotice])
 
   const PAGE_SIZE = 50
 
@@ -880,16 +941,35 @@ export default function Donations() {
   async function refundDonation(id) {
     if (!(await ask({
       title: 'Refund this online gift?',
-      body: 'It is marked refunded and drops out of your giving totals.',
+      body: 'It is marked refunded and drops out of your current giving totals. '
+          + 'A reporting period the diocese has already approved keeps the figures it froze.',
       confirmLabel: 'Refund gift',
     }))) return
     const res = await fetch(apiUrl(`/api/donations/${id}/refund`), { method: 'POST' })
     const data = await res.json().catch(() => ({}))
     if (!res.ok) {
-      toast.error(data.error || "That didn't save — nothing was lost. Please try again.")
+      // Not the generic "nothing was lost" line the other handlers use: a
+      // refund can succeed at the provider and still fail to be recorded
+      // here, so "nothing happened" could be false. What IS true is that a
+      // second attempt cannot refund twice — the server sends the provider
+      // one key per gift — so the honest instruction is to try again.
+      toast.error(data.error || "We couldn't confirm the refund. Try again — a second attempt cannot refund twice.")
       return
     }
-    toast.success('Gift refunded')
+    // The gift dropped out of the LIVE totals. If it sat inside a period the
+    // diocese has already approved, it did NOT drop out of that period's
+    // frozen totals or a bill drawn from them — the server says so in
+    // period_adjustment, and this is where the parish has to hear it.
+    // Kept on the page rather than only in a toast: a toast is gone in four
+    // seconds and this one changes what the parish owes.
+    if (data.period_adjustment) {
+      // Remember which row this was about, so the row itself can carry the
+      // marker where the person is actually looking.
+      setRefundNotice({ ...data.period_adjustment, donation_id: id })
+      toast.info('Refunded — this period was already approved', { duration: 8000 })
+    } else {
+      toast.success('Gift refunded')
+    }
     load()
   }
 
@@ -948,8 +1028,19 @@ export default function Donations() {
 
   const filtered = useMemo(() => {
     const rows = filter === 'all' ? donations : donations.filter(d => d.category === filter)
-    return sortDesc ? rows : [...rows].reverse()
-  }, [donations, filter, sortDesc])
+    const ordered = sortDesc ? rows : [...rows].reverse()
+    if (!focusId) return ordered
+    const idx = ordered.findIndex(d => String(d.id) === String(focusId))
+    if (idx <= 0) return ordered
+    return [ordered[idx], ...ordered.slice(0, idx), ...ordered.slice(idx + 1)]
+  }, [donations, filter, sortDesc, focusId])
+
+  useEffect(() => {
+    const el = focusedRowRef.current
+    if (focusId && el && typeof el.scrollIntoView === 'function') {
+      el.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+    }
+  }, [focusId, filtered])
 
   // Giving trend, derived from the real donations already on the page —
   // no fabricated numbers. Empty until at least one real gift lands in
@@ -960,6 +1051,32 @@ export default function Donations() {
 
   return (
     <PageWrapper>
+      {/* A refund that landed inside an approved reporting period. The gift is
+          out of the live totals and still inside the frozen ones — saying only
+          "Gift refunded" would let the parish believe the diocesan figures and
+          the bill had moved with it. They have not. */}
+      {refundNotice && (
+        <div
+          ref={refundNoticeRef}
+          role="status"
+          className="mb-4 rounded-2xl border border-brass-300/60 dark:border-brass-800/40 bg-brass-50 dark:bg-brass-900/20 px-5 py-4 text-[13px] leading-relaxed text-ink-800 dark:text-parchment-100"
+        >
+          <p className="font-medium">
+            Refunded — but this {fmtCurrency(refundNotice.amount, 2)} gift is inside an approved reporting period.
+          </p>
+          <p className="mt-1.5 text-ink-600 dark:text-parchment-300/80">{refundNotice.message}</p>
+          <p className="mt-1.5 text-ink-600 dark:text-parchment-300/80">
+            Unresolved adjustment of <span className="font-semibold">{fmtCurrency(refundNotice.amount, 2)}</span> recorded against that period — it stays open until the chancery resolves it.
+          </p>
+          <button
+            onClick={() => setRefundNotice(null)}
+            className="mt-2 text-[12px] font-medium text-brass-700 dark:text-brass-300 hover:underline"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
       {/* Header */}
       <motion.div variants={itemVariants} className="flex items-center justify-between mb-6 gap-3 flex-wrap">
         <div>
@@ -1279,10 +1396,18 @@ export default function Donations() {
               </thead>
               <tbody className="divide-y divide-parchment-200/60 dark:divide-white/[0.04]">
                 <AnimatePresence initial={false}>
-                  {filtered.map(d => (
+                  {filtered.map(d => {
+                    const focused = focusId && String(d.id) === String(focusId)
+                    return (
                     <motion.tr key={d.id}
+                      ref={focused ? focusedRowRef : undefined}
+                      data-testid={focused ? 'focused-gift' : undefined}
+                      aria-current={focused ? 'true' : undefined}
                       initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
-                      className="hover:bg-parchment-100 dark:hover:bg-ink-800/60 transition-colors group">
+                      className={`${focused
+                        ? 'bg-brass-50 dark:bg-brass-900/20 ring-1 ring-inset ring-brass-400'
+                        : 'hover:bg-parchment-100 dark:hover:bg-ink-800/60'
+                      } transition-colors group`}>
                       <td className="px-5 py-3.5">
                         <div className="flex items-center gap-2.5">
                           <div className="w-7 h-7 rounded-full bg-church-50 dark:bg-church-900/40 flex items-center justify-center text-church-800 dark:text-brass-200 text-xs font-bold flex-shrink-0">
@@ -1295,6 +1420,16 @@ export default function Donations() {
                         <span className={`font-semibold ${d.refunded_at ? 'text-ink-400 dark:text-parchment-300/70 line-through' : 'text-ink-900 dark:text-parchment-50'}`}>{fmtCurrency(d.amount, 2)}</span>
                         {d.refunded_at && (
                           <span className="ml-2 px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wider bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300">Refunded</span>
+                        )}
+                        {/* The same condition as the page-top notice, on the
+                            row the person is looking at. Distinct from the
+                            Refunded badge: that one is done; this one is not. */}
+                        {refundNotice && String(refundNotice.donation_id) === String(d.id) && (
+                          <span role="note" data-testid={`refund-adjustment-${d.id}`}
+                            className="block mt-1 text-[11px] font-normal leading-snug text-rose-700 dark:text-rose-300 max-w-[20rem]">
+                            <span className="font-semibold">Unresolved adjustment</span>
+                            {' · '}{fmtCurrency(refundNotice.amount, 2)} — this gift is still counted in the approved period's total
+                          </span>
                         )}
                       </td>
                       <td className="px-5 py-3.5">
@@ -1323,7 +1458,8 @@ export default function Donations() {
                         </div>
                       </td>
                     </motion.tr>
-                  ))}
+                    )
+                  })}
                 </AnimatePresence>
               </tbody>
             </table>

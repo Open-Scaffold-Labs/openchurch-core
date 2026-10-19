@@ -100,6 +100,20 @@ describe('SacramentalRegister — a failed read is not an empty register', () =>
       expect(screen.queryByText(EMPTY_CLAIM)).not.toBeInTheDocument()
     })
   }
+
+  for (const [label, body] of [
+    ['a 200 empty object', {}],
+    ['a 200 with null records', { records: null }],
+    ['a 200 with missing records', { ok: true }],
+    ['a 200 with a scalar records', { records: 4 }],
+  ]) {
+    it(`${label} is unread, not an empty parish book`, async () => {
+      stubFetch(u => u.includes('/api/sacraments?') ? ok(body) : null)
+      renderRegister()
+      await waitFor(() => expect(screen.getByText(/couldn't open the register/i)).toBeInTheDocument())
+      expect(screen.queryByText(EMPTY_CLAIM)).not.toBeInTheDocument()
+    })
+  }
 })
 
 describe('SacramentCertificate — a 200 is not a record', () => {

@@ -15,7 +15,7 @@
 // Roles: staff do the daily work (draft, issue, record); waive + refund
 // render only for admins and are enforced server-side regardless.
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
   HandCoins, Plus, X, Printer, Loader2, ChevronRight,
@@ -26,6 +26,7 @@ import { useLocale } from '../i18n'
 import { useAuth } from '../context/AuthContext'
 import PageWrapper from '../components/PageWrapper'
 import EmptyState from '../components/EmptyState'
+import LoadFailure from '../components/LoadFailure'
 import { SkeletonRowList } from '../components/Skeleton'
 import { useConfirm, usePrompt } from '../components/ConfirmProvider'
 import { sheetOverlayCls, sheetPanelCls, MobileSheetGrip } from '../components/MobileSheet'
@@ -34,7 +35,67 @@ import { loadList } from '../utils/format'
 export const CATEGORIES = ['wedding', 'funeral', 'baptism', 'quinceanera', 'facility', 'stipend', 'other']
 const METHODS = ['cash', 'check', 'card', 'online', 'other']
 
-const money = v => '$' + Number(v ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+// A figure counts only as a finite number or a plain decimal string
+// (including zero and Postgres numeric text). Booleans, arrays, objects,
+// and blanks are not zero.
+function knownNumber(v) {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null
+  if (typeof v === 'string' && /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(v)) {
+    const n = Number(v)
+    return Number.isFinite(n) ? n : null
+  }
+  return null
+}
+
+function positiveIntId(v) {
+  if (typeof v === 'number' && Number.isSafeInteger(v) && v > 0) return v
+  if (typeof v === 'string' && /^[1-9]\d*$/.test(v)) {
+    const n = Number(v)
+    if (Number.isSafeInteger(n)) return n
+  }
+  return null
+}
+
+function isPlainObject(v) {
+  return !!v && typeof v === 'object' && !Array.isArray(v)
+}
+
+// A missing amount is not $0.00. Pass `unavailable` for any figure that
+// came from a read. A computed draft subtotal is always a real number.
+function money(v, unavailable = '—') {
+  const n = knownNumber(v)
+  if (n == null) return unavailable
+  return '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+}
+
+function isInvoiceRow(row) {
+  return isPlainObject(row) && positiveIntId(row.id) != null
+}
+
+function asInvoiceList(body) {
+  if (!Array.isArray(body)) return null
+  if (body.some(row => !isInvoiceRow(row))) return null
+  return body
+}
+
+function isInvoiceDetail(body) {
+  return isPlainObject(body)
+    && positiveIntId(body.id) != null
+    && Array.isArray(body.lines)
+    && body.lines.every(isPlainObject)
+    && Array.isArray(body.payments)
+    && body.payments.every(isPlainObject)
+}
+
+function writeError(res, data, t) {
+  const server = data && typeof data.error === 'string' ? data.error.trim() : ''
+  if (res && res.status >= 400 && res.status < 500 && server && !/\b\d{3}\b/.test(server)) return server
+  return t('err.save')
+}
+
+function savedId(data) {
+  return positiveIntId(data?.id)
+}
 
 export const STATUS_TONE = {
   draft:          'bg-parchment-200 text-ink-600 dark:bg-ink-800 dark:text-parchment-300/80',
@@ -63,7 +124,7 @@ function FieldLabel({ children }) {
 
 /* ── The composer: a new draft ─────────────────────────────────────────── */
 
-function ComposerSheet({ catalog, members, membersFailed, onClose, onCreated }) {
+function ComposerSheet({ catalog, catalogFailed = false, members, membersFailed, onClose, onCreated }) {
   const { t } = useLocale()
   const [title, setTitle] = useState('')
   const [category, setCategory] = useState('other')
@@ -107,27 +168,37 @@ function ComposerSheet({ catalog, members, membersFailed, onClose, onCreated }) 
     if (!lines.length) { setError(t('bil.needLine')); return }
     setBusy(true)
     try {
-      const res = await fetch(apiUrl('/api/invoices'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          title: title.trim(), category,
-          client_id: isMember ? Number(clientId) : null,
-          payer_name: payerName.trim() || undefined,
-          lines: lines.map((l, i) => ({
-            fee_schedule_id: l.fee_schedule_id ?? undefined,
-            description: l.description?.trim() || undefined,
-            qty: Number(l.qty) || 1,
-            unit_amount: l.unit_amount === '' ? undefined : Number(l.unit_amount),
-            sort_order: i,
-          })),
-        }),
-      })
+      let res
+      try {
+        res = await fetch(apiUrl('/api/invoices'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            title: title.trim(), category,
+            client_id: isMember ? Number(clientId) : null,
+            payer_name: payerName.trim() || undefined,
+            lines: lines.map((l, i) => ({
+              fee_schedule_id: l.fee_schedule_id ?? undefined,
+              description: l.description?.trim() || undefined,
+              qty: Number(l.qty) || 1,
+              unit_amount: l.unit_amount === '' ? undefined : Number(l.unit_amount),
+              sort_order: i,
+            })),
+          }),
+        })
+      } catch {
+        setError(t('err.save'))
+        return
+      }
       const data = await res.json().catch(() => ({}))
-      if (!res.ok) throw new Error(data.error || t('bil.saveError'))
-      onCreated(data.id)
-    } catch (e) {
-      setError(e.message)
+      const id = savedId(data)
+      // A refused write, or a 200 that is not an invoice, leaves the draft
+      // on screen. Closing the sheet would look like it was saved.
+      if (!res.ok || id == null) {
+        setError(writeError(res, data, t))
+        return
+      }
+      onCreated(id)
     } finally {
       setBusy(false)
     }
@@ -166,8 +237,7 @@ function ComposerSheet({ catalog, members, membersFailed, onClose, onCreated }) 
                   absence speak. */}
               {membersFailed && (
                 <p className="mt-1.5 text-[11px] text-amber-700 dark:text-amber-400 leading-snug">
-                  The member list didn’t load — this isn’t an empty roster. You can still
-                  enter a non-member, or reopen this once it loads.
+                  {t('bil.membersUnread')}
                 </p>
               )}
             </label>
@@ -184,6 +254,9 @@ function ComposerSheet({ catalog, members, membersFailed, onClose, onCreated }) 
           )}
 
           {/* Catalog quick-adds */}
+          {catalogFailed && (
+            <p role="status" className="text-xs text-amber-800 dark:text-amber-300">{t('bil.catalogUnread')}</p>
+          )}
           {activeCatalog.length > 0 && (
             <div>
               <FieldLabel>{t('bil.fromCatalog')}</FieldLabel>
@@ -191,7 +264,7 @@ function ComposerSheet({ catalog, members, membersFailed, onClose, onCreated }) 
                 {activeCatalog.map(f => (
                   <button key={f.id} onClick={() => addFromCatalog(f)}
                     className="px-2.5 py-1.5 rounded-full text-xs border border-brass-200/70 bg-brass-50 text-brass-700 hover:bg-brass-100 dark:bg-brass-900/20 dark:text-brass-300 dark:border-brass-800/40 dark:hover:bg-brass-900/35 min-h-[32px]">
-                    {f.name} · {money(isMember && f.parishioner_amount != null ? f.parishioner_amount : f.amount)}
+                    {f.name} · {money(isMember && f.parishioner_amount != null ? f.parishioner_amount : f.amount, t('money.unavailable'))}
                   </button>
                 ))}
               </div>
@@ -246,21 +319,43 @@ function DetailSheet({ id, onClose, onChanged }) {
   const ask = useConfirm()
   const askFor = usePrompt()
   const [inv, setInv] = useState(null)
+  const [loadFailed, setLoadFailed] = useState(false)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState('')
   const [payOpen, setPayOpen] = useState(false)
   const [payAmount, setPayAmount] = useState('')
   const [payMethod, setPayMethod] = useState('cash')
   const [payDeposit, setPayDeposit] = useState(false)
+  // A retry and the reload after a payment can be in flight together.
+  // Only the latest request for this invoice may change the sheet.
+  const loadGen = useRef(0)
 
   const load = useCallback(async () => {
+    const gen = ++loadGen.current
+    const requestedId = id
+    setLoadFailed(false)
     try {
-      const r = await fetch(apiUrl(`/api/invoices/${id}`))
-      if (!r.ok) throw new Error(t('bil.loadError'))
-      setInv(await r.json())
-    } catch (e) { setError(e.message) }
-  }, [id, t])
-  useEffect(() => { load() }, [load])
+      const r = await fetch(apiUrl(`/api/invoices/${requestedId}`))
+      if (gen !== loadGen.current) return
+      if (!r.ok) throw new Error('unread')
+      const body = await r.json()
+      if (gen !== loadGen.current) return
+      // No lines array is not an empty bill. A body for a different id
+      // is not this sheet. Leave it unread.
+      if (!isInvoiceDetail(body) || positiveIntId(body.id) !== positiveIntId(requestedId)) {
+        throw new Error('shape')
+      }
+      setInv(body)
+      setLoadFailed(false)
+    } catch {
+      if (gen !== loadGen.current) return
+      setLoadFailed(true)
+    }
+  }, [id])
+  useEffect(() => {
+    load()
+    return () => { loadGen.current += 1 }
+  }, [load])
 
   async function act(label, path, body, confirmOpts) {
     if (confirmOpts) {
@@ -269,17 +364,24 @@ function DetailSheet({ id, onClose, onChanged }) {
     }
     setBusy(label); setError('')
     try {
-      const r = await fetch(apiUrl(`/api/invoices/${id}${path}`), {
-        method: path === '' ? 'DELETE' : 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: body ? JSON.stringify(body) : undefined,
-      })
+      let r
+      try {
+        r = await fetch(apiUrl(`/api/invoices/${id}${path}`), {
+          method: path === '' ? 'DELETE' : 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: body ? JSON.stringify(body) : undefined,
+        })
+      } catch {
+        setError(t('err.save'))
+        return
+      }
       const data = await r.json().catch(() => ({}))
-      if (!r.ok) throw new Error(data.error || t('bil.saveError'))
+      if (!r.ok || data?.ok !== true) {
+        setError(writeError(r, data, t))
+        return
+      }
       if (path === '' ) { onChanged(); onClose(); return }
       await load(); onChanged()
-    } catch (e) {
-      setError(e.message)
     } finally {
       setBusy('')
     }
@@ -301,31 +403,45 @@ function DetailSheet({ id, onClose, onChanged }) {
     if (!Number.isFinite(amt) || amt <= 0) { setError(t('bil.badAmount')); return }
     setBusy('pay'); setError('')
     try {
-      const r = await fetch(apiUrl(`/api/invoices/${id}/payments`), {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ amount: amt, method: payMethod, is_deposit: payDeposit }),
-      })
+      let r
+      try {
+        r = await fetch(apiUrl(`/api/invoices/${id}/payments`), {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ amount: amt, method: payMethod, is_deposit: payDeposit }),
+        })
+      } catch {
+        setError(t('err.save'))
+        return
+      }
       const data = await r.json().catch(() => ({}))
-      if (!r.ok) throw new Error(data.error || t('bil.saveError'))
+      // No payment id means the amount was not recorded. Keep what was typed.
+      if (!r.ok || savedId(data) == null) {
+        setError(writeError(r, data, t))
+        return
+      }
       setPayOpen(false); setPayAmount(''); setPayDeposit(false)
       await load(); onChanged()
-    } catch (e) { setError(e.message) } finally { setBusy('') }
+    } finally { setBusy('') }
   }
 
-  const balance = inv ? Number(inv.total) - Number(inv.amount_paid) : 0
+  const totalN = knownNumber(inv?.total)
+  const paidN = knownNumber(inv?.amount_paid)
+  const balance = totalN == null || paidN == null ? null : totalN - paidN
+  const waivedN = knownNumber(inv?.waived_amount)
+  const unavailable = t('money.unavailable')
   const isDraft = inv?.status === 'draft'
   const canPay = inv && ['issued', 'partially_paid'].includes(inv.status)
   const canWaive = isAdmin && inv && ['draft', 'issued', 'partially_paid'].includes(inv.status)
-  const canCancel = inv && (isDraft || (inv.status === 'issued' && Number(inv.amount_paid) === 0))
+  const canCancel = inv && (isDraft || (inv.status === 'issued' && paidN === 0))
 
   return (
     <div className={`${sheetOverlayCls} z-40`} onClick={onClose}>
       <div className={sheetPanelCls} onClick={e => e.stopPropagation()} role="dialog" aria-modal="true" aria-label={t('bil.detail')}>
         <MobileSheetGrip />
         {!inv ? (
-          <div className="flex justify-center py-14">{error
-            ? <p className="text-sm text-rose-700 dark:text-rose-300">{error}</p>
-            : <Loader2 size={20} className="animate-spin text-brass-600" />}</div>
+          <div className="px-5 py-8">{loadFailed
+            ? <LoadFailure body={t('bil.detailFailedBody')} onRetry={load} />
+            : <div className="flex justify-center py-6"><Loader2 size={20} className="animate-spin text-brass-600" /></div>}</div>
         ) : (
           <>
             <div className="flex items-start justify-between px-5 py-3 border-b border-parchment-300/60 dark:border-brass-900/30">
@@ -352,6 +468,9 @@ function DetailSheet({ id, onClose, onChanged }) {
             </div>
 
             <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+              {loadFailed && (
+                <LoadFailure variant="strip" body={t('bil.detailFailedBody')} onRetry={load} />
+              )}
               {/* Lines */}
               <div>
                 <FieldLabel>{t('bil.fLines')}</FieldLabel>
@@ -363,7 +482,7 @@ function DetailSheet({ id, onClose, onChanged }) {
                         {Number(l.qty) !== 1 && <span className="text-ink-500 dark:text-parchment-300/70"> × {Number(l.qty)}</span>}
                         {l.pass_through && <span className="text-xs italic text-ink-500 dark:text-parchment-300/70"> · {t('bil.passThrough')}{l.payee ? ` — ${l.payee}` : ''}</span>}
                       </span>
-                      <span className="text-ink-800 dark:text-parchment-100 whitespace-nowrap">{money(l.amount)}</span>
+                      <span className="text-ink-800 dark:text-parchment-100 whitespace-nowrap">{money(l.amount, unavailable)}</span>
                     </li>
                   ))}
                 </ul>
@@ -371,16 +490,16 @@ function DetailSheet({ id, onClose, onChanged }) {
 
               {/* Totals */}
               <div className="rounded-xl bg-parchment-100 dark:bg-ink-800/60 px-4 py-3 space-y-1 text-sm">
-                <div className="flex justify-between"><span className="text-ink-600 dark:text-parchment-300/80">{t('bil.subtotal')}</span><span>{money(inv.subtotal)}</span></div>
-                {Number(inv.waived_amount) > 0 && (
+                <div className="flex justify-between"><span className="text-ink-600 dark:text-parchment-300/80">{t('bil.subtotal')}</span><span>{money(inv.subtotal, unavailable)}</span></div>
+                {(waivedN == null || waivedN > 0) && (
                   <div className="flex justify-between text-brass-700 dark:text-brass-300">
                     <span>{t('bil.waivedLine')}{inv.waiver_reason ? ` — ${inv.waiver_reason}` : ''}</span>
-                    <span>−{money(inv.waived_amount)}</span>
+                    <span>{waivedN == null ? unavailable : `−${money(inv.waived_amount)}`}</span>
                   </div>
                 )}
-                <div className="flex justify-between"><span className="text-ink-600 dark:text-parchment-300/80">{t('bil.received')}</span><span>{money(inv.amount_paid)}</span></div>
+                <div className="flex justify-between"><span className="text-ink-600 dark:text-parchment-300/80">{t('bil.received')}</span><span>{money(inv.amount_paid, unavailable)}</span></div>
                 <div className="flex justify-between border-t border-parchment-300/60 dark:border-brass-900/30 pt-1.5 font-semibold text-ink-900 dark:text-parchment-50">
-                  <span>{t('bil.balance')}</span><span>{money(Math.max(balance, 0))}</span>
+                  <span>{t('bil.balance')}</span><span>{balance == null ? unavailable : money(Math.max(balance, 0))}</span>
                 </div>
               </div>
 
@@ -392,7 +511,7 @@ function DetailSheet({ id, onClose, onChanged }) {
                     {inv.payments.map(p => (
                       <li key={p.id} className="py-2 flex items-center justify-between gap-3 text-sm">
                         <span className={p.refunded_at ? 'line-through text-ink-400 dark:text-parchment-300/70' : 'text-ink-800 dark:text-parchment-100'}>
-                          {money(p.amount)} · {t(`bil.method.${p.method}`)}
+                          {money(p.amount, unavailable)} · {t(`bil.method.${p.method}`)}
                           {p.is_deposit && ` · ${t('bil.deposit')}`}
                           <span className="text-xs text-ink-500 dark:text-parchment-300/70"> · {new Date(p.received_at).toLocaleDateString(dateLocale, { month: 'short', day: 'numeric' })}</span>
                           {p.refunded_at && <span className="text-xs italic"> · {t('bil.refunded')}</span>}
@@ -418,7 +537,7 @@ function DetailSheet({ id, onClose, onChanged }) {
                     <label className="block flex-1 min-w-[7rem]">
                       <FieldLabel>{t('bil.amount')}</FieldLabel>
                       <input value={payAmount} onChange={e => setPayAmount(e.target.value)} inputMode="decimal"
-                        placeholder={money(Math.max(balance, 0)).slice(1)} className={inputCls} />
+                        placeholder={balance == null ? '' : Math.max(balance, 0).toFixed(2)} className={inputCls} />
                     </label>
                     <label className="block">
                       <FieldLabel>{t('bil.methodLabel')}</FieldLabel>
@@ -439,7 +558,7 @@ function DetailSheet({ id, onClose, onChanged }) {
                   </div>
                 </div>
               ) : (
-                <button onClick={() => { setPayAmount(String(Math.max(balance, 0).toFixed(2))); setPayOpen(true) }} className={`${btnPrimary} w-full`}>
+                <button onClick={() => { setPayAmount(balance == null ? '' : String(Math.max(balance, 0).toFixed(2))); setPayOpen(true) }} className={`${btnPrimary} w-full`}>
                   {t('bil.recordPayment')}
                 </button>
               ))}
@@ -479,7 +598,10 @@ function DetailSheet({ id, onClose, onChanged }) {
 
 /* ── The catalog tab (fee schedule) ────────────────────────────────────── */
 
-function CatalogTab({ catalog, reload }) {
+function CatalogTab({ catalog, catalogState, reload }) {
+  const catalogFailed = catalogState === 'failed'
+  // R301-1: new or edited items are only saved once the catalog is known.
+  const ready = catalogState === 'ok'
   const { t } = useLocale()
   const ask = useConfirm()
   const [form, setForm] = useState(null) // null | {} | {id,...}
@@ -488,6 +610,8 @@ function CatalogTab({ catalog, reload }) {
 
   async function save() {
     setError('')
+    // Typed values stay in the form; save waits until the catalog is known.
+    if (!ready) { setError(t('bil.catalogUnread')); return }
     if (!form.name?.trim()) { setError(t('bil.needName')); return }
     setBusy(true)
     try {
@@ -548,8 +672,8 @@ function CatalogTab({ catalog, reload }) {
                   {f.pass_through && <span className="text-xs italic text-ink-500 dark:text-parchment-300/70"> · {t('bil.passThrough')}</span>}
                 </span>
                 <span className="text-sm text-ink-800 dark:text-parchment-100 whitespace-nowrap">
-                  {money(f.amount)}
-                  {f.parishioner_amount != null && <span className="text-xs text-brass-700 dark:text-brass-300"> · {money(f.parishioner_amount)} {t('bil.parishioner')}</span>}
+                  {money(f.amount, t('money.unavailable'))}
+                  {f.parishioner_amount != null && <span className="text-xs text-brass-700 dark:text-brass-300"> · {money(f.parishioner_amount, t('money.unavailable'))} {t('bil.parishioner')}</span>}
                 </span>
                 <span className="flex gap-1">
                   <button onClick={() => setForm({ ...f })} className="text-xs underline text-church-700 dark:text-brass-300 min-h-[32px] px-1">{t('bil.edit')}</button>
@@ -561,7 +685,11 @@ function CatalogTab({ catalog, reload }) {
         </div>
       ))}
 
-      {catalog.length === 0 && (
+      {catalogFailed ? (
+        <p role="status" className="text-sm text-amber-800 dark:text-amber-300 text-center py-10">{t('bil.catalogUnread')}</p>
+      ) : !ready ? (
+        <SkeletonRowList count={3} withAvatar={false} />
+      ) : catalog.length === 0 && (
         <EmptyState icon={HandCoins} title={t('bil.catalogEmptyTitle')} body={t('bil.catalogEmptyBody')} />
       )}
 
@@ -610,12 +738,13 @@ function CatalogTab({ catalog, reload }) {
           {error && <p className="text-sm text-rose-700 dark:text-rose-300" role="alert">{error}</p>}
           <div className="flex justify-end gap-2">
             <button onClick={() => { setForm(null); setError('') }} className={btnQuiet}>{t('bil.cancelBtn')}</button>
-            <button onClick={save} disabled={busy} className={btnPrimary}>
+            <button onClick={save} disabled={busy || !ready} className={btnPrimary}>
               {busy && <Loader2 size={14} className="animate-spin" />} {form.id ? t('bil.saveItem') : t('bil.addItem')}
             </button>
           </div>
         </div>
-      ) : (
+      ) : ready && (
+        // No add until the catalog is known: it could duplicate a fee that exists.
         <button onClick={() => setForm({})} className={btnQuiet}><Plus size={15} /> {t('bil.addItem')}</button>
       )}
     </div>
@@ -628,32 +757,58 @@ export default function Offerings() {
   const { t, dateLocale } = useLocale()
   const [tab, setTab] = useState('invoices')
   const [invoices, setInvoices] = useState(null)
+  // 'loading' until a list read settles. Failure is not an empty parish.
+  const [invoiceState, setInvoiceState] = useState('loading') // loading | ok | failed
   const [catalog, setCatalog] = useState([])
+  // A refused fee schedule must not look like a parish with no offerings.
+  // 'loading' until the first catalog read settles; a reload keeps the last
+  // settled state until its own result arrives.
+  const [catalogState, setCatalogState] = useState('loading') // loading | ok | failed
+  const catalogFailed = catalogState === 'failed'
   const [members, setMembers] = useState([])
   // Distinguishes an empty roster from a roster we could not load.
   const [membersFailed, setMembersFailed] = useState(false)
   const [statusFilter, setStatusFilter] = useState('')
-  const [error, setError] = useState('')
   const [composerOpen, setComposerOpen] = useState(false)
   const [detailId, setDetailId] = useState(null)
 
+  const loadGen = useRef(0)
   const load = useCallback(async () => {
-    setError('')
-    try {
-      const params = new URLSearchParams({ limit: '200' })
-      if (statusFilter) params.set('status', statusFilter)
-      const [ri, rc] = await Promise.all([
-        fetch(apiUrl(`/api/invoices?${params}`)),
-        fetch(apiUrl('/api/fee-schedules')),
-      ])
-      if (!ri.ok) throw new Error(t('bil.loadError'))
-      setInvoices(await ri.json())
-      setCatalog(rc.ok ? await rc.json() : [])
-    } catch (e) {
-      setError(e.message); setInvoices([])
+    // Latest-request guard: a slower, older load (e.g. before a status
+    // filter change) must not overwrite a newer one.
+    const gen = ++loadGen.current
+    const params = new URLSearchParams({ limit: '200' })
+    if (statusFilter) params.set('status', statusFilter)
+    // R301-1: the two reads settle independently. A rejected invoice fetch
+    // must not discard a returned catalog, and a rejected catalog fetch must
+    // still mark the catalog unread.
+    const readCatalog = async () => {
+      const rc = await fetch(apiUrl('/api/fee-schedules'))
+      if (!rc.ok) throw new Error('catalog')
+      const cat = await rc.json()
+      if (!Array.isArray(cat)) throw new Error('catalog')
+      return cat
     }
-  }, [statusFilter, t])
-  useEffect(() => { setInvoices(null); load() }, [load])
+    const readInvoices = async () => {
+      const ri = await fetch(apiUrl(`/api/invoices?${params}`))
+      if (!ri.ok) throw new Error('unread')
+      const body = await ri.json()
+      const list = asInvoiceList(body)
+      if (!list) throw new Error('shape')
+      return list
+    }
+    const [inv, cat] = await Promise.allSettled([readInvoices(), readCatalog()])
+    if (gen !== loadGen.current) return
+    // The fee schedule is its own fact. A refused catalog used to become
+    // [] and the tab said "No catalog items yet".
+    if (cat.status === 'fulfilled') { setCatalog(cat.value); setCatalogState('ok') }
+    else { setCatalog([]); setCatalogState('failed') }
+    // A refused invoice list used to become [] and the tab said
+    // "No invoices yet", and a missing total became $0.00.
+    if (inv.status === 'fulfilled') { setInvoices(inv.value); setInvoiceState('ok') }
+    else { setInvoices([]); setInvoiceState('failed') }
+  }, [statusFilter])
+  useEffect(() => { setInvoices(null); setInvoiceState('loading'); load() }, [load])
 
   useEffect(() => {
     // An empty picker reads as "you have no members", not as "this did not
@@ -679,7 +834,7 @@ export default function Offerings() {
                 <option value="">{t('bil.allStatuses')}</option>
                 {Object.keys(STATUS_TONE).map(s => <option key={s} value={s}>{t(`bil.status.${s}`)}</option>)}
               </select>
-              <button onClick={() => setComposerOpen(true)} className={btnPrimary}><Plus size={15} /> {t('bil.new')}</button>
+              <button onClick={() => setComposerOpen(true)} disabled={invoiceState !== 'ok'} className={btnPrimary}><Plus size={15} /> {t('bil.new')}</button>
             </>
           )}
         </div>
@@ -697,17 +852,19 @@ export default function Offerings() {
       </div>
 
       {tab === 'catalog' ? (
-        <CatalogTab catalog={catalog} reload={load} />
-      ) : invoices === null ? (
+        <CatalogTab catalog={catalog} catalogState={catalogState} reload={load} />
+      ) : invoiceState === 'loading' || invoices == null ? (
         <SkeletonRowList count={5} withAvatar={false} />
-      ) : error && invoices.length === 0 ? (
-        <p className="text-sm text-rose-700 dark:text-rose-300 text-center py-10" role="alert">{error}</p>
+      ) : invoiceState !== 'ok' || !Array.isArray(invoices) ? (
+        <LoadFailure body={t('bil.listFailedBody')} onRetry={load} />
       ) : invoices.length === 0 ? (
         <EmptyState icon={HandCoins} title={t('bil.emptyTitle')} body={t('bil.emptyBody')} />
       ) : (
         <div className="space-y-2">
           {invoices.map(inv => {
-            const balance = Number(inv.total) - Number(inv.amount_paid)
+            const totalN = knownNumber(inv.total)
+            const paidN = knownNumber(inv.amount_paid)
+            const balance = totalN == null || paidN == null ? null : totalN - paidN
             return (
               <button key={inv.id} onClick={() => setDetailId(inv.id)}
                 className="w-full text-left rounded-xl border border-parchment-300/70 dark:border-brass-900/30 bg-white/70 dark:bg-ink-800/60 px-4 py-3 flex flex-wrap items-center gap-3 hover:bg-parchment-100 dark:hover:bg-ink-800">
@@ -723,8 +880,8 @@ export default function Offerings() {
                   </span>
                 </span>
                 <span className="text-right">
-                  <span className="block text-sm font-medium text-ink-900 dark:text-parchment-50">{money(inv.total)}</span>
-                  {['issued', 'partially_paid'].includes(inv.status) && balance > 0 && (
+                  <span className="block text-sm font-medium text-ink-900 dark:text-parchment-50">{money(inv.total, t('money.unavailable'))}</span>
+                  {['issued', 'partially_paid'].includes(inv.status) && balance != null && balance > 0 && (
                     <span className="block text-xs text-ink-500 dark:text-parchment-300/70">{t('bil.balanceShort')} {money(balance)}</span>
                   )}
                 </span>
@@ -736,7 +893,7 @@ export default function Offerings() {
       )}
 
       {composerOpen && (
-        <ComposerSheet catalog={catalog} members={members} membersFailed={membersFailed}
+        <ComposerSheet catalog={catalog} catalogFailed={catalogFailed} members={members} membersFailed={membersFailed}
           onClose={() => setComposerOpen(false)}
           onCreated={(id) => { setComposerOpen(false); load(); setDetailId(id) }} />
       )}

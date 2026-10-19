@@ -31,6 +31,30 @@ const HEADER_MAP = {
   godparents: 'godparents', sponsors: 'sponsors',
 }
 
+// R322-1: a draft row is usable only if everything the editor reads is the
+// shape it reads it as. `draft` must be an object ({} is a legitimate empty
+// draft); each scalar field, when present, a string or number; the optional
+// meta_attributes an object whose godparents / sponsors, when present, are
+// lists of names (the editor joins them). One unusable row makes the whole
+// read unread: the queue shows its load error instead of crashing the
+// editor, inventing an empty editable draft, or silently dropping the row.
+const DRAFT_SCALARS = ['type', 'date', 'member_name', 'client_id', 'minister', 'place', 'certificate_no', 'notes']
+const isPlainObj = v => v !== null && typeof v === 'object' && !Array.isArray(v)
+const isNameList = v => v == null || (Array.isArray(v) && v.every(n => typeof n === 'string'))
+function usableDraftRow(x) {
+  if (!isPlainObj(x) || !Number.isInteger(x.id) || x.id <= 0) return false
+  if (x.source != null && typeof x.source !== 'string') return false
+  const d = x.draft
+  if (!isPlainObj(d)) return false
+  for (const k of DRAFT_SCALARS) {
+    const v = d[k]
+    if (v != null && typeof v !== 'string' && !(typeof v === 'number' && Number.isFinite(v))) return false
+  }
+  const meta = d.meta_attributes
+  if (meta != null && !isPlainObj(meta)) return false
+  return meta == null || (isNameList(meta.godparents) && isNameList(meta.sponsors))
+}
+
 function parseCsv(text) {
   const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
   if (lines.length < 2) return []
@@ -77,7 +101,13 @@ export default function RegisterDrafts() {
       const r = await fetch(apiUrl('/api/sacraments/drafts?status=pending&limit=100'))
       const d = await r.json().catch(() => ({}))
       if (!r.ok) throw new Error(d.error || `Failed to load (${r.status})`)
-      setDrafts(d.drafts ?? [])
+      // A 200 without a drafts array, or with any row the editor cannot
+      // read (usableDraftRow above), is unread. `d.drafts ?? []` showed an empty review queue while staged
+      // register entries were still waiting.
+      if (!Array.isArray(d?.drafts) || !d.drafts.every(usableDraftRow)) {
+        throw new Error('drafts: malformed')
+      }
+      setDrafts(d.drafts)
     } catch { setError(t('err.load')) }
     finally { setLoading(false) }
   }
@@ -132,26 +162,56 @@ export default function RegisterDrafts() {
 
   async function commit(d) {
     setBusyId(d.id); setRowErr(e => ({ ...e, [d.id]: '' }))
+    const say = msg => setRowErr(e => ({ ...e, [d.id]: msg }))
+    // Two writes, and the row's sentence must say which one failed and
+    // what the server said about it. One `catch { err.save }` for both
+    // used to tell a secretary "didn't save — nothing was lost" when the
+    // edit HAD saved and the register had named the field to fix — and,
+    // worse, when the record was already in the register and she was
+    // about to type it in again.
+    const { _godparents_text, _sponsors_text, ...draftBody } = d.draft
     try {
-      // Persist the edited draft, then commit it.
-      const { _godparents_text, _sponsors_text, ...draftBody } = d.draft
-      let r = await fetch(apiUrl(`/api/sacraments/drafts/${d.id}`), {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ draft: draftBody }),
-      })
+      let r
+      try {
+        r = await fetch(apiUrl(`/api/sacraments/drafts/${d.id}`), {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ draft: draftBody }),
+        })
+      } catch {
+        // The commit was never attempted, so the register cannot have it.
+        return say(t('drafts.unreachableBeforeSave'))
+      }
       let body = await r.json().catch(() => ({}))
-      if (!r.ok) throw new Error(body.error || `Failed to save draft (${r.status})`)
+      // A 404 here means the draft is no longer pending — committed in
+      // another tab, or discarded. The save route cannot say which; the
+      // commit route can, so fall through and let it answer. Driven in a
+      // real browser: this was the path a lost-then-retried commit actually
+      // took, and the 409 branch below was never reached without it.
+      if (!r.ok && r.status !== 404) return say(body.error || t('drafts.saveRefused', { status: r.status }))
 
-      r = await fetch(apiUrl(`/api/sacraments/drafts/${d.id}/commit`), { method: 'POST' })
+      try {
+        r = await fetch(apiUrl(`/api/sacraments/drafts/${d.id}/commit`), { method: 'POST' })
+      } catch {
+        // The request may or may not have reached the server. The page
+        // does not know, and must not claim to.
+        return say(t('drafts.unreachableOnCommit'))
+      }
       body = await r.json().catch(() => ({}))
-      if (!r.ok) throw new Error(body.error || `Failed to commit (${r.status})`)
+      if (r.status === 409 && /already committed/i.test(body.error || '')) {
+        // A retry after a lost 201: the record IS in the register. Treat
+        // it as the commit it was, or she re-enters the line.
+        setDrafts(ds => ds.filter(x => x.id !== d.id))
+        toast.info(t('drafts.alreadyCommitted'))
+        return
+      }
+      if (!r.ok) return say(body.error || t('drafts.commitRefused', { status: r.status }))
+
       setDrafts(ds => ds.filter(x => x.id !== d.id))
       // The amen — the most sacred write in the product should not
       // pass in silence.
       toast.success(t('drafts.committed'))
-    } catch { setRowErr(e => ({ ...e, [d.id]: t('err.save') })) }
-    finally { setBusyId(null) }
+    } finally { setBusyId(null) }
   }
 
   async function discard(d) {

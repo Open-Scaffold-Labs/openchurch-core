@@ -3,6 +3,7 @@ import { Cross } from 'lucide-react'
 import { apiUrl } from '../api'
 import { LIT_COLOR_DOT, LIT_COLOR_DOT_NONE } from '../utils/liturgicalColors'
 import { useLocale } from '../i18n'
+import { seasonLabel } from '../i18n/liturgical'
 
 // Liturgical context chip shown above the AI Studio prompt textarea.
 // Surfaces the upcoming Sunday's season + feast so a pastor doesn't
@@ -52,7 +53,7 @@ function formatDateShort(isoYmd, dateLocale) {
 const SUPPORTED_TYPES = new Set(['sermon', 'devotional'])
 
 export default function LiturgicalSuggestion({ type, prompt, onUse }) {
-  const { t, dateLocale } = useLocale()
+  const { t, dateLocale, tradition } = useLocale()
   const [data, setData] = useState(null)
   const [hidden, setHidden] = useState(false)
   const targetDate = upcomingSundayISO()
@@ -83,14 +84,18 @@ export default function LiturgicalSuggestion({ type, prompt, onUse }) {
   if (!SUPPORTED_TYPES.has(type) || hidden || !data) return null
 
   const dateLabel = formatDateShort(targetDate, dateLocale)
-  const label = data.feast_name || data.season
+  // The server sends the canonical English season token; the parish reads
+  // it in its own language and tradition (Spanish «Tiempo Ordinario»,
+  // Episcopal «Season after Pentecost»), in the chip and the seeded prompt.
+  const season = data.season ? seasonLabel(t, data.season, { tradition, block: data.ordinary_block }) : data.season
+  const label = data.feast_name || season
   const isEmpty = !prompt.trim()
   const dotCls = LIT_COLOR_DOT[data.color] ?? LIT_COLOR_DOT_NONE
 
   const handleClick = () => {
     if (!isEmpty) return
     const seed = seedPrompt({
-      season: data.season,
+      season,
       feast_name: data.feast_name,
       dateLabel,
     })

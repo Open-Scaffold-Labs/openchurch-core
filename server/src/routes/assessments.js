@@ -20,21 +20,23 @@
 // Maine assesses on the parochial report "submitted two years prior", so
 // `base_year` is stored per assessment and defaults to `fiscal_year`.
 //
-// The base is arithmetic, not entry: SUM of assessable_base across the
-// parish's APPROVED submissions that CLOSE within the BASE year —
-// a submission is assessed in the calendar year its period_end falls in.
-// Anchoring on the end date (not full containment) means a report period
-// that straddles a year boundary, or a parish on a non-calendar fiscal
-// year, lands in exactly one assessment year instead of being silently
-// dropped from both. Bases recompute freely while the year is a draft;
-// publishing freezes the lines as the authoritative bill. Payments are
-// recorded manually (real invoicing waits on the billing provider).
+// The base is arithmetic, not entry (GIV-08 M4): approved frozen
+// assessable_base across submissions that CLOSE within the BASE year,
+// minus APPLIED credits. totals_json stays the archival gross; OPEN
+// adjustments do not move the bill. A submission is assessed in the
+// calendar year its period_end falls in. Anchoring on the end date
+// (not full containment) means a report period that straddles a year
+// boundary, or a parish on a non-calendar fiscal year, lands in exactly
+// one assessment year instead of being silently dropped from both.
+// Bases recompute freely while the year is a draft; publishing freezes
+// the lines as the authoritative bill. Payments are recorded manually
+// (real invoicing waits on the billing provider).
 
 import { Router } from 'express'
 import pool from '../db.js'
 import { requireIntParam } from '../utils/params.js'
 import { monitor } from '../monitoring/index.js'
-import { endsInYear } from '../finance/fiscalPeriod.js'
+import { computeBases } from '../finance/assessmentBases.js'
 
 const router = Router()
 
@@ -114,32 +116,6 @@ function assessFor(base, { bands, rate_bps }) {
   return { assessed: assessedFor(base, rate_bps), breakdown: null }
 }
 
-// Per-parish assessable base for a calendar year, from approved
-// submissions of ACTIVE/SUSPENDED affiliations. A submission is anchored
-// to the year its period_end falls in (the year it closes), so every
-// approved period is counted in exactly one assessment year — a period
-// spanning a year boundary is no longer dropped from both.
-//
-// `year` here is the BASE year, which is not always the assessment's own
-// fiscal year: a diocese assessing on the parochial report from two years
-// prior passes 2024 while billing for 2026.
-async function computeBases(dioceseOrgId, year) {
-  const { rows } = await pool.query(
-    `SELECT s.organization_id AS parish_org_id,
-            SUM((s.totals_json->'totals'->>'assessable_base')::NUMERIC)::NUMERIC(12,2) AS base
-       FROM ochr_report_submissions s
-       JOIN ochr_diocese_affiliations a
-         ON a.parish_org_id = s.organization_id
-        AND a.diocese_org_id = s.diocese_org_id
-        AND a.status IN ('active', 'suspended')
-      WHERE s.diocese_org_id = $1 AND s.status = 'approved'
-        AND ${endsInYear('$2')}
-      GROUP BY s.organization_id`,
-    [dioceseOrgId, year]
-  )
-  return rows
-}
-
 async function loadAssessment(id, dioceseOrgId) {
   const { rows } = await pool.query(
     `SELECT id, fiscal_year, rate_bps, basis, status, notes, created_at,
@@ -165,6 +141,9 @@ async function detail(id, dioceseOrgId) {
   const num = v => Number(v) || 0
   return {
     ...a,
+    // M4: line.base is payable (approved frozen gross − APPLIED credits).
+    // totals_json on the source submissions remains the archival gross.
+    payable_rule: 'approved_frozen_gross_minus_applied_credits',
     lines,
     totals: {
       base: money(lines.reduce((s, l) => s + num(l.base), 0)),
@@ -335,6 +314,50 @@ router.post('/:id/recompute', async (req, res) => {
   }
 })
 
+// PUBLISH A BILL THAT IS STILL TRUE (4 Sep).
+//
+// Publishing freezes the lines as the authoritative bill, and the lines
+// are whatever the last draft computation left. An approval that landed
+// after the draft — or during the publish — was silently missing from the
+// bill, and once published there was no way back: recompute is draft-only,
+// the line PATCH does not take a base, and a second assessment for the
+// year is a 409. Reproduced: H1 approved, draft at 10,000; H2 approved;
+// publish → 200 with the bill still at 10,000 against an approved truth
+// of 30,000.
+//
+// So before the status flips, the bases are recomputed and compared to
+// the stored lines. Any difference is a 409 naming the parishes, and
+// nothing is frozen. This deliberately does NOT recompute on publish:
+// the chancery is about to freeze what is on its screen, and quietly
+// replacing those numbers on the way to the freeze would be the same
+// defect wearing a different face. Recompute is a click away and shows
+// its result first.
+//
+// "Different" means "recompute would change it": a parish with a base and
+// no line, a line whose base moved, or a line whose parish no longer
+// qualifies and that recompute would drop (untouched: no payment, not
+// waived). A line recompute would keep — paid or waived — is not a
+// reason to refuse, or recompute-then-publish could never succeed.
+function staleLines(lines, bases) {
+  const num = v => Number(v) || 0
+  const byParish = new Map(bases.map(b => [b.parish_org_id, num(b.base)]))
+  const changed = []
+  for (const l of lines) {
+    if (byParish.has(l.parish_org_id)) {
+      if (num(l.base) !== byParish.get(l.parish_org_id)) {
+        changed.push({ parish_org_id: l.parish_org_id, parish_name: l.parish_name, was: money(l.base), now: money(byParish.get(l.parish_org_id)) })
+      }
+      byParish.delete(l.parish_org_id)
+    } else if (num(l.paid) === 0 && l.status !== 'waived') {
+      changed.push({ parish_org_id: l.parish_org_id, parish_name: l.parish_name, was: money(l.base), now: null })
+    }
+  }
+  for (const [parish_org_id, base] of byParish) {
+    changed.push({ parish_org_id, parish_name: null, was: null, now: money(base) })
+  }
+  return changed
+}
+
 // PATCH /api/diocese/assessments/:id — { status?, notes? }
 // Lifecycle: draft → published → closed (forward only).
 const NEXT_STATUS = { published: 'draft', closed: 'published' }
@@ -344,15 +367,43 @@ router.patch('/:id', async (req, res) => {
   if (nextStatus != null && !(nextStatus in NEXT_STATUS)) {
     return res.status(400).json({ error: "status must be 'published' or 'closed'" })
   }
+  const client = await pool.connect()
+  const refuse = async (status, body) => { await client.query('ROLLBACK'); return res.status(status).json(body) }
   try {
-    const a = await loadAssessment(id, req.organizationId)
-    if (!a) return res.status(404).json({ error: 'Not found' })
+    // FOR UPDATE, as recompute does: a recompute and a publish must not
+    // interleave, or the check below could pass against lines that are
+    // being rewritten underneath it.
+    await client.query('BEGIN')
+    const { rows: found } = await client.query(
+      `SELECT id, status, COALESCE(base_year, fiscal_year) AS base_year
+         FROM ochr_assessments WHERE id = $1 AND diocese_org_id = $2 FOR UPDATE`,
+      [id, req.organizationId]
+    )
+    if (!found.length) return refuse(404, { error: 'Not found' })
+    const a = found[0]
 
     const sets = ['updated_at = NOW()']
     const params = []
     if (nextStatus) {
       if (a.status !== NEXT_STATUS[nextStatus]) {
-        return res.status(400).json({ error: `Cannot move from '${a.status}' to '${nextStatus}'` })
+        return refuse(400, { error: `Cannot move from '${a.status}' to '${nextStatus}'` })
+      }
+      if (nextStatus === 'published') {
+        const { rows: lines } = await client.query(
+          `SELECT l.parish_org_id, p.name AS parish_name, l.base, l.paid, l.status
+             FROM ochr_assessment_lines l
+             JOIN ochr_organizations p ON p.id = l.parish_org_id
+            WHERE l.assessment_id = $1`,
+          [id]
+        )
+        const changed = staleLines(lines, await computeBases(req.organizationId, a.base_year, client))
+        if (changed.length) {
+          return refuse(409, {
+            error: 'Approved periods changed since this bill was computed. Recompute before publishing.',
+            code: 'assessment_stale',
+            changed,
+          })
+        }
       }
       params.push(nextStatus); sets.push(`status = $${params.length}`)
     }
@@ -361,15 +412,19 @@ router.patch('/:id', async (req, res) => {
       sets.push(`notes = $${params.length}`)
     }
     params.push(id, req.organizationId)
-    await pool.query(
+    await client.query(
       `UPDATE ochr_assessments SET ${sets.join(', ')}
         WHERE id = $${params.length - 1} AND diocese_org_id = $${params.length}`,
       params
     )
+    await client.query('COMMIT')
     res.json(await detail(id, req.organizationId))
   } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
     monitor.error('assessments.patch', err, { orgId: req.organizationId, id })
     res.status(500).json({ error: 'Failed to update the assessment' })
+  } finally {
+    client.release()
   }
 })
 

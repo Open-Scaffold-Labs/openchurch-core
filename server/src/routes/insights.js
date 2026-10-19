@@ -51,10 +51,9 @@ router.get('/', async (req, res) => {
         [orgId]
       ),
       pool.query(
-        `SELECT COALESCE(SUM(amount),0)::numeric(12,2) AS total
-           FROM ochr_donations
-          WHERE organization_id = $1 AND date >= $2
-            AND payment_status IS DISTINCT FROM 'refunded'`,
+        `SELECT COALESCE(SUM(live_amount),0)::numeric(12,2) AS total
+           FROM ochr_donation_live
+          WHERE organization_id = $1 AND date >= $2`,
         [orgId, yearStart]
       ),
       pool.query(
@@ -109,12 +108,11 @@ router.get('/', async (req, res) => {
           ))::date AS m
         )
         SELECT TO_CHAR(months.m, 'YYYY-MM') AS month,
-               COALESCE(SUM(d.amount),0)::numeric(12,2) AS total
+               COALESCE(SUM(d.live_amount),0)::numeric(12,2) AS total
           FROM months
-     LEFT JOIN ochr_donations d
+     LEFT JOIN ochr_donation_live d
             ON date_trunc('month', d.date)::date = months.m
            AND d.organization_id = $1
-           AND d.payment_status IS DISTINCT FROM 'refunded'
       GROUP BY months.m
       ORDER BY months.m ASC
         `,
@@ -128,13 +126,12 @@ router.get('/', async (req, res) => {
       // donations so admin-meaningful totals dominate.
       pool.query(
         `SELECT COALESCE(NULLIF(category, ''), 'uncategorized') AS category,
-                COALESCE(SUM(amount),0)::numeric(12,2) AS total,
+                COALESCE(SUM(live_amount),0)::numeric(12,2) AS total,
                 COUNT(*)::int AS count
-           FROM ochr_donations
+           FROM ochr_donation_live
           WHERE organization_id = $1
             AND date >= NOW() - ($2 || ' days')::interval
             AND (notes IS NULL OR notes NOT LIKE '[Sample]%')
-            AND payment_status IS DISTINCT FROM 'refunded'
        GROUP BY 1
        ORDER BY total DESC`,
         [orgId, CATEGORY_WINDOW_DAYS]

@@ -20,7 +20,8 @@ export async function sendWeeklyServingDigests() {
             to_char(date, 'FMDay, FMMon FMDD')  AS date_label,
             to_char(start_time, 'FMHH12:MI AM') AS time_label
        FROM ochr_calendar_events
-      WHERE date >= CURRENT_DATE
+      WHERE EXISTS (SELECT 1 FROM ochr_organizations o WHERE o.id = ochr_calendar_events.organization_id AND o.held_at IS NULL)
+        AND date >= CURRENT_DATE
         AND date <  CURRENT_DATE + INTERVAL '7 days'
         AND jsonb_array_length(assigned_to) > 0
       ORDER BY organization_id, date ASC, start_time ASC`
@@ -52,7 +53,7 @@ export async function sendWeeklyServingDigests() {
     if (!m) continue
     recipients++
     try {
-      await notify({
+      const delivery = await notify({
         organizationId:    agg.orgId,
         recipient:         m.email,
         notification_type: 'weekly_serving_digest',
@@ -61,7 +62,7 @@ export async function sendWeeklyServingDigests() {
           events_list:    agg.lines.join('\n'),
         },
       })
-      sent++
+      if (delivery?.reason !== 'organization_held' && delivery?.reason !== 'recipient_inactive') sent++
     } catch (err) {
       monitor.error('digest.serving', err, { orgId: agg.orgId, clientId: agg.clientId })
     }

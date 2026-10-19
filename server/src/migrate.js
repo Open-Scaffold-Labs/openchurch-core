@@ -1,4 +1,5 @@
 import bcrypt from 'bcryptjs'
+import { classifyDatabaseUrl, isLoopbackHost } from '../../scripts/lib/db-target-guard.mjs'
 import pool from './db.js'
 
 // Every tenant-scoped table picks up the same `organization_id` column
@@ -26,8 +27,13 @@ const TENANT_TABLES = [
 // it against a deployed environment does nothing, because seeding does not
 // run there. Rotating the credential on a live database is a write to that
 // database, not an env change.
-const DEMO_EMAIL    = process.env.DEMO_EMAIL    || 'demo@openchurch.app'
-const DEMO_PASSWORD = process.env.DEMO_PASSWORD || 'demo1234'
+//
+// F-02: the public default 'demo1234' is only ever used against a LOCAL
+// target. An explicit SEED_DEMO=true against a remote database must also
+// supply its own DEMO_PASSWORD (not 'demo1234'), or the demo seed refuses.
+export const DEFAULT_DEMO_EMAIL = 'demo@openchurch.app'
+export const PUBLIC_DEMO_PASSWORD = 'demo1234'
+const DEMO_EMAIL    = process.env.DEMO_EMAIL    || DEFAULT_DEMO_EMAIL
 const DEMO_ORG_SLUG = 'demo-church'
 
 // Whether to seed (and force-restore) the demo org/user.
@@ -71,23 +77,49 @@ const DEMO_ORG_SLUG = 'demo-church'
 // an operator has to remember to export. Explicit SEED_DEMO=true still
 // overrides, because seeding a remote demo environment on purpose is a
 // legitimate thing to want.
-function targetIsLocal() {
-  const raw = process.env.DATABASE_URL || ''
-  if (!raw) return true // no target at all; migrations will fail on their own
-  try {
-    const host = new URL(raw).hostname
-    return ['localhost', '127.0.0.1', '::1', '[::1]'].includes(host)
-  } catch {
-    return false // unparseable: assume remote and fail closed
+// R286-1: the EFFECTIVE driver target, not the URL authority. Reuses the
+// reviewed fail-closed guard (scripts/lib/db-target-guard.mjs, the same
+// one seed/appReviewTenant.js uses): every ?host= / ?hostaddr= value must
+// be loopback, in any order; socket, malformed and empty-authority URLs are
+// not local. A missing DATABASE_URL is NOT local (the driver would fall back
+// to PGHOST / its default, which this process cannot vouch for), and a
+// non-loopback PGHOST / PGHOSTADDR in the environment makes the target
+// ambiguous, so it is not local either.
+function targetIsLocal(env = process.env) {
+  const c = classifyDatabaseUrl(env.DATABASE_URL)
+  if (c.kind !== 'local') return false
+  for (const key of ['PGHOST', 'PGHOSTADDR']) {
+    const v = env[key]
+    if (v != null && String(v) !== '' && !isLoopbackHost(v)) return false
   }
+  return true
+}
+
+// F-02 v2 (ARG-PATCH-3-1): the public default password is only for a
+// development/test process (exact lowercase NODE_ENV) against a LOCAL host.
+// NODE_ENV unset, 'staging', 'Production', etc. are NOT development, even on
+// 127.0.0.1 (a tunnel or sidecar can make production look local).
+export function isDevLocalTarget(env = process.env, local = targetIsLocal(env)) {
+  return ['development', 'test'].includes(env.NODE_ENV) && local
 }
 
 const SEED_DEMO =
-  process.env.SEED_DEMO === 'true' ||
-  (process.env.NODE_ENV !== 'production' && targetIsLocal())
+  process.env.SEED_DEMO === 'true' || isDevLocalTarget()
+
+// F-02: resolve the demo password. Dev/test-on-local keeps the documented
+// default; anything else must bring its own non-public value or not seed.
+export function resolveDemoPassword(env = process.env, local = targetIsLocal(env)) {
+  const supplied = env.DEMO_PASSWORD
+  if (isDevLocalTarget(env, local)) return supplied || PUBLIC_DEMO_PASSWORD
+  if (!supplied || supplied === PUBLIC_DEMO_PASSWORD) return null
+  return supplied
+}
+
+export function seedDemoEnabled() { return SEED_DEMO }
+export { targetIsLocal }
 
 if (!SEED_DEMO && process.env.NODE_ENV !== 'production') {
-  console.log('[migrate] remote database detected — skipping demo seed. Set SEED_DEMO=true to override.')
+  console.log('[migrate] not a development/test process on a local database — skipping demo seed. Set SEED_DEMO=true (with a non-default DEMO_PASSWORD) to override.')
 }
 
 export async function migrate() {
@@ -148,7 +180,10 @@ export async function migrate() {
       'SELECT id, role FROM ochr_users WHERE email = $1',
       [DEMO_EMAIL]
     )
-    if (existingDemo.length === 0) {
+    const DEMO_PASSWORD = resolveDemoPassword()
+    if (existingDemo.length === 0 && !DEMO_PASSWORD) {
+      console.warn('[migrate] SEED_DEMO on a non-local target without a non-default DEMO_PASSWORD — demo user NOT seeded (F-02).')
+    } else if (existingDemo.length === 0) {
       const hash = await bcrypt.hash(DEMO_PASSWORD, 10)
       await pool.query(
         `INSERT INTO ochr_users (organization_id, email, password_hash, name, role)

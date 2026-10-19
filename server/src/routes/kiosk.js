@@ -40,7 +40,7 @@ const KINDS = new Set(['member', 'guest', 'child'])
 async function orgForToken(token) {
   if (!TOKEN_RX.test(token ?? '')) return null
   const { rows } = await pool.query(
-    'SELECT id, name, timezone, locale FROM ochr_organizations WHERE kiosk_token = $1',
+    'SELECT id, name, timezone, locale FROM ochr_organizations WHERE kiosk_token = $1 AND held_at IS NULL',
     [token]
   )
   return rows[0] ?? null
@@ -207,11 +207,15 @@ kioskPublicRouter.post('/:token/checkin', checkinLimiter, async (req, res) => {
     // timezone) — a kiosk can't be used to backfill arbitrary
     // past/future events.
     const ev = await pool.query(
-      `SELECT 1 FROM ochr_calendar_events
+      `SELECT title, date, start_time
+         FROM ochr_calendar_events
         WHERE id = $1 AND organization_id = $2 AND date = (now() AT TIME ZONE $3)::date`,
       [eventId, orgId, org.timezone]
     )
     if (!ev.rows.length) return res.status(400).json({ error: 'That service is not available' })
+    const attendedTitle = ev.rows[0].title
+    const attendedDate = ev.rows[0].date
+    const attendedTime = ev.rows[0].start_time
 
     // Optional room, validated to the org; a stale id drops to null.
     let roomId = null
@@ -244,17 +248,25 @@ kioskPublicRouter.post('/:token/checkin', checkinLimiter, async (req, res) => {
     // the existing active check-in as success instead of a duplicate row.
     const { rows, rowCount } = await pool.query(
       `INSERT INTO ochr_checkins
-         (organization_id, calendar_event_id, client_id, person_name, kind, guardian_name, security_code_hash, room_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         (organization_id, calendar_event_id, client_id, person_name, kind, guardian_name, security_code_hash, room_id,
+          attended_date, attended_title, attended_time)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        ON CONFLICT (calendar_event_id, client_id)
        WHERE client_id IS NOT NULL AND checked_out_at IS NULL
        DO NOTHING
-       RETURNING id, person_name, kind, room_id, checked_in_at`,
-      [orgId, eventId, resolvedClientId, name, kind, guardian, securityHash, roomId]
+       RETURNING id, person_name, kind, room_id, checked_in_at,
+                 to_char(attended_date, 'YYYY-MM-DD') AS attended_date,
+                 attended_title,
+                 to_char(attended_time, 'HH24:MI') AS attended_time`,
+      [orgId, eventId, resolvedClientId, name, kind, guardian, securityHash, roomId,
+       attendedDate, attendedTitle, attendedTime]
     )
     if (rowCount === 0) {
       const { rows: existing } = await pool.query(
-        `SELECT id, person_name, kind, room_id, checked_in_at
+        `SELECT id, person_name, kind, room_id, checked_in_at,
+                to_char(attended_date, 'YYYY-MM-DD') AS attended_date,
+                attended_title,
+                to_char(attended_time, 'HH24:MI') AS attended_time
            FROM ochr_checkins
           WHERE organization_id = $1 AND calendar_event_id = $2 AND client_id = $3
             AND checked_out_at IS NULL`,
@@ -264,6 +276,11 @@ kioskPublicRouter.post('/:token/checkin', checkinLimiter, async (req, res) => {
     }
     res.status(201).json({ ...rows[0], security_code: securityCode })
   } catch (err) {
+    if (err?.code === '23503' && /calendar_event/i.test(String(err.constraint || ''))) {
+      return res.status(409).json({
+        error: 'That service is no longer on the schedule. Nobody was checked in.',
+      })
+    }
     monitor.error('kiosk.public.checkin', err)
     res.status(500).json({ error: 'Failed to check in' })
   }

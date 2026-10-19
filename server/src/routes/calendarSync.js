@@ -5,6 +5,7 @@ import ical from 'ical-generator'
 import { requireIntParam } from '../utils/params.js'
 import { apiBase } from '../utils/publicUrl.js'
 import { memberByEmail } from '../directory/memberIdentity.js'
+import { monitor } from '../monitoring/index.js'
 
 // Two sub-routers:
 // - publicRouter : the ICS subscription URL. Authenticated by the opaque
@@ -32,8 +33,9 @@ const authRouter   = Router()
 
 async function generateCalendarToken(clientId) {
   const token = crypto.randomBytes(24).toString('hex')
-  await pool.query(`UPDATE ochr_clients SET calendar_token = $1 WHERE id = $2
+  const { rowCount } = await pool.query(`UPDATE ochr_clients SET calendar_token = $1 WHERE id = $2 AND deidentified_at IS NULL
        -- tenancy: the member id was org-verified earlier in this handler before the token is rotated.`, [token, clientId])
+  if (!rowCount) throw Object.assign(new Error('Member contact data has been minimized'), { profileMinimized: true })
   return token
 }
 
@@ -42,12 +44,14 @@ function toDateOnly(d) {
   return d.toISOString ? d.toISOString().slice(0, 10) : String(d).slice(0, 10)
 }
 
-function generateICS(client, tasks, events, scheduleEvents) {
+export function generateICS(client, tasks, events, scheduleEvents) {
   const calendar = ical({ name: `${client.name} – OpenChurch` })
 
   // Tasks → all-day entries on their due date
   for (const task of tasks) {
     if (!task.due_date) continue
+    // 'YYYY-MM-DD' is UTC midnight, so the all-day value stays that civil
+    // day. Local components (new Date(y, m - 1, d)) shift it east of UTC.
     const date = new Date(task.due_date)
     calendar.createEvent({
       start: date,
@@ -105,7 +109,7 @@ publicRouter.get('/:token.ics', async (req, res) => {
   try {
     const { token } = req.params
     const { rows: clientRows } = await pool.query(
-      `SELECT * FROM ochr_clients WHERE calendar_token = $1
+      `SELECT c.id, c.name, c.organization_id FROM ochr_clients c JOIN ochr_organizations o ON o.id = c.organization_id WHERE c.calendar_token = $1 AND c.deidentified_at IS NULL AND o.held_at IS NULL
        -- tenancy: the token IS the capability for the public ICS feed — there is no session to take an org from. calendar_token is unique and every downstream query in this handler is scoped to the org this row returns.`,
       [token]
     )
@@ -172,7 +176,7 @@ publicRouter.get('/:token.ics', async (req, res) => {
     res.setHeader('Content-Disposition', `attachment; filename="${client.name.replace(/\s+/g, '_')}_calendar.ics"`)
     res.send(icsContent)
   } catch (err) {
-    console.error(err)
+    monitor.error('calendarSync.feed', err)
     res.status(500).send('Failed to generate calendar')
   }
 })
@@ -236,7 +240,7 @@ authRouter.get('/link/:clientId', async (req, res) => {
     res.json({ url: buildIcsUrl(base, calendar_token), token: calendar_token })
   } catch (err) {
     console.error(err)
-    res.status(500).json({ error: 'Failed to generate calendar link' })
+    res.status(err.profileMinimized ? 409 : 500).json({ error: err.profileMinimized ? 'This profile contact data has been minimized.' : 'Failed to generate calendar link' })
   }
 })
 
@@ -268,7 +272,7 @@ authRouter.get('/my-link', async (req, res) => {
     res.json({ url: buildIcsUrl(base, calendar_token), token: calendar_token })
   } catch (err) {
     console.error(err)
-    res.status(500).json({ error: 'Failed to generate calendar link' })
+    res.status(err.profileMinimized ? 409 : 500).json({ error: err.profileMinimized ? 'This profile contact data has been minimized.' : 'Failed to generate calendar link' })
   }
 })
 
@@ -290,7 +294,7 @@ authRouter.post('/rotate/:clientId', async (req, res) => {
     res.json({ url: buildIcsUrl(base, token), token })
   } catch (err) {
     console.error(err)
-    res.status(500).json({ error: 'Failed to rotate calendar token' })
+    res.status(err.profileMinimized ? 409 : 500).json({ error: err.profileMinimized ? 'This profile contact data has been minimized.' : 'Failed to rotate calendar token' })
   }
 })
 
@@ -313,7 +317,7 @@ authRouter.post('/my-rotate', async (req, res) => {
     res.json({ url: buildIcsUrl(base, token), token })
   } catch (err) {
     console.error(err)
-    res.status(500).json({ error: 'Failed to rotate calendar token' })
+    res.status(err.profileMinimized ? 409 : 500).json({ error: err.profileMinimized ? 'This profile contact data has been minimized.' : 'Failed to rotate calendar token' })
   }
 })
 

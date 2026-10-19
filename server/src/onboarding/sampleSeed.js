@@ -20,8 +20,21 @@
 // Names, phone numbers, amounts, dates and structure are shared, because
 // none of those belong to a tradition.
 //
+import {
+  addCivilDays,
+  civilDateInTimeZone,
+  resolveParishTimeZone,
+  weekdayInTimeZone,
+} from '../utils/timezone.js'
+
 // Called *after* the signup transaction commits — a seed failure
 // should never block account creation. See server/src/routes/auth.js.
+//
+// Dates are civil days in the org's timezone
+// (ochr_organizations.timezone). A missing, blank, or invalid zone
+// uses UTC — the column default and the only configured parish-clock
+// fallback; there is no separate app timezone setting. See
+// resolveParishTimeZone in utils/timezone.js.
 
 // ── Members ──────────────────────────────────────────────────
 //
@@ -88,10 +101,11 @@ export function seedVocab(tradition) {
   return SEED_VOCAB[tradition] ?? SEED_VOCAB.general
 }
 
-function daysFromNow(n) {
-  const d = new Date()
-  d.setDate(d.getDate() + n)
-  return d.toISOString().slice(0, 10)
+// Civil YYYY-MM-DD, `n` days from `now` in the parish timezone.
+// Not `toISOString()`: that string is the UTC day, and an evening
+// west of UTC lands on the next morning.
+function daysFromNow(n, now, timeZone) {
+  return addCivilDays(civilDateInTimeZone(now, timeZone), n)
 }
 
 // Returns YYYY-MM-DD for a date with month/day from `mdRef` (e.g. a
@@ -102,9 +116,9 @@ function birthYearOffsetFrom(mdRef, yearsAgo) {
   return d.toISOString().slice(0, 10)
 }
 
-function buildSampleMembers(v) {
-  const upcoming1 = daysFromNow(2)   // birthday in 2 days — demos birthday job
-  const upcoming2 = daysFromNow(5)   // birthday in 5 days
+function buildSampleMembers(v, now, timeZone) {
+  const upcoming1 = daysFromNow(2, now, timeZone)   // birthday in 2 days — demos birthday job
+  const upcoming2 = daysFromNow(5, now, timeZone)   // birthday in 5 days
   return [
     {
       name: '[Sample] Maria Garcia', email: 'maria.sample@example.com',
@@ -158,7 +172,7 @@ function buildSampleMembers(v) {
       name: '[Sample] Rachel Goldberg', email: 'rachel.sample@example.com',
       phone: '(555) 010-2039', role: v.roles[8], tags: 'newcomer',
       birth_date: '1995-07-22',
-      joined_date: daysFromNow(-90),                // joined recently
+      joined_date: daysFromNow(-90, now, timeZone), // joined recently
     },
     {
       name: '[Sample] Daniel Martinez', email: 'daniel.sample@example.com',
@@ -176,7 +190,7 @@ function buildSampleMembers(v) {
       name: '[Sample] Hassan Ahmed', email: 'hassan.sample@example.com',
       phone: '(555) 010-2042', role: v.roles[11], tags: 'newcomer',
       birth_date: '2001-10-30',
-      joined_date: daysFromNow(-30),                // very new
+      joined_date: daysFromNow(-30, now, timeZone), // very new
     },
   ]
 }
@@ -196,22 +210,22 @@ function buildSampleTasks(v) { return [
 // One-off events surfaced on the Events page. The recurring entries
 // live on ochr_calendar_events (Schedule page) below — different table.
 
-function nextDowStr(dow) {
-  const now = new Date()
-  const today = now.getDay()
+// Next `dow` (0 = Sunday) strictly after the civil today in the parish
+// timezone. Today itself rolls forward one week, matching the previous
+// seed: a Sunday signup's sample Mass is the following Sunday.
+function nextDowStr(dow, now, timeZone) {
+  const today = weekdayInTimeZone(now, timeZone)
   let offset = (dow - today + 7) % 7
   if (offset === 0) offset = 7
-  const d = new Date(now)
-  d.setDate(d.getDate() + offset)
-  return d.toISOString().slice(0, 10)
+  return addCivilDays(civilDateInTimeZone(now, timeZone), offset)
 }
 
-function buildSampleEvents(v) {
+function buildSampleEvents(v, now, timeZone) {
   return [
-    { title: `[Sample] ${v.service}`,               service_division: v.worship,   date: nextDowStr(0),   time: '10:00', location: `Main ${v.sanctuary}` },
-    { title: `[Sample] Wednesday ${v.study}`,       service_division: v.formation, date: nextDowStr(3),   time: '19:00', location: v.hall },
-    { title: '[Sample] Potluck Supper',             service_division: 'Community', date: nextDowStr(6),   time: '17:30', location: v.hall },
-    { title: '[Sample] Volunteer Training',         service_division: v.formation, date: daysFromNow(14), time: '14:00', location: v.hall },
+    { title: `[Sample] ${v.service}`,               service_division: v.worship,   date: nextDowStr(0, now, timeZone),   time: '10:00', location: `Main ${v.sanctuary}` },
+    { title: `[Sample] Wednesday ${v.study}`,       service_division: v.formation, date: nextDowStr(3, now, timeZone),   time: '19:00', location: v.hall },
+    { title: '[Sample] Potluck Supper',             service_division: 'Community', date: nextDowStr(6, now, timeZone),   time: '17:30', location: v.hall },
+    { title: '[Sample] Volunteer Training',         service_division: v.formation, date: daysFromNow(14, now, timeZone), time: '14:00', location: v.hall },
   ]
 }
 
@@ -223,13 +237,11 @@ function buildSampleEvents(v) {
 // once. 2-3 of the seeded members get assigned so each of their
 // personal calendar feeds returns content.
 
-function buildRecurringSundayDates(weekCount = 8) {
-  const seed = nextDowStr(0)
+function buildRecurringSundayDates(weekCount, now, timeZone) {
+  const seed = nextDowStr(0, now, timeZone)
   const dates = []
   for (let i = 0; i < weekCount; i++) {
-    const d = new Date(seed + 'T00:00:00Z')
-    d.setUTCDate(d.getUTCDate() + i * 7)
-    dates.push(d.toISOString().slice(0, 10))
+    dates.push(addCivilDays(seed, i * 7))
   }
   return dates
 }
@@ -302,7 +314,10 @@ function buildSampleStaff(v) { return [
 // marker is set BEFORE the rows are written — a seed that crashes
 // half-way leaves the org marked, which is the safe direction to fail
 // (a partial sample set is cosmetic; a resurrected one is data loss).
-export async function seedSampleData(db, organizationId, tradition = 'general') {
+export async function seedSampleData(db, organizationId, tradition = 'general', options = {}) {
+  const now = options?.now instanceof Date && !Number.isNaN(options.now.getTime())
+    ? options.now
+    : new Date()
   const v = seedVocab(tradition)
   const { rows: claimed } = await db.query(
     `UPDATE ochr_organizations
@@ -313,10 +328,16 @@ export async function seedSampleData(db, organizationId, tradition = 'general') 
   )
   if (!claimed.length) return { skipped: true }
 
+  const { rows: tzRows } = await db.query(
+    'SELECT timezone FROM ochr_organizations WHERE id = $1',
+    [organizationId]
+  )
+  const timeZone = resolveParishTimeZone(tzRows[0]?.timezone)
+
   // Members — keep insertion order so we can grab the first three
   // ids for the assignment list below.
   const memberIds = []
-  for (const m of buildSampleMembers(v)) {
+  for (const m of buildSampleMembers(v, now, timeZone)) {
     const { rows } = await db.query(
       `INSERT INTO ochr_clients (organization_id, name, email, phone, role, tags, birth_date, joined_date)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
@@ -328,7 +349,7 @@ export async function seedSampleData(db, organizationId, tradition = 'general') 
   // Events page entries (ochr_events) + roster assignments on the
   // Sunday service so the personal calendar feed has content for
   // those members.
-  const events = buildSampleEvents(v)
+  const events = buildSampleEvents(v, now, timeZone)
   for (const e of events) {
     const { rows } = await db.query(
       `INSERT INTO ochr_events (organization_id, title, service_division, date, time, location)
@@ -352,7 +373,7 @@ export async function seedSampleData(db, organizationId, tradition = 'general') 
   // Schedule page entries (ochr_calendar_events) — 8-week recurring
   // Sunday service. Seed first, stamp self-parent_id, then generate
   // the seven children with the seed's id as parent.
-  const sundays = buildRecurringSundayDates(8)
+  const sundays = buildRecurringSundayDates(8, now, timeZone)
   const seedAssignees = JSON.stringify(memberIds.slice(0, 3))
   const { rows: seedRow } = await db.query(
     `INSERT INTO ochr_calendar_events

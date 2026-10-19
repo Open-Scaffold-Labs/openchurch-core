@@ -5,6 +5,8 @@ import { useLocale } from '../i18n'
 import { apiUrl } from '../api'
 
 // The First Parish Setup Record — a printable artifact, not a dashboard.
+// Print ≠ emailed (OC-READY-01-023 / STMT-01): screen chrome says this is
+// print/PDF only. The paper footer stays a live print marker, not a send.
 //
 // The case it exists for is a volunteer handing the parish office to the
 // next volunteer, often on paper, often years later. So it prints, and
@@ -82,6 +84,11 @@ export default function SetupRecord() {
         >
           <Printer size={15} aria-hidden="true" /> {t('settled.print')}
         </button>
+        {/* Print ≠ emailed (OC-READY-01-023 / STMT-01 pattern). Screen
+            chrome only — the paper stays a live print marker. */}
+        <p data-testid="setup-record-print-not-emailed" className="w-full text-sm text-ink-500 dark:text-parchment-300/70 print:hidden">
+          {t('settled.printHonesty')}
+        </p>
       </div>
 
       <article className="bg-white text-ink-900 max-w-3xl mx-auto p-8 sm:p-10 shadow-warm-lg print:shadow-none print:p-0">

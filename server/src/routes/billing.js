@@ -7,6 +7,8 @@
 //   authRouter   — GET /status (any role), POST /checkout + /portal
 //                  (admin-only, applied at the app.js mount)
 
+import { monitor } from '../monitoring/index.js'
+import { storeVerifiedEvent, applyStoredEvent } from '../billing/webhookReceipts.js'
 import { Router } from 'express'
 import express from 'express'
 import pool from '../db.js'
@@ -14,7 +16,7 @@ import { getPlan, PLANS } from '../billing/plans.js'
 import {
   createCheckoutSession,
   createPortalSession,
-  handleWebhook,
+  verifyWebhook,
 } from '../billing/provider.js'
 
 // Where the client lives — used to build success/cancel/return URLs.
@@ -39,22 +41,63 @@ export const publicRouter = Router()
 // with backoff for up to three days; that is the retry, and it costs a
 // log line. Every handler here is idempotent (uq_donations_org_payment_ref,
 // COALESCE updates), so a redelivery cannot double-apply.
+//
+// Since Stage 6 (Oct 2026) provider retries are no longer the only record:
+// every verified event is stored in ochr_billing_event_receipts before it is
+// applied (billing/webhookReceipts.js). An event for an organization on hold
+// is stored, acknowledged and left unapplied ('held'); operators reconcile
+// from that table (routes/maintenance.js).
 publicRouter.post(
   '/webhook',
   express.raw({ type: '*/*', limit: '1mb' }),
   async (req, res) => {
+    let verified
     try {
       const signature = req.headers['stripe-signature']
                      || req.headers['x-signature']
                      || req.headers['webhook-signature']
                      || null
-      const result = await handleWebhook({ rawBody: req.body, signature })
-      res.json(result)
+      verified = await verifyWebhook({ rawBody: req.body, signature })
     } catch (err) {
       console.error('billing webhook failed:', err)
-      // Bad signature = 400 (fail closed; a retry would carry the same
-      // bad signature). Anything else = 500 so the provider redelivers.
-      res.status(err.statusCode === 400 ? 400 : 500).json({ received: false, error: err.message })
+      // Bad signature = 400 (fail closed; a retry would carry the same bad
+      // signature, and nothing is stored). Anything else = 5xx so the
+      // provider redelivers.
+      return res.status(err.statusCode === 400 ? 400 : 500).json({ received: false, error: err.message })
+    }
+    if (verified.result) return res.json(verified.result)
+
+    // Durable first (Stage 6): the event is stored before anything is
+    // applied and before the provider hears "received". If storing fails,
+    // say so with a 5xx and let the provider redeliver.
+    let receipt
+    try {
+      receipt = await storeVerifiedEvent(verified.event, req.body)
+    } catch (err) {
+      monitor.error('billing.webhook.store', err)
+      return res.status(500).json({ received: false, error: 'Event could not be stored; redeliver.' })
+    }
+    try {
+      const outcome = await applyStoredEvent(receipt.receiptId)
+      if (outcome.status === 'applied') {
+        return res.json({ ...(outcome.result ?? { received: true }), received: true, ...(outcome.duplicate ? { duplicate: true } : {}) })
+      }
+      if (outcome.status === 'deferred') return res.json(outcome.result)
+      if (outcome.inProgress) {
+        // Another delivery of this event is applying it right now. Stored;
+        // not yet known to be applied, so ask the provider to come back.
+        return res.status(503).json({ received: false, stored: true, in_progress: true })
+      }
+      if (outcome.status === 'held') {
+        // Kept, not applied: the organization is on hold. Acknowledged, so
+        // the provider stops; reconciliation reads it from the receipts.
+        return res.json({ received: true, stored: true, applied: false, reason: 'organization_on_hold' })
+      }
+      // Stored but not applied for another reason: redelivery retries it.
+      return res.status(500).json({ received: false, stored: true, error: outcome.error ?? 'Event was stored but not applied' })
+    } catch (err) {
+      monitor.error('billing.webhook.apply', err, { receiptId: receipt.receiptId })
+      return res.status(500).json({ received: false, stored: true, error: 'Event was stored but not applied' })
     }
   }
 )

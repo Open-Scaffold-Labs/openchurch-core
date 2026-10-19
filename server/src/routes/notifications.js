@@ -1,11 +1,18 @@
 import { Router } from 'express'
 import pool from '../db.js'
 import { requireIntParam } from '../utils/params.js'
+import { VIEWER_OPTIONS } from '../middleware/viewerScope.js'
 
 const router = Router()
 
 // GET /api/notifications
 router.get('/', async (req, res) => {
+  // Jarvis R9: this is the parish's staff activity feed (task and event
+  // assignments, with titles and member names), not a per-login inbox.
+  // Viewers may not read Events or Daily Tasks (VIEWER_OPTIONS.eventsTasks),
+  // so they get an empty bell rather than those titles. Flip that option
+  // and the feed opens with the pages it describes.
+  if (req.user?.role === 'viewer' && !VIEWER_OPTIONS.eventsTasks) return res.json([])
   try {
     const { rows } = await pool.query(`
       SELECT n.*, c.name AS member_name

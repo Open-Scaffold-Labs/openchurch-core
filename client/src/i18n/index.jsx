@@ -11,14 +11,15 @@
 // t(key, vars) resolves through four tiers, in order:
 //
 //   1. This TRADITION's override for the active language
-//   2. This tradition's English override
-//   3. The active language's shared string
+//   2. The active language's shared string
+//   3. This tradition's English override (only when the locale has no string)
 //   4. English, then the key itself
 //
 // A missing translation can never blank a screen, and a tradition that
-// overrides one key inherits the other ~640. Tiers 1-2 are the whole of
-// TRAD.1 on the client: the vocabulary seam was already here, built for
-// language, and tradition rides the same chain.
+// overrides one key inherits the other ~640. Tradition English must not
+// shadow a valid shared Spanish (or other locale) string — that was the
+// LOC-L1-01 defect: sparse `general.es` let `general.en['sheet.title']`
+// print "Intentions for the Week" on a Spanish sacristy sheet.
 //
 // dateLocale feeds toLocaleDateString so weekday and month names follow
 // the language everywhere dates are formatted.
@@ -27,6 +28,10 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState } 
 import { useAuth } from '../context/AuthContext'
 import { STRINGS } from './strings'
 import { TRADITION_STRINGS } from './traditions'
+
+function localeDict(locale) {
+  return STRINGS[locale] ?? STRINGS.en
+}
 
 const LocaleContext = createContext(null)
 
@@ -87,10 +92,10 @@ export function LocaleProvider({ children }) {
   }, [])
 
   const value = useMemo(() => {
-    const dict = STRINGS[locale] ?? STRINGS.en
+    const dict = localeDict(locale)
     const trad = TRADITION_STRINGS[tradition]
     const t = (key, vars) => {
-      let s = trad?.[locale]?.[key] ?? trad?.en?.[key] ?? dict[key] ?? STRINGS.en[key] ?? key
+      let s = trad?.[locale]?.[key] ?? dict[key] ?? trad?.en?.[key] ?? localeDict('en')[key] ?? key
       if (vars) for (const [k, v] of Object.entries(vars)) s = s.replaceAll(`{${k}}`, String(v))
       return s
     }
@@ -130,4 +135,30 @@ export function useLocale() {
   const ctx = useContext(LocaleContext)
   if (!ctx) throw new Error('useLocale must be used inside <LocaleProvider>')
   return ctx
+}
+
+// Inner ErrorBoundary and ToastProvider sit INSIDE LocaleProvider
+// (main.jsx) so an App-tree crash and toast chrome follow the live
+// locale spine (device override, public page, or parish default).
+// An outer ErrorBoundary wraps Auth + Locale so a crash in those
+// providers still shows recovery chrome. PageErrorBoundary is also
+// inside the provider. Same hook covers tests and any mount that is
+// still outside the spine (including the outer boundary): use the
+// live locale when present; otherwise the device override
+// (ochr_locale), which is the first term of LocaleProvider's own order.
+export function useOptionalLocale() {
+  const ctx = useContext(LocaleContext)
+  if (ctx) return ctx
+  let locale = 'en'
+  try {
+    const stored = localStorage.getItem('ochr_locale')
+    if (stored && STRINGS[stored]) locale = stored
+  } catch { /* private mode — stay on English */ }
+  const dict = localeDict(locale)
+  const t = (key, vars) => {
+    let s = dict[key] ?? localeDict('en')[key] ?? key
+    if (vars) for (const [k, v] of Object.entries(vars)) s = s.replaceAll(`{${k}}`, String(v))
+    return s
+  }
+  return { locale, t }
 }

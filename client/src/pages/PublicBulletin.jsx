@@ -11,10 +11,10 @@ import { useLocale } from '../i18n'
 // (drafts 404 server-side). Shell matches the other public pages —
 // parchment background, brand wordmark, "Powered by OpenChurch" footer.
 
-function fmtLong(iso) {
+function fmtLong(iso, dateLocale) {
   if (!iso) return ''
   const [y, m, d] = iso.slice(0, 10).split('-').map(Number)
-  return new Date(y, m - 1, d).toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })
+  return new Date(y, m - 1, d).toLocaleDateString(dateLocale, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })
 }
 
 function Section({ title, body }) {
@@ -30,18 +30,20 @@ function Section({ title, body }) {
 }
 
 export default function PublicBulletin() {
-  const { setPublicLocale } = useLocale()
+  // User-visible chrome goes through t(). Org name, section bodies,
+  // liturgical feast / season, and the bulletin date stay parish data.
+  const { t, dateLocale, setPublicLocale } = useLocale()
   const { slug } = useParams()
   const [data, setData]       = useState(null)
   const [loading, setLoading] = useState(true)
-  const [notFound, setNotFound] = useState(false)
+  const [err, setErr]         = useState('')
 
   useEffect(() => {
     let cancelled = false
     fetch(apiUrl(`/api/public/${slug}/bulletin`))
       .then(r => {
-        if (r.status === 404) { if (!cancelled) setNotFound(true); return null }
-        if (!r.ok) throw new Error(`${r.status}`)
+        if (r.status === 404) throw new Error('not-found')
+        if (!r.ok) throw new Error(`Failed (${r.status})`)
         return r.json()
       })
       .then(d => {
@@ -50,10 +52,10 @@ export default function PublicBulletin() {
         setPublicLocale(d.org?.locale)
         setData(d)
       })
-      .catch(() => { if (!cancelled) setNotFound(true) })
+      .catch(e => { if (!cancelled) setErr(e.message) })
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
-  }, [slug])
+  }, [slug, setPublicLocale])
 
   if (loading) {
     return (
@@ -63,14 +65,28 @@ export default function PublicBulletin() {
     )
   }
 
-  if (notFound || !data) {
+  if (err === 'not-found') {
     return (
       <div className="min-h-screen flex items-center justify-center bg-parchment-100 dark:bg-ink-900 p-6">
         <div className="max-w-md text-center space-y-3">
           <Newspaper className="mx-auto text-brass-500" size={36} />
-          <h1 className="text-xl font-bold text-ink-900 dark:text-parchment-50 font-display">No bulletin yet</h1>
+          <h1 className="text-xl font-bold text-ink-900 dark:text-parchment-50 font-display">{t('bulletin.notFound')}</h1>
           <p className="text-sm text-ink-700 dark:text-parchment-200">
-            This parish hasn't published a bulletin online. Check back soon.
+            {t('bulletin.notFoundBody')}
+          </p>
+        </div>
+      </div>
+    )
+  }
+
+  if (err || !data) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-parchment-100 dark:bg-ink-900 p-6">
+        <div className="max-w-md text-center space-y-3">
+          <Newspaper className="mx-auto text-brass-500" size={36} />
+          <h1 className="text-xl font-bold text-ink-900 dark:text-parchment-50 font-display">{t('bulletin.loadFailTitle')}</h1>
+          <p className="text-sm text-ink-700 dark:text-parchment-200">
+            {t('bulletin.loadFailBody')}
           </p>
         </div>
       </div>
@@ -94,9 +110,9 @@ export default function PublicBulletin() {
 
           <div className="p-6 sm:p-8">
             <header className="text-center pb-4 border-b border-parchment-300/60 dark:border-brass-900/30">
-              <p className="text-[11px] uppercase tracking-widest text-brass-600 dark:text-brass-300 font-semibold">Weekly Bulletin</p>
+              <p className="text-[11px] uppercase tracking-widest text-brass-600 dark:text-brass-300 font-semibold">{t('bulletin.title')}</p>
               <h1 className="font-display text-3xl font-semibold text-ink-900 dark:text-parchment-50 mt-1">{org?.name}</h1>
-              <p className="text-sm text-ink-500 dark:text-parchment-300/70 mt-1">{fmtLong(bulletin.date)}</p>
+              <p className="text-sm text-ink-500 dark:text-parchment-300/70 mt-1">{fmtLong(bulletin.date, dateLocale)}</p>
               {litLabel && (
                 <span className={`inline-flex items-center gap-1.5 mt-3 text-xs font-medium px-2.5 py-1 rounded-md border ${LIT_COLOR_TEXT[liturgical?.color] ?? LIT_COLOR_TEXT.White}`}>
                   <span className={`w-1.5 h-1.5 rounded-full ${LIT_COLOR_DOT[liturgical?.color] ?? LIT_COLOR_DOT_NONE}`} />
@@ -105,15 +121,15 @@ export default function PublicBulletin() {
               )}
             </header>
 
-            <Section title="Readings" body={bulletin.readings} />
-            <Section title="Announcements" body={bulletin.announcements} />
-            <Section title="Prayer & Mass Intentions" body={bulletin.intentions} />
-            <Section title="From the Pastor" body={bulletin.pastor_note} />
+            <Section title={t('bulletin.readings')} body={bulletin.readings} />
+            <Section title={t('bulletin.announcements')} body={bulletin.announcements} />
+            <Section title={t('bulletin.intentions')} body={bulletin.intentions} />
+            <Section title={t('bulletin.pastor')} body={bulletin.pastor_note} />
           </div>
         </div>
 
         <footer className="text-center text-[11px] text-ink-500 dark:text-parchment-300/60 pt-4">
-          Powered by OpenChurch
+          {t('bulletin.powered')}
         </footer>
       </motion.div>
     </div>

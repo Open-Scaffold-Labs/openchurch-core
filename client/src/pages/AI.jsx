@@ -8,9 +8,11 @@ import PageWrapper, { itemVariants } from '../components/PageWrapper'
 import { apiUrl } from '../api'
 import { useAuth } from '../context/AuthContext'
 import { useLocale } from '../i18n'
+import { aiRefusalMessage } from '../utils/aiRefusal'
 import { useToast } from '../components/ToastProvider'
 import AiQuotaMeter from '../components/AiQuotaMeter'
 import LiturgicalSuggestion from '../components/LiturgicalSuggestion'
+import { seasonLabel, colorLabel } from '../i18n/liturgical'
 import { useConfirm } from '../components/ConfirmProvider'
 
 // Type definitions — the label shown to the user, the icon, and the
@@ -71,23 +73,28 @@ export default function AI() {
   const [loading, setLoading] = useState(false)
   const [error, setError]     = useState('')
   const [history, setHistory] = useState([])
+  const [historyState, setHistoryState] = useState('ok') // ok | adminOnly | failed
   // Bumped after each successful generate so the AiQuotaMeter
   // re-fetches and ticks up.
   const [quotaKey, setQuotaKey] = useState(0)
   const { canWrite } = useAuth()
   const toast = useToast()
   const ask = useConfirm()
-  const { t } = useLocale()
+  const { t, tradition } = useLocale()
 
   const current = typeMeta(type)
 
   async function loadHistory() {
     try {
       const res = await fetch(apiUrl('/api/ai/generations?limit=20'))
-      const data = res.ok ? await res.json() : { rows: [] }
-      setHistory(Array.isArray(data?.rows) ? data.rows : [])
+      if (res.status === 403) { setHistoryState('adminOnly'); return }
+      if (!res.ok) { setHistoryState('failed'); return }
+      const data = await res.json()
+      if (!Array.isArray(data?.rows)) { setHistoryState('failed'); return }
+      setHistory(data.rows)
+      setHistoryState('ok')
     } catch {
-      setHistory([])
+      setHistoryState('failed')
     }
   }
 
@@ -133,11 +140,15 @@ export default function AI() {
         setError(data.error || t('aist.limit'))
         setQuotaKey(k => k + 1)
       } else if (!res.ok) {
-        setError(data.error || t('aist.failed'))
+        setError(aiRefusalMessage(t, data, 'aist.failed'))
       } else {
         setOutput(data.output || '')
         setMeta({ provider: data.provider, model: data.model, created_at: data.created_at })
-        loadHistory()
+        if (historyState === 'adminOnly' && data.id) {
+          setHistory(h => [{ id: data.id, type, prompt, output: data.output, created_at: data.created_at }, ...h])
+        } else {
+          loadHistory()
+        }
         setQuotaKey(k => k + 1)
       }
     } catch (err) {
@@ -294,8 +305,8 @@ export default function AI() {
                   {preachLit && (
                     <span className="inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-md bg-brass-50 dark:bg-brass-900/20 border border-brass-200/70 dark:border-brass-800/40 text-ink-700 dark:text-parchment-200">
                       <BookOpen size={11} className="text-brass-700 dark:text-brass-300" />
-                      {preachLit.feast_name ? `${preachLit.feast_name} · ` : ''}{preachLit.season}
-                      {preachLit.color ? ` · ${preachLit.color}` : ''}
+                      {preachLit.feast_name ? `${preachLit.feast_name} · ` : ''}{seasonLabel(t, preachLit.season, { tradition, block: preachLit.ordinary_block })}
+                      {preachLit.color ? ` · ${colorLabel(t, preachLit.color)}` : ''}
                     </span>
                   )}
                 </div>
@@ -374,7 +385,11 @@ export default function AI() {
                 {history.length}
               </span>
             </div>
-            {history.length === 0 ? (
+            {historyState !== 'ok' && history.length === 0 ? (
+              <p role="status" className="px-5 py-6 text-xs text-ink-600 dark:text-parchment-300/80 leading-relaxed">
+                {t(historyState === 'adminOnly' ? 'aist.historyAdminOnly' : 'aist.historyFailed')}
+              </p>
+            ) : history.length === 0 ? (
               <div className="px-5 py-10 text-center">
                 <div className="inline-flex w-10 h-10 rounded-xl bg-church-50 dark:bg-church-900/40 items-center justify-center text-church-800 dark:text-brass-300 mb-3">
                   <Feather size={16} />

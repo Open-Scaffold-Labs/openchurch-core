@@ -50,7 +50,7 @@ async function resolveToken(client, token) {
             o.locale AS organization_locale
        FROM ochr_clients c
        JOIN ochr_organizations o ON o.id = c.organization_id
-      WHERE c.swap_token = $1`,
+      WHERE c.swap_token = $1 AND o.held_at IS NULL`,
     [token]
   )
   return rows[0] ?? null

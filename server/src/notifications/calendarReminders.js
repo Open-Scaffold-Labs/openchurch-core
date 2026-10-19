@@ -66,7 +66,7 @@ export async function syncEventReminders(organizationId, eventId) {
               (e.date + e.start_time - (o.reminder_lead_hours || ' hours')::interval) AS remind_at
          FROM ochr_calendar_events e
          JOIN ochr_organizations o ON o.id = e.organization_id
-        WHERE e.id = $1 AND e.organization_id = $2`,
+        WHERE e.id = $1 AND e.organization_id = $2 AND o.held_at IS NULL`,
       [eventId, organizationId]
     )
     const ev = evs[0]
@@ -187,7 +187,7 @@ export async function notifyAssignmentAdded(organizationId, eventId, memberIds) 
           },
         })
       } catch (err) {
-        monitor.error('notify.calendar_assignment_added', err, { organizationId, recipient: m.email })
+        monitor.error('notify.calendar_assignment_added', err, { organizationId, memberId: m.id ?? null })
       }
     }
   } catch (err) {

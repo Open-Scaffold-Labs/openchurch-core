@@ -1,5 +1,6 @@
+import { viewerMayRead } from '../auth/viewerPages'
 import { useCallback, useEffect, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   Users, Clock, Heart, CheckSquare, Calendar, ArrowUpRight,
@@ -9,6 +10,7 @@ import {
   Info, Loader2, X, Church, Printer, RotateCcw,
 } from 'lucide-react'
 import PageWrapper from '../components/PageWrapper'
+import EmptyState from '../components/EmptyState'
 import DailyVerseCard from '../components/DailyVerseCard'
 import NextOnCalendar from '../components/NextOnCalendar'
 import SacramentAnniversaries from '../components/SacramentAnniversaries'
@@ -21,8 +23,39 @@ import { useConfirm } from '../components/ConfirmProvider'
 import { useToast } from '../components/ToastProvider'
 import { useLocale } from '../i18n'
 import { apiUrl } from '../api'
-import { todayLocalISO, parseLocalDate } from '../utils/dates'
-import { initials } from '../utils/format'
+import { todayLocalISO, parseStoredDate, parseLocalDate } from '../utils/dates'
+
+const VIEWER_EVENTS_TASKS = viewerMayRead('/api/events') && viewerMayRead('/api/tasks')
+import { initials, loadList, memberRosterUnreadable } from '../utils/format'
+
+// Due copy for a task DATE. `now` is injectable so a US-evening test
+// can prove the label is the stored day, not UTC midnight.
+export function dueLabelFor(due_date, now = new Date()) {
+  if (!due_date) return null
+  const today = new Date(now)
+  today.setHours(0, 0, 0, 0)
+  const d = parseStoredDate(due_date) ?? parseLocalDate(due_date)
+  d.setHours(0, 0, 0, 0)
+  const diff = Math.round((d - today) / 86400000)
+  if (diff < 0)  return { text: `${Math.abs(diff)}d overdue`, cls: 'text-rose-500 dark:text-rose-400' }
+  if (diff === 0) return { text: 'Due today',                  cls: 'text-amber-700 dark:text-amber-400' }
+  if (diff === 1) return { text: 'Due tomorrow',               cls: 'text-amber-700 dark:text-amber-300' }
+  return { text: `Due in ${diff}d`, cls: 'text-ink-500 dark:text-parchment-300/70' }
+}
+
+// Upcoming is the event's civil day on or after local today. A DATE
+// parsed with new Date() is the previous evening west of UTC, so a
+// same-day event would land in the past.
+export function splitEventsByDay(events, now = new Date()) {
+  const todayLocalMidnight = new Date(now)
+  todayLocalMidnight.setHours(0, 0, 0, 0)
+  const eventDay = (value) => parseStoredDate(value) ?? parseLocalDate(value)
+  const list = events ?? []
+  return {
+    upcoming: list.filter(e => e.date && eventDay(e.date) >= todayLocalMidnight),
+    past: list.filter(e => e.date && eventDay(e.date) < todayLocalMidnight),
+  }
+}
 
 // ── Shared helpers ────────────────────────────────────────────
 const fadeUp = (i = 0) => ({
@@ -50,6 +83,15 @@ function firstName(fullName) {
   if (!fullName || typeof fullName !== 'string') return null
   const head = fullName.trim().split(/\s+/)[0]
   return head || null
+}
+
+// Profile hop from a name the dashboard already has. Only a positive
+// integer id becomes a person URL — a missing or garbled id is not a
+// member we invent from the label.
+export function memberProfileHref(id) {
+  const n = typeof id === 'number' ? id : typeof id === 'string' && id.trim() !== '' ? Number(id) : NaN
+  if (!Number.isInteger(n) || n <= 0) return null
+  return `/clients/${n}`
 }
 
 // ── Shared card components ────────────────────────────────────
@@ -148,14 +190,7 @@ function UrgentTasks({ tasks }) {
   }
 
   function dueLabel(due_date) {
-    if (!due_date) return null
-    const d = new Date(due_date)
-    d.setHours(0, 0, 0, 0)
-    const diff = Math.round((d - today) / 86400000)
-    if (diff < 0)  return { text: `${Math.abs(diff)}d overdue`, cls: 'text-rose-500 dark:text-rose-400' }
-    if (diff === 0) return { text: 'Due today',                  cls: 'text-amber-700 dark:text-amber-400' }
-    if (diff === 1) return { text: 'Due tomorrow',               cls: 'text-amber-700 dark:text-amber-300' }
-    return { text: `Due in ${diff}d`, cls: 'text-ink-500 dark:text-parchment-300/70' }
+    return dueLabelFor(due_date, today)
   }
 
   if (urgent.length === 0 && doneIds.size === 0) return null
@@ -244,7 +279,7 @@ function UrgentTasks({ tasks }) {
 }
 
 // ── Daily Briefing ────────────────────────────────────────────
-function DailyBriefing({ data }) {
+export function DailyBriefing({ data }) {
   const { t, dateLocale } = useLocale()
   const today   = new Date()
   // Local day key — toISOString() gives the UTC day, which misclassifies
@@ -259,7 +294,9 @@ function DailyBriefing({ data }) {
   const todayServices = (data.schedule  ?? []).filter(s => s.day_of_week === dayName)
   const pendingTasks  = (data.tasks     ?? []).filter(t => t.status !== 'COMPLETED')
   const highTasks     = pendingTasks.filter(t => t.priority === 'HIGH')
-  const newMembers    = (data.members   ?? []).filter(m => {
+  const rosterUnreadable = memberRosterUnreadable(data.members, data.membersFailed)
+  const memberRows = Array.isArray(data.members) ? data.members : []
+  const newMembers = rosterUnreadable ? [] : memberRows.filter(m => {
     return (today - new Date(m.created_at)) / 86400000 <= 7
   })
 
@@ -273,10 +310,12 @@ function DailyBriefing({ data }) {
     {
       id: 'tasks', icon: CheckSquare, color: ROW_TILE, to: '/tasks',
       label: t('dash.row.tasks'),
-      summary: pendingTasks.length === 0
-        ? t('dash.sum.tasksDone')
-        : `${t('dash.sum.pending', { n: pendingTasks.length })}${highTasks.length ? ` · ${t('dash.urgentCount', { n: highTasks.length })}` : ''}`,
-      status: highTasks.length > 0 ? 'warn' : pendingTasks.length > 0 ? 'active' : 'clear',
+      summary: data.tasksFailed
+        ? t('dash.tasksUnread')
+        : pendingTasks.length === 0
+          ? t('dash.sum.tasksDone')
+          : `${t('dash.sum.pending', { n: pendingTasks.length })}${highTasks.length ? ` · ${t('dash.urgentCount', { n: highTasks.length })}` : ''}`,
+      status: data.tasksFailed ? 'warn' : highTasks.length > 0 ? 'warn' : pendingTasks.length > 0 ? 'active' : 'clear',
       items: pendingTasks.slice(0, 3).map(t => ({
         label: t.title,
         sub: t.category.replace(/_/g, ' '),
@@ -286,10 +325,12 @@ function DailyBriefing({ data }) {
     {
       id: 'cal', icon: Clock, color: ROW_TILE, to: '/schedule',
       label: t('dash.row.events'),
-      summary: todayEvents.length === 0
-        ? t('dash.sum.noEvents')
-        : todayEvents.length === 1 ? t('dash.sum.events1') : t('dash.sum.eventsN', { n: todayEvents.length }),
-      status: todayEvents.length > 0 ? 'active' : 'clear',
+      summary: data.calEventsFailed
+        ? t('dash.eventsUnread')
+        : todayEvents.length === 0
+          ? t('dash.sum.noEvents')
+          : todayEvents.length === 1 ? t('dash.sum.events1') : t('dash.sum.eventsN', { n: todayEvents.length }),
+      status: data.calEventsFailed ? 'warn' : todayEvents.length > 0 ? 'active' : 'clear',
       items: todayEvents.slice(0, 3).map(e => ({
         label: e.title,
         sub: e.start_time ? `${fmt(e.start_time)} – ${fmt(e.end_time)}` : '',
@@ -299,10 +340,12 @@ function DailyBriefing({ data }) {
     {
       id: 'services', icon: Calendar, color: ROW_TILE, to: '/schedule',
       label: t('dash.row.services', { day: dayShown }),
-      summary: todayServices.length === 0
-        ? t('dash.sum.noServices', { day: dayShown })
-        : todayServices.length === 1 ? t('dash.sum.services1') : t('dash.sum.servicesN', { n: todayServices.length }),
-      status: todayServices.length > 0 ? 'active' : 'clear',
+      summary: data.scheduleFailed
+        ? t('dash.servicesUnread', { day: dayShown })
+        : todayServices.length === 0
+          ? t('dash.sum.noServices', { day: dayShown })
+          : todayServices.length === 1 ? t('dash.sum.services1') : t('dash.sum.servicesN', { n: todayServices.length }),
+      status: data.scheduleFailed ? 'warn' : todayServices.length > 0 ? 'active' : 'clear',
       items: todayServices.slice(0, 3).map(s => ({
         label: s.title,
         sub: s.start_time ? fmt(s.start_time) : s.service_type ?? '',
@@ -312,16 +355,19 @@ function DailyBriefing({ data }) {
     {
       id: 'members', icon: Users, color: ROW_TILE, to: '/clients',
       label: t('dash.row.members'),
-      summary: newMembers.length === 0
-        ? t('dash.sum.noNew')
-        : t('dash.sum.new', { n: newMembers.length }),
-      status: newMembers.length > 0 ? 'active' : 'clear',
+      summary: rosterUnreadable
+        ? t('mem.listFailed')
+        : newMembers.length === 0
+          ? t('dash.sum.noNew')
+          : t('dash.sum.new', { n: newMembers.length }),
+      status: rosterUnreadable ? 'warn' : newMembers.length > 0 ? 'active' : 'clear',
       items: newMembers.slice(0, 3).map(m => ({
         label: m.name,
         sub: m.role ?? t('dash.member'),
         dot: 'bg-brass-400',
         avatar: initials(m.name),
         avatarColor: avatarColor(m.name),
+        href: memberProfileHref(m.id),
       })),
     },
     {
@@ -331,7 +377,12 @@ function DailyBriefing({ data }) {
       status: 'soon', items: [],
     },
     {
-      id: 'outreach', icon: MessageSquare, color: ROW_TILE, to: '/messages',
+      // Messages was removed as a dashboard tab on purpose (see TABS
+      // below). This row stays as an honest "not built" signal — it must
+      // not look like an empty inbox, and it must not send anyone to a
+      // blank /messages route. Direct /messages is a separate unfinished
+      // page; this row does not link there.
+      id: 'outreach', icon: MessageSquare, color: ROW_TILE,
       label: t('dash.row.outreach'),
       summary: t('dash.sum.outreach'),
       status: 'soon', items: [],
@@ -403,7 +454,16 @@ function DailyBriefing({ data }) {
                           ) : (
                             <div className={`w-1.5 h-1.5 rounded-full shrink-0 ${item.dot}`} />
                           )}
-                          <span className="text-xs font-medium text-ink-700 dark:text-parchment-200 truncate">{item.label}</span>
+                          {item.href ? (
+                            <Link
+                              to={item.href}
+                              className="text-xs font-medium text-ink-700 dark:text-parchment-200 truncate hover:text-church-700 dark:hover:text-brass-300"
+                            >
+                              {item.label}
+                            </Link>
+                          ) : (
+                            <span className="text-xs font-medium text-ink-700 dark:text-parchment-200 truncate">{item.label}</span>
+                          )}
                           {item.sub && <span className="text-xs text-ink-500 dark:text-parchment-300/70 shrink-0">{item.sub}</span>}
                         </div>
                       ))}
@@ -412,7 +472,7 @@ function DailyBriefing({ data }) {
                 </div>
 
                 {/* Arrow link */}
-                {row.status !== 'soon' && (
+                {row.status !== 'soon' && row.to && (
                   <Link to={row.to} aria-label={`Open ${row.label}`}
                     className="shrink-0 mt-1 p-1.5 -m-0.5 text-ink-300 dark:text-parchment-400/50 hover:text-ink-500 dark:hover:text-parchment-200 transition-colors">
                     <ChevronRight size={15} aria-hidden="true" />
@@ -431,6 +491,11 @@ function DailyBriefing({ data }) {
 
 function OverviewTab({ data }) {
   const { user } = useAuth()
+  // SP-021: Viewers see only what their role table gives them. Widgets that
+  // read events, tasks, the register, checklists or the packet are not shown.
+  const isViewer = user?.role === 'viewer'
+  // VIEWER_OPTIONS.eventsTasks (server/src/middleware/viewerScope.js).
+  const hideET = isViewer && !VIEWER_EVENTS_TASKS
   const { t } = useLocale()
   const name = firstName(user?.name)
   const h = new Date().getHours()
@@ -455,27 +520,27 @@ function OverviewTab({ data }) {
           <div className="hidden lg:block"><LiturgicalWidget /></div>
           {/* The Thursday Button (SPK.1) — one click from the morning
               view to the printable Sunday Packet. */}
-          <Link
-            to="/packet"
+          {!isViewer && <Link
+            to="/packet?from=dashboard"
             className="flex items-center justify-center gap-2 px-4 py-2.5 rounded-2xl border border-brass-600/40 dark:border-brass-700/40 bg-parchment-50 dark:bg-ink-900 text-sm font-semibold text-church-800 dark:text-brass-300 shadow-warm hover:bg-parchment-100 dark:hover:bg-ink-800/70 transition-colors"
           >
             <Printer size={15} /> {t('dash.packet')}
-          </Link>
-          <NextOnCalendar events={data.events} />
-          <SacramentAnniversaries days={30} />
+          </Link>}
+          {!hideET && <NextOnCalendar events={data.upcoming} failed={data.upcomingFailed} />}
+          {!isViewer && <SacramentAnniversaries days={30} />}
           <DailyVerseCard index={0} />
         </div>
       </div>
 
       {/* Urgent Tasks */}
-      <UrgentTasks tasks={data.tasks} />
+      {!hideET && <UrgentTasks tasks={data.tasks} />}
 
       {/* Daily operational checklists (OPS.1) — self-hides when the org
           has none and the viewer can't create one. */}
-      <DailyChecklists />
+      {!isViewer && <DailyChecklists />}
 
       {/* Daily Briefing */}
-      <DailyBriefing data={data} />
+      {!hideET && <DailyBriefing data={data} />}
 
       {/* Church at a glance — one slim totals strip. Replaced the
           old 4 big stat cards + 6 module cards: the stat cards
@@ -485,13 +550,13 @@ function OverviewTab({ data }) {
           part of "Quick Access" without the redundancy. */}
       <motion.div
         variants={fadeUp(2)} initial="hidden" animate="show"
-        className="grid grid-cols-3 rounded-2xl border border-parchment-300/50 dark:border-brass-900/30 bg-parchment-50 dark:bg-ink-900/90 shadow-warm divide-x divide-parchment-300/50 dark:divide-brass-900/30 overflow-hidden"
+        className={`grid ${hideET ? "grid-cols-1" : "grid-cols-3"} rounded-2xl border border-parchment-300/50 dark:border-brass-900/30 bg-parchment-50 dark:bg-ink-900/90 shadow-warm divide-x divide-parchment-300/50 dark:divide-brass-900/30 overflow-hidden`}
       >
         {[
           { to: '/clients', label: t('dash.glance.members'), value: data.memberStats?.total },
-          { to: '/events',  label: t('dash.glance.events'),  value: data.events?.length },
+          { to: '/events',  label: t('dash.glance.events'),  value: data.eventsFailed ? null : (Array.isArray(data.events) ? data.events.length : null) },
           { to: '/tasks',   label: t('dash.glance.tasks'),   value: data.taskStats?.total },
-        ].map(s => (
+        ].filter(s => !hideET || s.to === '/clients').map(s => (
           <Link
             key={s.to}
             to={s.to}
@@ -510,15 +575,18 @@ function OverviewTab({ data }) {
   )
 }
 
-function MembersTab({ data }) {
+export function MembersTab({ data }) {
+  const { t } = useLocale()
   const stats = data.memberStats
-  const members = (data.members ?? []).slice().sort((a, b) => new Date(b.created_at) - new Date(a.created_at)).slice(0, 6)
+  const rosterUnreadable = memberRosterUnreadable(data.members, data.membersFailed)
+  const memberRows = Array.isArray(data.members) ? data.members : []
+  const members = memberRows.slice().sort((a, b) => new Date(b.created_at) - new Date(a.created_at)).slice(0, 6)
 
-  const roles = (data.members ?? []).reduce((acc, m) => {
+  const roles = memberRows.reduce((acc, m) => {
     acc[m.role || 'Member'] = (acc[m.role || 'Member'] || 0) + 1
     return acc
   }, {})
-  const totalForRoles = data.members?.length || 1
+  const totalForRoles = memberRows.length || 1
 
   return (
     <div className="space-y-6">
@@ -545,28 +613,41 @@ function MembersTab({ data }) {
               View all <ChevronRight size={12} />
             </Link>
           </div>
-          {members.length === 0 ? (
+          {rosterUnreadable ? (
+            <p role="status" className="px-5 py-10 text-center text-sm text-amber-700 dark:text-amber-400">{t('mem.listFailed')}</p>
+          ) : members.length === 0 ? (
             <div className="px-5 py-10 text-center text-sm text-ink-500 dark:text-parchment-300/70">No members yet.</div>
           ) : (
             <div className="divide-y divide-parchment-200/50 dark:divide-brass-900/20">
-              {members.map((m, i) => (
-                <motion.div key={m.id} variants={fadeUp(i * 0.5)} initial="hidden" animate="show"
-                  className="flex items-center gap-3 px-5 py-3 hover:bg-parchment-100 dark:hover:bg-ink-800/60 transition-colors"
-                >
-                  <div className={`w-8 h-8 rounded-full flex items-center justify-center text-parchment-50 text-xs font-bold shrink-0 ${avatarColor(m.name)}`}>
-                    {initials(m.name)}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-semibold text-ink-900 dark:text-parchment-50 truncate">{m.name}</p>
-                    <p className="text-xs text-ink-500 dark:text-parchment-300/70 truncate">{m.email || m.role || 'Member'}</p>
-                  </div>
-                  <div className="flex items-center gap-2 shrink-0">
-                    {m.email && <Mail size={12} className="text-ink-300 dark:text-parchment-400/50" />}
-                    {m.phone && <Phone size={12} className="text-ink-300 dark:text-parchment-400/50" />}
-                    <span className="text-xs text-ink-500 dark:text-parchment-300/70">{timeAgo(m.created_at)}</span>
-                  </div>
-                </motion.div>
-              ))}
+              {members.map((m, i) => {
+                const href = memberProfileHref(m.id)
+                const rowClass = href
+                  ? 'flex items-center gap-3 px-5 py-3 hover:bg-parchment-100 dark:hover:bg-ink-800/60 transition-colors'
+                  : 'flex items-center gap-3 px-5 py-3'
+                const inner = (
+                  <>
+                    <div className={`w-8 h-8 rounded-full flex items-center justify-center text-parchment-50 text-xs font-bold shrink-0 ${avatarColor(m.name)}`}>
+                      {initials(m.name)}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-semibold text-ink-900 dark:text-parchment-50 truncate">{m.name}</p>
+                      <p className="text-xs text-ink-500 dark:text-parchment-300/70 truncate">{m.email || m.role || 'Member'}</p>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      {m.email && <Mail size={12} className="text-ink-300 dark:text-parchment-400/50" />}
+                      {m.phone && <Phone size={12} className="text-ink-300 dark:text-parchment-400/50" />}
+                      <span className="text-xs text-ink-500 dark:text-parchment-300/70">{timeAgo(m.created_at)}</span>
+                    </div>
+                  </>
+                )
+                return (
+                  <motion.div key={m.id ?? `unnamed-${i}`} variants={fadeUp(i * 0.5)} initial="hidden" animate="show">
+                    {href
+                      ? <Link to={href} className={rowClass}>{inner}</Link>
+                      : <div className={rowClass}>{inner}</div>}
+                  </motion.div>
+                )
+              })}
             </div>
           )}
         </motion.div>
@@ -576,7 +657,9 @@ function MembersTab({ data }) {
           className="bg-parchment-50 dark:bg-ink-900/90 rounded-2xl border border-parchment-300/50 dark:border-brass-900/30 shadow-warm-md p-5"
         >
           <h3 className="font-display text-lg font-semibold text-ink-900 dark:text-parchment-50 mb-4">By Role</h3>
-          {Object.entries(roles).length === 0 ? (
+          {rosterUnreadable ? (
+            <p role="status" className="text-xs text-amber-700 dark:text-amber-400">{t('mem.listFailed')}</p>
+          ) : Object.entries(roles).length === 0 ? (
             <p className="text-xs text-ink-500 dark:text-parchment-300/70">No data yet.</p>
           ) : (
             <div className="space-y-3">
@@ -605,27 +688,23 @@ function MembersTab({ data }) {
 }
 
 function EventsTab({ data }) {
-  // Compare at LOCAL midnight on both sides. `new Date('YYYY-MM-DD')`
-  // parses as UTC, which would misclassify a boundary-day event as
-  // past/upcoming; parseLocalDate keeps the event's date on its own
-  // local day (1.1).
-  const todayLocalMidnight = new Date(new Date().toDateString())
-  const upcoming = (data.events ?? [])
-    .filter(e => e.date && parseLocalDate(e.date) >= todayLocalMidnight)
-    .slice(0, 8)
-  const past = (data.events ?? [])
-    .filter(e => e.date && parseLocalDate(e.date) < todayLocalMidnight)
-    .slice(-3)
+  const { t } = useLocale()
+  const split = splitEventsByDay(data.eventsFailed ? [] : data.events)
+  const scheduleRows = data.scheduleFailed || !Array.isArray(data.schedule) ? [] : data.schedule
+  const calendarRows = data.calEventsFailed || !Array.isArray(data.calEvents) ? [] : data.calEvents
+  const weekFailed = !!(data.scheduleFailed || data.calEventsFailed)
+  const upcoming = split.upcoming.slice(0, 8)
+  const past = split.past.slice(-3)
 
   return (
     <div className="space-y-6">
       <GlanceStrip
         index={0}
         figures={[
-          { label: 'Events',    value: data.events?.length,          sub: 'All logged' },
-          { label: 'Upcoming',  value: upcoming.length,              sub: 'Scheduled ahead' },
-          { label: 'This Week', value: data.calEvents?.length ?? 0,  sub: 'On the calendar' },
-          { label: 'Services',  value: data.schedule?.length,        sub: 'Recurring' },
+          { label: 'Events',    value: data.eventsFailed ? null : (Array.isArray(data.events) ? data.events.length : null), sub: 'All logged' },
+          { label: 'Upcoming',  value: data.eventsFailed ? null : upcoming.length, sub: 'Scheduled ahead' },
+          { label: 'This Week', value: data.calEventsFailed ? null : calendarRows.length, sub: 'On the calendar' },
+          { label: 'Services',  value: data.scheduleFailed ? null : scheduleRows.length, sub: 'Recurring' },
         ]}
       />
 
@@ -640,7 +719,9 @@ function EventsTab({ data }) {
               Manage <ChevronRight size={12} />
             </Link>
           </div>
-          {upcoming.length === 0 ? (
+          {data.eventsFailed ? (
+            <p role="status" className="px-5 py-10 text-center text-sm text-amber-800 dark:text-amber-300">{t('dash.upcomingUnread')}</p>
+          ) : upcoming.length === 0 ? (
             <div className="px-5 py-10 text-center text-sm text-ink-500 dark:text-parchment-300/70">No upcoming events.</div>
           ) : (
             <div className="divide-y divide-parchment-200/50 dark:divide-brass-900/20">
@@ -678,11 +759,13 @@ function EventsTab({ data }) {
               Open calendar <ChevronRight size={12} />
             </Link>
           </div>
-          {(data.calEvents ?? []).length === 0 && (data.schedule ?? []).length === 0 ? (
+          {weekFailed && scheduleRows.length === 0 ? (
+            <p role="status" className="px-5 py-10 text-center text-sm text-amber-800 dark:text-amber-300">{t('dash.weekUnread')}</p>
+          ) : scheduleRows.length === 0 && calendarRows.length === 0 ? (
             <div className="px-5 py-10 text-center text-sm text-ink-500 dark:text-parchment-300/70">No schedule entries yet.</div>
           ) : (
             <div className="divide-y divide-parchment-200/50 dark:divide-brass-900/20">
-              {(data.schedule ?? []).slice(0, 6).map((s, i) => (
+              {scheduleRows.slice(0, 6).map((s, i) => (
                 <motion.div key={s.id} variants={fadeUp(i * 0.4)} initial="hidden" animate="show"
                   className="flex items-center gap-3 px-5 py-3"
                 >
@@ -726,13 +809,21 @@ const TABS = [
 // today + 6, in the browser's own timezone. Local, not UTC — a parish in
 // California asking at 5pm should get today's events, and toISOString()
 // would already have rolled over to tomorrow.
-function weekWindow() {
+function dayWindow(days) {
   const iso = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
   const today = new Date()
   const end   = new Date(today)
-  end.setDate(end.getDate() + 6)
+  end.setDate(end.getDate() + days)
   return { start: iso(today), end: iso(end) }
 }
+function weekWindow() { return dayWindow(6) }
+// SP-059: "Next on the Calendar" reads the calendar (the Schedule's
+// ochr_calendar_events), from today forward, soonest first. It used to read
+// /api/events (the separate events log), oldest first and capped at 200, so
+// a Sunday Mass on the Schedule could sit beside "Nothing scheduled yet."
+// The window only bounds the query; the server orders by date, start_time.
+const NEXT_ON_CALENDAR_DAYS = 365
+const NEXT_ON_CALENDAR_LIMIT = 3
 
 function SampleDataBanner({ onCleared }) {
   const ask = useConfirm()
@@ -849,12 +940,16 @@ export default function Dashboard() {
   // the Constitution rules out. Falls back to nothing rather than to a
   // placeholder: an absent org name is not worth inventing a label for.
   const { user } = useAuth()
+  const isViewer = user?.role === 'viewer'
+  // VIEWER_OPTIONS.eventsTasks (server/src/middleware/viewerScope.js).
+  const hideET = isViewer && !VIEWER_EVENTS_TASKS
   const parishName = user?.organization?.name || ''
   const [activeTab, setActiveTab] = useState('overview')
   const [data, setData] = useState({
-    members: null, memberStats: null,
-    events: null, schedule: null,
-    tasks: null, taskStats: null, calEvents: null,
+    members: null, membersFailed: false, memberStats: null,
+    events: null, eventsFailed: false, schedule: null, scheduleFailed: false,
+    tasks: null, tasksFailed: false, taskStats: null, calEvents: null, calEventsFailed: false,
+    upcoming: null, upcomingFailed: false,
   })
   // The dashboard load used to end in a bare `catch {}`. When it failed — a
   // parish office on bad wifi, a cold serverless start, a demo run from a
@@ -870,40 +965,58 @@ export default function Dashboard() {
     // returning non-ok used to fall back to an empty list, so one 500 looked
     // exactly like "this parish has no members yet".
     let degraded = false
-    const get = async (path, fallback) => {
+    const missed = { events: false, schedule: false, tasks: false, calEvents: false, upcoming: false }
+    const get = async (path, fallback, key) => {
       try {
         const r = await fetch(apiUrl(path))
-        if (!r.ok) { degraded = true; return fallback }
-        return await r.json()
-      } catch { degraded = true; return fallback }
+        if (!r.ok) { degraded = true; if (key) missed[key] = true; return fallback }
+        const body = await r.json()
+        // These four reads are bare arrays. A 200 object is not an empty day.
+        if (key && !Array.isArray(body)) { degraded = true; missed[key] = true; return fallback }
+        return body
+      } catch { degraded = true; if (key) missed[key] = true; return fallback }
     }
     // Computed once, not once per interpolation — two calls could straddle
     // midnight and ask for a window that starts after it ends.
     const week = weekWindow()
+    const ahead = dayWindow(NEXT_ON_CALENDAR_DAYS)
     try {
-      const [members, memberStats, events, schedule, tasks, taskStats, calEvents] = await Promise.all([
+      const [memberRoster, memberStats, events, schedule, tasks, taskStats, calEvents, upcoming] = await Promise.all([
         // Dashboard rollups only need a bounded sample — ask explicitly for
         // the max (200) rather than silently relying on the list endpoints'
-        // invisible safety cap.
-        get('/api/clients?limit=200', []),
+        // invisible safety cap. `get` returned a 200 `{}` or `null` as the
+        // roster, and `(members ?? [])` then said "No members yet."
+        loadList(apiUrl('/api/clients?limit=200')),
         get('/api/clients/stats', null),
-        get('/api/events?limit=200', []),
-        get('/api/schedule', []),
-        get('/api/tasks?limit=200', []),
-        get('/api/tasks/stats', null),
+        // SP-021: a Viewer's Dashboard reads only what the Help role table
+        // gives them; events and tasks are not asked for (they would 403).
+        hideET ? [] : get('/api/events?limit=200', [], 'events'),
+        get('/api/schedule', [], 'schedule'),
+        hideET ? [] : get('/api/tasks?limit=200', [], 'tasks'),
+        hideET ? null : get('/api/tasks/stats', null),
         // The calendar call used to have no window, which meant the "This
         // Week" figure below counted every event the parish had ever logged
         // — a number that only agreed with its own label during a parish's
         // first seven days, then drifted upward forever. Ask for the seven
         // days the card claims to be about.
-        get(`/api/calendar?start=${week.start}&end=${week.end}`, []),
+        get(`/api/calendar?start=${week.start}&end=${week.end}`, [], 'calEvents'),
+        hideET ? [] : get(`/api/calendar?start=${ahead.start}&end=${ahead.end}&limit=${NEXT_ON_CALENDAR_LIMIT}`, [], 'upcoming'),
       ])
-      setData({ members, memberStats, events, schedule, tasks, taskStats, calEvents })
+      if (!memberRoster.ok) degraded = true
+      setData({
+        members: memberRoster.data,
+        membersFailed: !memberRoster.ok,
+        memberStats, events, eventsFailed: missed.events,
+        schedule, scheduleFailed: missed.schedule,
+        tasks, tasksFailed: missed.tasks, taskStats,
+        calEvents, calEventsFailed: missed.calEvents,
+        upcoming, upcomingFailed: missed.upcoming,
+      })
       setLoadFailed(degraded)
     } catch {
       setLoadFailed(true)
     }
-  }, [])
+  }, [hideET])
 
   const retry = useCallback(async () => {
     setReloading(true)
@@ -949,7 +1062,7 @@ export default function Dashboard() {
           </div>
         )}
 
-        <SampleDataBanner onCleared={load} />
+        {!isViewer && <SampleDataBanner onCleared={load} />}
 
         {/* Page header */}
         <motion.div variants={fadeUp(0)} initial="hidden" animate="show" className="flex items-center justify-between">
@@ -968,7 +1081,7 @@ export default function Dashboard() {
         <motion.div variants={fadeUp(1)} initial="hidden" animate="show"
           className="flex gap-1 bg-parchment-200 dark:bg-ink-900 rounded-xl p-1 w-fit overflow-x-auto"
         >
-          {TABS.map(tab => {
+          {TABS.filter(tab => !hideET || tab.id !== 'events').map(tab => {
             const Icon = tab.icon
             const isActive = activeTab === tab.id
             return (
@@ -1008,6 +1121,26 @@ export default function Dashboard() {
           </motion.div>
         </AnimatePresence>
 
+      </div>
+    </PageWrapper>
+  )
+}
+
+// Direct /messages used to render the shell with an empty main — there is
+// no inbox. This page tells that truth. It is not a feature, and it does
+// not pretend the folder is empty.
+export function MemberOutreachUnbuilt() {
+  const { t } = useLocale()
+  const navigate = useNavigate()
+  return (
+    <PageWrapper>
+      <div className="max-w-lg mx-auto py-16">
+        <EmptyState
+          icon={MessageSquare}
+          title={t('dash.outreach.unbuiltTitle')}
+          body={t('dash.outreach.unbuiltBody')}
+          action={{ label: t('dash.outreach.unbuiltBack'), onClick: () => navigate('/') }}
+        />
       </div>
     </PageWrapper>
   )

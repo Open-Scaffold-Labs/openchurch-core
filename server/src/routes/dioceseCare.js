@@ -18,7 +18,12 @@
 // /submissions/:id/* routes — those are keyed on a submission id and it is
 // tempting to scope them by s.diocese_org_id alone, which is what they did
 // until 24 Aug. That column is a permanent stamp; it does not expire when a
-// parish leaves. Use LIVE_AFFILIATION below. A diocese can only
+// parish leaves. Care routes require a live grant (active, known
+// grant_level) via liveGrantLevel / liveAffiliationSql. GET
+// /submissions/:id/review still uses LIVE_AFFILIATION, which admits
+// suspended, but while suspended that route returns account lines only.
+// Review notes and linked follow-ups are empty unless liveGrantLevel says
+// the affiliation is active. A diocese can only
 // ever reach a parish it is actually affiliated with, and the mount is
 // already behind requireOrgType('diocese'), so a parish token cannot reach
 // any path in this file at all.
@@ -32,7 +37,9 @@ import pool from '../db.js'
 import { requireIntParam } from '../utils/params.js'
 import { monitor } from '../monitoring/index.js'
 import { careStatusFor } from '../diocese/careStatus.js'
+import { daysSinceCivilDay } from '../utils/civilDay.js'
 import { buildCareBrief, isPastoralLead } from '../diocese/careBrief.js'
+import { liveAffiliationSql, liveGrantLevel } from '../diocese/parishGrant.js'
 
 const router = Router()
 
@@ -55,6 +62,14 @@ const router = Router()
 // returned 404 — both correct — while /care/submissions/:id/review returned
 // 200 with the parish's name and every account line, and both write routes
 // still landed on the parish's own record.
+//
+// THIS FRAGMENT STILL ADMITS SUSPENDED. It is used only by
+// GET /submissions/:id/review, and only so that route can still return
+// account lines. While suspended it returns account lines only: review
+// notes and linked follow-ups are withheld unless liveGrantLevel says the
+// affiliation is active. Do not change the account-line path from a
+// care-privacy edit. Every other care route uses liveGrantLevel /
+// liveAffiliationSql, which require an active affiliation and a known grant.
 const LIVE_AFFILIATION = `
   EXISTS (
     SELECT 1 FROM ochr_diocese_affiliations a
@@ -66,6 +81,10 @@ const LIVE_AFFILIATION = `
 // The grant a parish has given this diocese right now, or null if the
 // covenant has ended. 'summary' is the default and the more private of the
 // two: it releases totals and rollup groups but never per-account lines.
+// Still treats suspended as live, so GET /submissions/:id/review can return
+// account lines for a suspended detail grant. That path is unchanged.
+// Notes and follow-ups on the same route do not use this function; they
+// use liveGrantLevel and are empty while suspended.
 async function currentGrant(dioceseOrgId, parishOrgId) {
   const { rows } = await pool.query(
     `SELECT grant_level FROM ochr_diocese_affiliations
@@ -76,22 +95,29 @@ async function currentGrant(dioceseOrgId, parishOrgId) {
   return rows[0]?.grant_level ?? null
 }
 
-// Confirms the parish is affiliated with THIS diocese and returns the
+// Confirms the parish has a LIVE grant with THIS diocese and returns the
 // affiliation. Every parish-scoped handler starts here; a 404 rather than
 // a 403 so the existence of an unaffiliated parish is not confirmed.
+//
+// The status list below is the current covenant row (at most one of
+// invited / active / suspended). Whether that row releases anything is
+// liveGrantLevel: invited and suspended return null, the same as a missing
+// row.
 async function affiliated(dioceseOrgId, parishOrgId) {
   const { rows } = await pool.query(
     `SELECT a.id, a.status, a.grant_level, a.region_id, r.name AS region_name,
             p.name AS parish_name, p.slug AS parish_slug, p.address, p.tradition,
-            p.service_times
+            p.service_times, p.timezone
        FROM ochr_diocese_affiliations a
        JOIN ochr_organizations p ON p.id = a.parish_org_id
        LEFT JOIN ochr_diocese_regions r ON r.id = a.region_id
       WHERE a.diocese_org_id = $1 AND a.parish_org_id = $2
-        AND a.status IN ('active', 'suspended')`,
+        AND a.status IN ('invited', 'active', 'suspended')`,
     [dioceseOrgId, parishOrgId]
   )
-  return rows[0] ?? null
+  const row = rows[0] ?? null
+  if (!liveGrantLevel(row)) return null
+  return row
 }
 
 // Strip what the grant does not cover. 'detail' releases the per-account
@@ -186,11 +212,11 @@ router.get('/', async (req, res) => {
                 WHERE tr.diocese_org_id = $1 AND tr.parish_org_id = p.id AND tr.state = 'watching') AS active_transitions,
               (SELECT max(tl.occurred_on) FROM ochr_parish_timeline tl
                 WHERE tl.diocese_org_id = $1 AND tl.parish_org_id = p.id) AS last_contact,
-              p.address, p.tradition
+              p.address, p.tradition, p.timezone
          FROM ochr_diocese_affiliations a
          JOIN ochr_organizations p ON p.id = a.parish_org_id
          LEFT JOIN ochr_diocese_regions r ON r.id = a.region_id
-        WHERE a.diocese_org_id = $1 AND a.status IN ('active', 'suspended')
+        WHERE a.diocese_org_id = $1 AND ${liveAffiliationSql('a')}
           -- Search across the four things a staff member actually has in
           -- their head: the parish, roughly where it is, its deanery, and
           -- its tradition. Unaccented ILIKE on purpose — this is a filter
@@ -207,9 +233,7 @@ router.get('/', async (req, res) => {
 
     const today = new Date()
     const parishes = rows.map(r => {
-      const days = r.last_contact
-        ? Math.round((today - new Date(r.last_contact)) / 86_400_000)
-        : null
+      const days = daysSinceCivilDay(r.last_contact, today, r.timezone)
       const status = careStatusFor({
         openSupportRequests: r.open_support,
         submissionsAwaitingReview: r.awaiting_review,
@@ -270,6 +294,10 @@ router.get('/followups', async (req, res) => {
               to_char(s.period_end,'YYYY-MM-DD')   AS period_end
          FROM ochr_parish_followups f
          JOIN ochr_organizations p ON p.id = f.parish_org_id
+         JOIN ochr_diocese_affiliations a
+           ON a.diocese_org_id = f.diocese_org_id
+          AND a.parish_org_id = f.parish_org_id
+          AND ${liveAffiliationSql('a')}
          LEFT JOIN ochr_report_submissions s ON s.id = f.from_submission_id
         WHERE f.diocese_org_id = $1 AND f.state = $2
         ORDER BY f.due_on NULLS LAST, f.created_at`,
@@ -331,6 +359,12 @@ router.patch('/followups/:id', async (req, res) => {
               settled_by_name  = CASE WHEN $7 THEN $8::text ELSE settled_by_name END,
               updated_at       = NOW()
         WHERE id = $9 AND diocese_org_id = $10
+          AND EXISTS (
+            SELECT 1 FROM ochr_diocese_affiliations a
+             WHERE a.diocese_org_id = ochr_parish_followups.diocese_org_id
+               AND a.parish_org_id = ochr_parish_followups.parish_org_id
+               AND ${liveAffiliationSql('a')}
+          )
         RETURNING *`,
       [state,
        state === 'done' ? text(body.completion_note, 1, 2000) : null,
@@ -374,6 +408,12 @@ router.patch('/transitions/:id', async (req, res) => {
       `UPDATE ochr_parish_transitions
           SET state = $1, support_plan = COALESCE($2, support_plan), updated_at = NOW()
         WHERE id = $3 AND diocese_org_id = $4
+          AND EXISTS (
+            SELECT 1 FROM ochr_diocese_affiliations a
+             WHERE a.diocese_org_id = ochr_parish_transitions.diocese_org_id
+               AND a.parish_org_id = ochr_parish_transitions.parish_org_id
+               AND ${liveAffiliationSql('a')}
+          )
         RETURNING *`,
       [state, text(req.body?.support_plan, 1, 2000), id, req.organizationId]
     )
@@ -425,30 +465,44 @@ router.get('/submissions/:id/review', async (req, res) => {
     // released all of them.
     const grant = await currentGrant(req.organizationId, sub[0].parish_org_id)
 
-    const [notes, followups] = await Promise.all([
-      pool.query(
-        `SELECT id, body, visibility, agreed_next_step,
-                to_char(follow_up_on,'YYYY-MM-DD') AS follow_up_on,
-                author_name, created_at
-           FROM ochr_report_review_notes
-          WHERE submission_id = $1 AND diocese_org_id = $2
-            AND ($3::boolean OR visibility = 'shared')
-          ORDER BY created_at`,
-        [id, req.organizationId, lead]),
-      pool.query(
-        `SELECT id, context, next_action, owner_name, state,
-                to_char(due_on,'YYYY-MM-DD') AS due_on
-           FROM ochr_parish_followups
-          WHERE from_submission_id = $1 AND diocese_org_id = $2
-          ORDER BY created_at`,
-        [id, req.organizationId]),
-    ])
+    // Account lines follow `grant` above, including when the affiliation is
+    // suspended. That residual stays. Care notes and the follow-ups linked
+    // to this report do not: they need a live grant, same as the list and
+    // the detail page. A suspended lead does not receive the internal note.
+    const { rows: aff } = await pool.query(
+      `SELECT status, grant_level FROM ochr_diocese_affiliations
+        WHERE diocese_org_id = $1 AND parish_org_id = $2
+          AND status IN ('active', 'suspended')
+        LIMIT 1`,
+      [req.organizationId, sub[0].parish_org_id])
+    const careLive = liveGrantLevel(aff[0]) != null
+
+    const [notes, followups] = careLive
+      ? await Promise.all([
+          pool.query(
+            `SELECT id, body, visibility, agreed_next_step,
+                    to_char(follow_up_on,'YYYY-MM-DD') AS follow_up_on,
+                    author_name, created_at
+               FROM ochr_report_review_notes
+              WHERE submission_id = $1 AND diocese_org_id = $2
+                AND ($3::boolean OR visibility = 'shared')
+              ORDER BY created_at`,
+            [id, req.organizationId, lead]),
+          pool.query(
+            `SELECT id, context, next_action, owner_name, state,
+                    to_char(due_on,'YYYY-MM-DD') AS due_on
+               FROM ochr_parish_followups
+              WHERE from_submission_id = $1 AND diocese_org_id = $2
+              ORDER BY created_at`,
+            [id, req.organizationId]),
+        ])
+      : [{ rows: [] }, { rows: [] }]
 
     res.json({
       submission: withGrant(sub[0], grant),
       notes: notes.rows,
       followups: followups.rows,
-      may_see_internal: lead,
+      may_see_internal: careLive && lead,
       // Which half of its books the parish agreed to share. On the face of
       // the response for the same reason `withheld` is: a chancery reading
       // totals without account lines should be able to see WHY, rather than
@@ -456,8 +510,10 @@ router.get('/submissions/:id/review', async (req, res) => {
       grant_level: grant,
       // Said on the face of the response rather than inferred from a
       // missing key, the same way the brief states what it withheld.
-      withheld: lead ? null
-        : 'Internal diocesan notes are not shown. Pastoral leadership may see them.',
+      withheld: !careLive
+        ? 'Notes and follow-ups are not shown. This affiliation is not active.'
+        : (lead ? null
+          : 'Internal diocesan notes are not shown. Pastoral leadership may see them.'),
     })
   } catch (err) {
     monitor.error('care.review.get', err, { orgId: req.organizationId, id })
@@ -487,7 +543,7 @@ router.post('/submissions/:id/reviewed', async (req, res) => {
             SELECT 1 FROM ochr_diocese_affiliations a
              WHERE a.diocese_org_id = ochr_report_submissions.diocese_org_id
                AND a.parish_org_id  = ochr_report_submissions.organization_id
-               AND a.status IN ('active', 'suspended')
+               AND ${liveAffiliationSql('a')}
           )
         RETURNING id, organization_id,
                   to_char(period_start,'YYYY-MM-DD') AS period_start,
@@ -525,7 +581,12 @@ router.post('/submissions/:id/notes', async (req, res) => {
          FROM ochr_report_submissions s
          JOIN ochr_organizations p ON p.id = s.organization_id
         WHERE s.id = $1 AND s.diocese_org_id = $2
-          AND ${LIVE_AFFILIATION}`,
+          AND EXISTS (
+            SELECT 1 FROM ochr_diocese_affiliations a
+             WHERE a.diocese_org_id = s.diocese_org_id
+               AND a.parish_org_id = s.organization_id
+               AND ${liveAffiliationSql('a')}
+          )`,
       [id, req.organizationId]
     )
     if (!sub.length) return res.status(404).json({ error: 'Not found' })
@@ -627,7 +688,7 @@ router.get('/:parishId', async (req, res) => {
     const status = careStatusFor({
       openSupportRequests: openSupport,
       submissionsAwaitingReview: submissions.rows.filter(s => s.status === 'submitted').length,
-      daysSinceLastContact: last ? Math.round((new Date() - new Date(last)) / 86_400_000) : null,
+      daysSinceLastContact: daysSinceCivilDay(last, new Date(), aff.timezone),
       openFollowUps: followups.rows.length,
       activeTransitions: transitions.rows.length,
     })
@@ -785,9 +846,12 @@ router.get('/:parishId/brief', async (req, res) => {
       dioceseOrgId: req.organizationId,
       parishOrgId: parishId,
       user: req.user,
-      // Internal notes are opt-IN. A brief that might be left on a
-      // sacristy table carries the shared record by default.
-      includeInternal: req.query.internal === '1',
+      // Internal notes are opt-IN, and only a pastoral lead may ask.
+      // A viewer or other non-lead passing ?internal=1 gets the shared
+      // record, the same rule as the detail route (CARE.3). A brief that
+      // might be left on a sacristy table carries the shared record unless
+      // leadership deliberately asks for the internal one.
+      includeInternal: req.query.internal === '1' && isPastoralLead(req.user),
     })
     if (!brief) return res.status(404).json({ error: 'Not found' })
     res.json(brief)

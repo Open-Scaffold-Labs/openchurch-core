@@ -1,0 +1,8 @@
+# Chancery Vercel project Root Directory is client-diocese. Keep the install
+# tree out of the upload except the materialized openchurch-server directory:
+# a leftover file: symlink at this path ENOENT-realpaths on `vercel deploy
+# --prebuilt` (runs 35156967665 / 35158008263). See deploy-diocese in
+# .github/workflows/ci.yml.
+node_modules/*
+!node_modules/openchurch-server
+!node_modules/openchurch-server/**

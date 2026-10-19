@@ -18,16 +18,18 @@
 //    first; the next step comes after. A brief that opens with a task
 //    turns a conversation into an errand.
 //
-// 2. NO CONTACT DETAILS WITHOUT THE ROLE TO SEE THEM. Names and roles are
-//    context. Phone numbers and addresses are personal data, and a printed
-//    page has no access control once it is on a table. Only diocesan
-//    leadership gets them, and the brief says so on its face when it has
-//    withheld something rather than silently omitting it.
+// 2. NO CONTACT DETAILS WITHOUT THE PARISH'S CONSENT AND THE ROLE TO SEE
+//    THEM. Names and roles are context, released under the parish's live
+//    grant. Leadership email and phone are not: no grant level releases
+//    them (see diocese/parishGrant.js), so they are not even selected.
+//    The parish address stays a diocesan-leadership detail on paper. The
+//    brief says so on its face when it has withheld something rather than
+//    silently omitting it.
 //
-// 3. DIOCESE-ONLY NOTES DO NOT PRINT BY DEFAULT. The timeline distinguishes
-//    'diocese' from 'shared'; a brief that might be left on a sacristy
-//    table carries the shared record unless the preparer deliberately asks
-//    for the internal one.
+// 3. DIOCESE-ONLY NOTES DO NOT PRINT BY DEFAULT, AND ONLY FOR A PASTORAL
+//    LEAD. The timeline distinguishes 'diocese' from 'shared'. The route
+//    asks for the internal record only when a pastoral lead passes
+//    ?internal=1. A viewer or other non-lead does not receive those notes.
 //
 // AND ONE THING IT REFUSES TO DO
 //
@@ -38,9 +40,11 @@
 
 import pool from '../db.js'
 import { careStatusFor } from './careStatus.js'
+import { daysSinceCivilDay } from '../utils/civilDay.js'
 import { resolveLiturgicalContext } from '../routes/liturgical.js'
 
 import { leadershipFor } from '../traditions/index.js'
+import { grantAllows, liveGrantLevel, mayReceiveLeadershipContacts } from './parishGrant.js'
 
 // Who may see what the office keeps to itself.
 //
@@ -69,7 +73,7 @@ export async function buildCareBrief({ dioceseOrgId, parishOrgId, user, includeI
   const { rows: aff } = await pool.query(
     `SELECT a.grant_level, a.status AS affiliation_status,
             r.name AS region_name,
-            p.name AS parish_name, p.address, p.tradition, p.service_times,
+            p.name AS parish_name, p.address, p.tradition, p.service_times, p.timezone,
             d.name AS diocese_name
        FROM ochr_diocese_affiliations a
        JOIN ochr_organizations p ON p.id = a.parish_org_id
@@ -81,8 +85,19 @@ export async function buildCareBrief({ dioceseOrgId, parishOrgId, user, includeI
   )
   if (!aff.length) return null
   const a = aff[0]
+  // Only an ACTIVE affiliation carries a live grant. A suspended covenant
+  // is answered exactly like one that does not exist (404 at the route):
+  // no roster, no contacts, no context about the parish.
+  const grant = liveGrantLevel({ status: a.affiliation_status, grant_level: a.grant_level })
+  if (!grant) return null
 
   const visibility = includeInternal ? ['diocese', 'shared'] : ['shared']
+
+  // Decided BEFORE the query so contact columns are never read when the
+  // parish has not released them — fail closed at the source, not by
+  // remembering to strip them from the response.
+  const rosterAllowed = grantAllows(grant, 'leadership.roster')
+  const contactsAllowed = rosterAllowed && mayReceiveLeadershipContacts(user, grant)
 
   const [support, submissions, followups, transitions, timeline, contacts] = await Promise.all([
     // A count, never the tickets. These are the parish's messages to
@@ -131,13 +146,15 @@ export async function buildCareBrief({ dioceseOrgId, parishOrgId, user, includeI
     // nobody at all for four of the five traditions we support.
     //
     // status = 'active' as well: an archived member had no business on it.
-    pool.query(
-      `SELECT name, role, email, phone
-         FROM ochr_clients
-        WHERE organization_id = $1
-          AND status = 'active'
-          AND btrim(lower(role)) = ANY($2)
-        ORDER BY name LIMIT 8`, [parishOrgId, leadershipFor(a.tradition)]),
+    rosterAllowed
+      ? pool.query(
+        `SELECT name, role${contactsAllowed ? ', email, phone' : ''}
+           FROM ochr_clients
+          WHERE organization_id = $1
+            AND status = 'active'
+            AND btrim(lower(role)) = ANY($2)
+          ORDER BY name LIMIT 8`, [parishOrgId, leadershipFor(a.tradition)])
+      : Promise.resolve({ rows: [] }),
   ])
 
   const last = timeline.rows[0]?.occurred_on ?? null
@@ -145,7 +162,7 @@ export async function buildCareBrief({ dioceseOrgId, parishOrgId, user, includeI
   const status = careStatusFor({
     openSupportRequests: openSupport,
     submissionsAwaitingReview: submissions.rows.filter(s => s.status === 'submitted').length,
-    daysSinceLastContact: last ? Math.round((new Date() - new Date(last)) / 86_400_000) : null,
+    daysSinceLastContact: daysSinceCivilDay(last, new Date(), a.timezone),
     openFollowUps: followups.rows.length,
     activeTransitions: transitions.rows.length,
   })
@@ -155,19 +172,28 @@ export async function buildCareBrief({ dioceseOrgId, parishOrgId, user, includeI
   // visit falls in Lent or in Ordinary Time changes the conversation.
   const liturgical = await resolveLiturgicalContext(today, parishOrgId)
 
-  const showContacts = mayPrintContacts(user)
+  // The parish address is the church's own, not a person's; it keeps the
+  // existing diocesan-leadership gate for print.
+  const showAddress = mayPrintContacts(user)
   const people = contacts.rows.map(c => ({
     name: c.name,
     role: c.role,
-    ...(showContacts ? { email: c.email, phone: c.phone } : {}),
+    ...(contactsAllowed ? { email: c.email, phone: c.phone } : {}),
   }))
+  const withheldParts = []
+  if (!contactsAllowed && people.length) {
+    withheldParts.push("Leadership contact details are not shared: this parish's grant to the diocese covers financial reporting, not personal contact details.")
+  }
+  if (!showAddress) {
+    withheldParts.push('The parish address is withheld on this copy. Diocesan leadership may prepare a copy that includes it.')
+  }
 
   return {
     prepared_on: today,
     diocese: a.diocese_name,
     parish: {
       name: a.parish_name,
-      address: showContacts ? a.address : null,
+      address: showAddress ? a.address : null,
       region: a.region_name,
       tradition: a.tradition,
       service_times: a.service_times,
@@ -192,9 +218,7 @@ export async function buildCareBrief({ dioceseOrgId, parishOrgId, user, includeI
     agreed_next_steps: followups.rows,
     people,
     // Stated on the face of the brief rather than left to be noticed.
-    withheld: showContacts
-      ? null
-      : 'Contact details and the parish address are withheld on this copy. Diocesan leadership may prepare a copy that includes them.',
+    withheld: withheldParts.length ? withheldParts.join(' ') : null,
     internal_included: includeInternal,
     footer:
       'Prepared from what the diocesan office has recorded. It reports what happened and what was agreed; ' +

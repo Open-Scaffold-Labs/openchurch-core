@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react'
 import { AlertTriangle } from 'lucide-react'
+import { STRINGS } from '../i18n/strings'
 
 // Chancery confirmation dialog. Mirrors the parish client's
 // components/ConfirmProvider.jsx in behaviour and voice, deliberately
@@ -7,13 +8,17 @@ import { AlertTriangle } from 'lucide-react'
 // the handful of shared primitives until a third client exists, because a
 // workspace package is infrastructure ahead of need.
 //
-// Two differences from the parish version, both intentional:
+// Three differences from the parish version, all intentional:
 //
 //   1. No framer-motion. The chancery app does not depend on it, and adding
 //      an animation library to satisfy one dialog would be the wrong trade
 //      (OPERATOR bans new UI/animation libraries). A plain fade via CSS is
 //      enough, and a finance back office wants less motion, not more.
 //   2. The MobileSheet class constants are inlined for the same reason.
+//   3. Default chrome goes through a thin local t() + strings.js (en+es),
+//      not parish LocaleProvider. Diocese has no locale spine; the only
+//      term is the device override (ochr_locale), matching parish
+//      useOptionalLocale's fallback when no provider is present.
 //
 // Usage:
 //   const ask = useConfirm()
@@ -22,6 +27,16 @@ import { AlertTriangle } from 'lucide-react'
 //   const askFor = usePrompt()
 //   const v = await askFor({ title: 'New rate (%)', inputType: 'number' })
 //   if (v === null) return          // cancelled — NOT the same as ''
+
+// Device override only. Do not import parish useLocale / LocaleProvider.
+function t(key) {
+  let locale = 'en'
+  try {
+    const stored = localStorage.getItem('ochr_locale')
+    if (stored && STRINGS[stored]) locale = stored
+  } catch { /* private mode — stay on English */ }
+  return STRINGS[locale]?.[key] ?? STRINGS.en[key] ?? key
+}
 
 const ConfirmContext = createContext(null)
 
@@ -71,10 +86,10 @@ export function ConfirmProvider({ children }) {
       pendingRef.current = { resolve, isPrompt }
       setValue(isPrompt ? String(options.defaultValue ?? '') : '')
       setRequest({
-        title: options.title || 'Are you sure?',
+        title: options.title || t('confirm.title'),
         body: options.body || '',
-        confirmLabel: options.confirmLabel || (isPrompt ? 'Save' : 'Confirm'),
-        cancelLabel: options.cancelLabel || 'Cancel',
+        confirmLabel: options.confirmLabel || (isPrompt ? t('confirm.save') : t('confirm.confirm')),
+        cancelLabel: options.cancelLabel || t('confirm.cancel'),
         tone: options.tone === 'neutral' ? 'neutral' : 'destructive',
         isPrompt,
         inputLabel: options.inputLabel || '',

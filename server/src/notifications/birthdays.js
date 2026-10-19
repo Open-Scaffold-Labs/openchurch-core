@@ -64,7 +64,7 @@ export async function enqueueDailyBirthdayReminders({ now = new Date() } = {}) {
     // Walk every org. Small enough at OpenChurch scale to do in
     // one pass; if we ever cross thousands of orgs we'll batch.
     const { rows: orgs } = await pool.query(
-      'SELECT id, name FROM ochr_organizations'
+      'SELECT id, name FROM ochr_organizations WHERE held_at IS NULL'
     )
 
     for (const org of orgs) {
@@ -73,8 +73,10 @@ export async function enqueueDailyBirthdayReminders({ now = new Date() } = {}) {
       // Pull all admins in the org once — every match gets enqueued
       // for every admin recipient.
       const { rows: admins } = await pool.query(
+        // F-06: never mail member PII to a closed or deactivated admin.
         `SELECT id, email, name FROM ochr_users
-          WHERE organization_id = $1 AND role = 'admin'`,
+          WHERE organization_id = $1 AND role = 'admin'
+            AND closed_at IS NULL AND deactivated_at IS NULL`,
         [org.id]
       )
       if (!admins.length) continue
@@ -90,7 +92,7 @@ export async function enqueueDailyBirthdayReminders({ now = new Date() } = {}) {
       )
       for (const member of birthdayMembers) {
         for (const admin of admins) {
-          await scheduleNotification({
+          const scheduled = await scheduleNotification({
             organizationId:    org.id,
             userId:            admin.id,
             recipient:         admin.email,
@@ -102,7 +104,7 @@ export async function enqueueDailyBirthdayReminders({ now = new Date() } = {}) {
               birthday_date:  ymd(sendAt),
             },
           })
-          birthdaysEnqueued++
+          if (scheduled) birthdaysEnqueued++
         }
       }
 
@@ -127,7 +129,7 @@ export async function enqueueDailyBirthdayReminders({ now = new Date() } = {}) {
         // value in alerting "they joined today, tomorrow."
         if (years <= 0) continue
         for (const admin of admins) {
-          await scheduleNotification({
+          const scheduled = await scheduleNotification({
             organizationId:    org.id,
             userId:            admin.id,
             recipient:         admin.email,
@@ -140,7 +142,7 @@ export async function enqueueDailyBirthdayReminders({ now = new Date() } = {}) {
               anniversary_date:  ymd(sendAt),
             },
           })
-          anniversariesEnqueued++
+          if (scheduled) anniversariesEnqueued++
         }
       }
     }

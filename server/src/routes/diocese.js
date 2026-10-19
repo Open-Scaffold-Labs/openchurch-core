@@ -21,7 +21,9 @@ import pool from '../db.js'
 import { requireIntParam } from '../utils/params.js'
 import { monitor } from '../monitoring/index.js'
 import { financialObservations } from '../finance/observations.js'
-import { overlapsRange, findOverlappingSubmission, overlapMessage } from '../finance/fiscalPeriod.js'
+import { overlapsRange, findOverlappingSubmission, overlapMessage, overlapRemedy } from '../finance/fiscalPeriod.js'
+import { PERIOD_ADJUSTMENT_LIST_COLS, PERIOD_ADJUSTMENT_LIST_JOINS } from '../finance/periodAdjustmentRollup.js'
+import { settlePeriodAdjustment, settleOpenOnSubmission } from '../finance/periodAdjustmentSettle.js'
 
 const router = Router()
 
@@ -339,9 +341,15 @@ router.get('/submissions', async (req, res) => {
               to_char(s.period_end, 'YYYY-MM-DD') AS period_end,
               s.submitted_at, s.reviewed_at,
               s.totals_json->'totals' AS totals,
+              -- Frozen totals are archival (099). OPEN is the unresolved
+              -- condition; APPLIED credits (106) are the payable net.
+              -- Shipping totals without these lets every renderer imply
+              -- the figures already net later refunds. They do not.
+              ${PERIOD_ADJUSTMENT_LIST_COLS},
               p.id AS parish_org_id, p.name AS parish_name
          FROM ochr_report_submissions s
          JOIN ochr_organizations p ON p.id = s.organization_id
+         ${PERIOD_ADJUSTMENT_LIST_JOINS}
          JOIN (${ACTIVE_AFF}) aff ON aff.parish_org_id = s.organization_id
         WHERE ${where}
         ORDER BY (s.status = 'submitted') DESC, s.period_end DESC, p.name ASC
@@ -355,7 +363,25 @@ router.get('/submissions', async (req, res) => {
   }
 })
 
-// PATCH /api/diocese/submissions/:id — body: { status: approved|returned, note? }
+// PATCH /api/diocese/submissions/:id
+//   body: { status: approved|returned, note?, expected_submitted_at? }
+//
+// APPROVE WHAT YOU SAW (4 Sep). This used to approve whatever the row held
+// at the moment of the click. But a returned period is resubmitted IN
+// PLACE — same id, new totals, submitted_at bumped — so the sequence
+// "chancery loads the queue → parish is returned, adds $500,000, resubmits
+// → chancery clicks Approve on the row still on its screen" approved
+// figures the chancery had never seen. Reproduced: loaded revenue 1000.00,
+// approved row revenue 501000.00, 200 OK.
+//
+// `expected_submitted_at` is the row's submitted_at as the list handed it
+// out. When it is present the review only lands if the row still carries
+// that timestamp; otherwise 409 submission_changed and the row is
+// untouched. When it is absent the review behaves as it always has, so no
+// other caller breaks — but the chancery client sends it. Compared at
+// millisecond precision on both sides, because JSON carries milliseconds
+// and Postgres microseconds and an equality on the raw values would refuse
+// every honest approval.
 router.patch('/submissions/:id', async (req, res) => {
   const id = requireIntParam(req, res); if (id === null) return
   const next = req.body?.status
@@ -365,6 +391,14 @@ router.patch('/submissions/:id', async (req, res) => {
   const note = req.body?.note != null ? String(req.body.note).trim() || null : null
   if (next === 'returned' && !note) {
     return res.status(400).json({ error: 'Returning a submission requires a note explaining what to fix' })
+  }
+  let expected = null
+  if (req.body?.expected_submitted_at != null) {
+    const parsed = new Date(req.body.expected_submitted_at)
+    if (typeof req.body.expected_submitted_at !== 'string' || Number.isNaN(parsed.getTime())) {
+      return res.status(400).json({ error: 'expected_submitted_at must be an ISO timestamp' })
+    }
+    expected = parsed.toISOString()
   }
   try {
     // Approving is what admits a period to the roll-up and the bill, so
@@ -390,7 +424,9 @@ router.patch('/submissions/:id', async (req, res) => {
         })
         if (overlap) {
           return res.status(409).json({
-            error: overlapMessage(overlap, 'return this one, or return the approved period and approve this one instead.'),
+            // The remedy depends on what the other period IS — an approved
+            // one cannot be returned, and the old sentence said it could.
+            error: overlapMessage(overlap, overlapRemedy(overlap, 'chancery')),
             code: 'period_overlap',
             overlaps: { id: overlap.id, period_start: overlap.period_start, period_end: overlap.period_end, status: overlap.status },
           })
@@ -400,10 +436,15 @@ router.patch('/submissions/:id', async (req, res) => {
 
     // Review requires a LIVE affiliation (audit follow-up): once a parish
     // leaves, the diocese can no longer act on its in-flight submissions.
+    // The expected-timestamp guard lives in this same WHERE, not in a read
+    // before it, so a resubmit that lands between a check and the write
+    // still cannot be approved unseen.
     const { rows } = await pool.query(
       `UPDATE ochr_report_submissions s
           SET status = $1, review_note = $2, reviewed_by = $3, reviewed_at = NOW()
         WHERE s.id = $4 AND s.diocese_org_id = $5 AND s.status = 'submitted'
+          AND ($6::timestamptz IS NULL
+               OR date_trunc('milliseconds', s.submitted_at) = date_trunc('milliseconds', $6::timestamptz))
           AND EXISTS (
             SELECT 1 FROM ochr_diocese_affiliations a
              WHERE a.diocese_org_id = s.diocese_org_id
@@ -411,9 +452,28 @@ router.patch('/submissions/:id', async (req, res) => {
                AND a.status IN ('active', 'suspended')
           )
         RETURNING s.id, s.status`,
-      [next, note, req.user?.id ?? null, id, req.organizationId]
+      [next, note, req.user?.id ?? null, id, req.organizationId, expected]
     )
-    if (!rows.length) return res.status(404).json({ error: 'No reviewable submission found' })
+    if (!rows.length) {
+      // Nothing matched. Tell a stale screen apart from a missing row: if
+      // the row is still there and still reviewable, the only clause that
+      // can have refused is the timestamp, and the chancery needs to look
+      // again before it decides.
+      if (expected !== null) {
+        const { rows: still } = await pool.query(
+          `SELECT 1 FROM ochr_report_submissions
+            WHERE id = $1 AND diocese_org_id = $2 AND status = 'submitted'`,
+          [id, req.organizationId]
+        )
+        if (still.length) {
+          return res.status(409).json({
+            error: 'The parish resubmitted this period after you loaded it. Reload to review the new figures.',
+            code: 'submission_changed',
+          })
+        }
+      }
+      return res.status(404).json({ error: 'No reviewable submission found' })
+    }
     res.json(rows[0])
   } catch (err) {
     // 23P01 — the 097 exclusion constraint caught an overlap the
@@ -432,13 +492,202 @@ router.patch('/submissions/:id', async (req, res) => {
   }
 })
 
+function settleRefuse(res, result) {
+  if (result.error === 'not_found') {
+    return res.status(404).json({ error: 'No adjustment on this diocese\'s books matches that request.' })
+  }
+  if (result.error === 'not_frozen') {
+    return res.status(409).json({
+      error: 'That period is no longer frozen. A credit is recorded only against a submitted or approved period.',
+      code: 'not_frozen',
+    })
+  }
+  if (result.error === 'nothing_open') {
+    return res.status(409).json({
+      error: 'There is no unresolved adjustment on this period to record a credit for.',
+      code: 'nothing_open',
+    })
+  }
+  if (result.error === 'bad_note') {
+    return res.status(400).json({ error: 'The note could not be read.' })
+  }
+  if (result.error === 'assessable_unknown') {
+    return res.status(409).json({
+      error: 'This refund\'s effect on the diocesan bill cannot be recorded yet. ' +
+             'The period was frozen before each gift\'s assessable share was kept, ' +
+             'so applying a credit would guess. Nothing was lost — the adjustment ' +
+             'stays open until that historical fact is resolved.',
+      code: 'assessable_unknown',
+    })
+  }
+  return res.status(500).json({ error: 'Failed to record the credit' })
+}
+
+function publicAdjustment(row) {
+  return {
+    id: Number(row.id),
+    submission_id: Number(row.submission_id),
+    donation_id: Number(row.donation_id),
+    donation_refund_id: row.donation_refund_id != null ? Number(row.donation_refund_id) : null,
+    amount: row.amount,
+    assessable_impact: row.assessable_impact == null ? null : row.assessable_impact,
+    resolved_at: row.resolved_at ?? null,
+    resolution_note: row.resolution_note ?? null,
+  }
+}
+
+function publicCredit(row) {
+  if (!row) return null
+  return {
+    id: Number(row.id),
+    adjustment_id: Number(row.adjustment_id),
+    submission_id: Number(row.submission_id),
+    donation_refund_id: row.donation_refund_id != null ? Number(row.donation_refund_id) : null,
+    amount: row.amount,
+    applied_at: row.applied_at,
+  }
+}
+
+// GET /api/diocese/submissions/:id/adjustments
+// OPEN sidecars and APPLIED credits for one frozen period. The chancery
+// records a credit from this list; the parish never writes here.
+router.get('/submissions/:id/adjustments', async (req, res) => {
+  const id = requireIntParam(req, res); if (id === null) return
+  try {
+    const { rows: owned } = await pool.query(
+      `SELECT s.id FROM ochr_report_submissions s
+         JOIN ochr_diocese_affiliations aff
+           ON aff.parish_org_id = s.organization_id
+          AND aff.diocese_org_id = s.diocese_org_id
+          AND aff.status IN ('active', 'suspended')
+        WHERE s.id = $1 AND s.diocese_org_id = $2`,
+      [id, req.organizationId]
+    )
+    if (!owned.length) return res.status(404).json({ error: 'Not found' })
+
+    const { rows } = await pool.query(
+      `SELECT a.id, a.submission_id, a.donation_id, a.donation_refund_id,
+              a.amount, a.assessable_impact, a.resolved_at, a.resolution_note,
+              c.id AS credit_id, c.amount AS credit_amount, c.applied_at
+         FROM ochr_period_adjustments a
+         LEFT JOIN ochr_period_adjustment_credits c
+           ON c.adjustment_id = a.id AND c.organization_id = a.organization_id
+        WHERE a.submission_id = $1 AND a.diocese_org_id = $2
+        ORDER BY a.id`,
+      [id, req.organizationId]
+    )
+    res.json({
+      adjustments: rows.map(r => ({
+        ...publicAdjustment(r),
+        credit: r.credit_id ? {
+          id: Number(r.credit_id),
+          amount: r.credit_amount,
+          applied_at: r.applied_at,
+        } : null,
+      })),
+    })
+  } catch (err) {
+    monitor.error('diocese.adjustments.list', err, { orgId: req.organizationId, id })
+    res.status(500).json({ error: 'Failed to load adjustments' })
+  }
+})
+
+// POST /api/diocese/adjustments/:id/settle
+//   body: { note? }
+//
+// One transaction: insert APPLIED credit, then stamp SETTLED. Amount
+// comes from the sidecar, never the body. Idempotent. Cannot leave
+// SETTLED without APPLIED (migration 106 trigger + this writer).
+router.post('/adjustments/:id/settle', async (req, res) => {
+  const id = requireIntParam(req, res); if (id === null) return
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const result = await settlePeriodAdjustment(client, {
+      dioceseOrgId: req.organizationId,
+      adjustmentId: id,
+      appliedBy: req.user?.id ?? null,
+      note: req.body?.note,
+    })
+    if (result.error) {
+      await client.query('ROLLBACK')
+      return settleRefuse(res, result)
+    }
+    await client.query('COMMIT')
+    res.json({
+      already_recorded: result.already,
+      adjustment: publicAdjustment(result.adjustment),
+      credit: publicCredit(result.credit),
+    })
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
+    if (err?.code === '23514') {
+      return res.status(409).json({
+        error: 'A credit must be recorded before this adjustment can be marked resolved. Nothing was lost.',
+        code: 'applied_required',
+      })
+    }
+    monitor.error('diocese.adjustments.settle', err, { orgId: req.organizationId, id })
+    res.status(500).json({ error: 'Failed to record the credit' })
+  } finally {
+    client.release()
+  }
+})
+
+// POST /api/diocese/submissions/:id/adjustments/settle
+// Records an APPLIED credit for every OPEN adjustment on the period,
+// then stamps each SETTLED, in one transaction.
+router.post('/submissions/:id/adjustments/settle', async (req, res) => {
+  const id = requireIntParam(req, res); if (id === null) return
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const result = await settleOpenOnSubmission(client, {
+      dioceseOrgId: req.organizationId,
+      submissionId: id,
+      appliedBy: req.user?.id ?? null,
+      note: req.body?.note,
+    })
+    if (result.error) {
+      await client.query('ROLLBACK')
+      return settleRefuse(res, result)
+    }
+    await client.query('COMMIT')
+    const items = result.results
+      ? result.results.map(r => ({
+          already_recorded: r.already,
+          adjustment: publicAdjustment(r.adjustment),
+          credit: publicCredit(r.credit),
+        }))
+      : (result.adjustments ?? []).map(a => ({
+          already_recorded: true,
+          adjustment: publicAdjustment(a),
+        }))
+    res.json({ already_recorded: result.already, recorded: items })
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
+    if (err?.code === '23514') {
+      return res.status(409).json({
+        error: 'A credit must be recorded before this adjustment can be marked resolved. Nothing was lost.',
+        code: 'applied_required',
+      })
+    }
+    monitor.error('diocese.adjustments.settleAll', err, { orgId: req.organizationId, id })
+    res.status(500).json({ error: 'Failed to record the credit' })
+  } finally {
+    client.release()
+  }
+})
+
 // GET /api/diocese/financials?start&end — THE roll-up. Reads only
 // APPROVED submissions whose period OVERLAPS the range — which is what this
 // comment always said and, until 27 Aug, not what the SQL did. It used
 // containment, so a July–June parish read $0.00 here while being billed
 // $2,420.57 for the same year. The predicate is now named and shared; see
 // ../finance/fiscalPeriod.js for why a browse overlaps and an assessment
-// partitions. Shape: rollup_group ×
+// partitions. This roll-up is the approved archival gross (totals_json).
+// The bill uses computeBases: approved frozen gross minus APPLIED credits
+// (GIV-08 M4). Shape: rollup_group ×
 // parish matrix plus consolidated totals. Group-level data is what
 // every grant level shares; account lines stay behind the per-parish
 // drill-down below.

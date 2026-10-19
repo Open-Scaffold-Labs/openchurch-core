@@ -7,7 +7,13 @@
 //   BILLING_PROVIDER_SECRET set   → live Stripe (secret key, sk_…)
 //   BILLING_PROVIDER_SECRET unset → stub (dev default; no network)
 //   BILLING_WEBHOOK_SECRET        → Stripe webhook signing secret (whsec_…),
-//                                   required for live webhook processing.
+//                                   required for live webhook processing —
+//                                   live BILLING or live GIVING; the
+//                                   endpoint records donations too. On its
+//                                   own it is sufficient: while it is set,
+//                                   deliveries are verified and gifts are
+//                                   recorded whatever the provider switches
+//                                   say (see handleWebhook).
 //
 // All exports return the same shape regardless of provider so the
 // routes layer is provider-blind.
@@ -15,7 +21,7 @@
 import pool from '../db.js'
 import { getPlan } from './plans.js'
 import { stripeRequest, verifyStripeSignature } from '../utils/stripeApi.js'
-import { recordDonationCheckoutCompleted } from '../payments/index.js'
+import { recordDonationCheckoutCompleted, paymentsLiveCredentialPresent } from '../payments/index.js'
 import { monitor } from '../monitoring/index.js'
 
 // Call-time check (not module-load) so tests can toggle and a redeploy
@@ -111,14 +117,77 @@ export async function createPortalSession({ orgId, returnUrl }) {
 // throws a 400-tagged error and nothing is processed. On a verified
 // event, normalize into applySubscriptionEvent (subscriptions) or hand
 // giving events to the payments module.
+//
+// THIS ENDPOINT IS SHARED WITH GIVING, AND GIVING HAS ITS OWN SWITCH.
+// PAYMENTS_PROVIDER_SECRET flips parishioner giving to live Stripe on its
+// own (payments/index.js, "two concerns, two variables") — and every one
+// of those gifts is recorded by a checkout.session.completed arriving
+// HERE. The stub short-circuit used to read only the billing secret, so
+// giving-live-with-billing-stub — the natural first step for a parish
+// that takes gifts before it pays for a plan — answered every donation
+// event {received:true, stub:true} 200 before parsing it. Stripe does not
+// retry a 2xx. Money moved, no row, no receipt, and nothing red anywhere
+// (reproduced 4 Sep). The stub answer is only honest when NEITHER side of
+// this endpoint is live.
+//
+// AND "LIVE" IS THE WRONG QUESTION TOO. The gate above was then written as
+// "is a live credential present on either side", which still let the
+// SELECTED provider decide what happens to a delivery. Remove
+// PAYMENTS_PROVIDER_SECRET — a key rotation, or a rollback that pulled the
+// whole variable — with BILLING_WEBHOOK_SECRET still set, and the sessions
+// donors had already completed arrived at an endpoint that answered
+// {received:true, stub:true} 200 without reading the signature. Bad
+// signatures got the same 200 (reproduced 8 Sep). The money moved at Stripe
+// regardless of what this deployment now selects; the only thing that
+// should decide whether an event is processed is whether it can be VERIFIED.
+//
+// So the gate is the signing secret. No BILLING_WEBHOOK_SECRET and nothing
+// live → there is nothing to verify against and the stub ack is the honest
+// answer. A signing secret present → verify (400 on a bad signature) and
+// process donation events whatever giving is set to. Subscription events
+// while billing is still the stub keep their stub acknowledgement below,
+// after verification — there is no billing to apply them to.
+// Verify-and-apply in one call (the stub path and the existing callers).
+// The route uses the two halves separately so a verified event is stored
+// durably between them (webhookReceipts.js).
 export async function handleWebhook({ rawBody, signature }) {
-  if (isStub()) {
+  const verified = await verifyWebhook({ rawBody, signature })
+  if (verified.result) return verified.result
+  return applyWebhookEvent(verified.event)
+}
+
+// Returns { result } when there is nothing to verify (billing and giving
+// both stub, no signing secret), else { event } for a verified event.
+// Throws 400 on a bad signature and 503 when live without a secret.
+export async function verifyWebhook({ rawBody, signature }) {
+  // A live credential, not a switched-on provider — see
+  // paymentsLiveCredentialPresent(). PAYMENTS_PROVIDER=stub with the secret
+  // still set is a rollback, and a rollback must not discard the gifts
+  // already in flight.
+  const givingLive = paymentsLiveCredentialPresent()
+  const signingSecret = process.env.BILLING_WEBHOOK_SECRET
+  if (!signingSecret && isStub() && !givingLive) {
     console.log('[billing:stub] handleWebhook', { signature, bytes: rawBody?.length ?? 0 })
-    return { received: true, stub: true }
+    return { result: { received: true, stub: true } }
   }
 
-  const signingSecret = process.env.BILLING_WEBHOOK_SECRET
-  if (!signingSecret || !verifyStripeSignature(rawBody, signature, signingSecret)) {
+  // Live on either side means a signing secret is REQUIRED. Missing it is
+  // a deployment fault, not a bad delivery: a 400 would tell Stripe the
+  // event itself is unwanted, and a 200 would tell it the event is done.
+  // 503 with the variable's name is neither — Stripe keeps redelivering
+  // (up to three days), and the operator sees the reason in the log
+  // instead of silence. (routes/billing.js currently answers every non-400
+  // as 500; that is still a retry, and the message still names the fix.)
+  if (!signingSecret) {
+    const err = new Error(
+      'BILLING_WEBHOOK_SECRET is not set: this deployment takes live payments but cannot verify ' +
+      'or record their webhooks. Set it to the endpoint signing secret (whsec_…); the provider will redeliver.'
+    )
+    err.statusCode = 503
+    monitor.error('billing.webhook.unconfigured', err, { givingLive, billingLive: !isStub() })
+    throw err
+  }
+  if (!verifyStripeSignature(rawBody, signature, signingSecret)) {
     const err = new Error('Webhook signature verification failed')
     err.statusCode = 400
     throw err
@@ -127,16 +196,64 @@ export async function handleWebhook({ rawBody, signature }) {
   const event = JSON.parse(
     Buffer.isBuffer(rawBody) ? rawBody.toString('utf8') : String(rawBody)
   )
+  return { event }
+}
+
+// Applies a verified event. Idempotent per event (uq_donations_org_payment_ref,
+// COALESCE updates), so a redelivery or a reconciliation retry cannot
+// double-apply. Never contacts the provider.
+export async function applyWebhookEvent(event) {
   const obj = event?.data?.object ?? {}
 
+  // Verified, and now we know what it is. A giving event is handled below
+  // whatever billing is doing. Anything else, while billing is still the
+  // stub, gets the same stub acknowledgement it always did — billing has
+  // not been switched on, so there is nothing to apply it to.
+  //
+  // A gift is three events, not one. Checkout closes with
+  // checkout.session.completed; for a card that is also the payment. For a
+  // delayed-notification method (ACH debit, SEPA, OXXO — enabled per
+  // dashboard, payment_method_types is not pinned) the session completes
+  // with payment_status 'unpaid' and the money is confirmed days later by
+  // checkout.session.async_payment_succeeded, or refused by
+  // …async_payment_failed. All three carry the same session object, so the
+  // recorder reads payment_status and the dedup on payment_ref makes the
+  // succeeded event the one that writes the row.
+  const isDonationSession = obj.mode === 'payment' && obj.metadata?.kind === 'donation'
+  const DONATION_EVENTS = new Set([
+    'checkout.session.completed',
+    'checkout.session.async_payment_succeeded',
+    'checkout.session.async_payment_failed',
+  ])
+  const isDonation = DONATION_EVENTS.has(event?.type) && isDonationSession
+  if (isStub() && !isDonation) {
+    console.log('[billing:stub] handleWebhook', { type: event?.type })
+    return { received: true, stub: true }
+  }
+
   switch (event?.type) {
+    case 'checkout.session.async_payment_failed': {
+      // The bank said no, after Checkout had already said "complete". No
+      // row was written for the 'unpaid' completion, so there is nothing
+      // to reverse — only something to know about, because the donor was
+      // shown a success page for money that never arrived.
+      if (isDonationSession) {
+        monitor.warn('payments.webhook', 'donation async payment failed; nothing recorded',
+          { session: obj.id, paymentRef: obj.payment_intent ?? obj.id, orgId: obj.metadata?.organization_id ?? null })
+        return { received: true, handled: 'donation-failed' }
+      }
+      return { received: true, ignored: event.type }
+    }
+
+    case 'checkout.session.async_payment_succeeded':
     case 'checkout.session.completed': {
       // Donations ride the same Stripe account/endpoint — payment-mode
       // sessions tagged kind=donation belong to the giving flow.
-      if (obj.mode === 'payment' && obj.metadata?.kind === 'donation') {
+      if (isDonationSession) {
         await recordDonationCheckoutCompleted(obj)
         return { received: true, handled: 'donation' }
       }
+      if (event.type !== 'checkout.session.completed') return { received: true, ignored: event.type }
       if (obj.mode === 'subscription') {
         const orgId = Number(obj.metadata?.organization_id ?? obj.client_reference_id)
         if (!Number.isInteger(orgId)) {

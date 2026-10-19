@@ -20,6 +20,7 @@ import jwt from 'jsonwebtoken'
 import pool from '../src/db.js'
 import { RUN_ID, bindServer, closeServer, migrateOnce } from './support/harness.js'
 import { overlapsRange, endsInYear } from '../src/finance/fiscalPeriod.js'
+import { computeBases } from '../src/finance/assessmentBases.js'
 
 let server, dioceseId, parishId, token
 
@@ -41,16 +42,8 @@ const clearSubmissions = () =>
 
 // The assessment engine's own question, asked exactly as computeBases asks it.
 async function billedForYear(year) {
-  const { rows } = await pool.query(
-    `SELECT COALESCE(SUM((s.totals_json->'totals'->>'assessable_base')::NUMERIC), 0) AS base
-       FROM ochr_report_submissions s
-       JOIN ochr_diocese_affiliations a
-         ON a.parish_org_id = s.organization_id AND a.diocese_org_id = s.diocese_org_id
-        AND a.status IN ('active','suspended')
-      WHERE s.diocese_org_id = $1 AND s.status = 'approved'
-        AND ${endsInYear('$2')}`,
-    [dioceseId, String(year)])
-  return Number(rows[0].base)
+  const rows = await computeBases(dioceseId, String(year))
+  return rows.reduce((sum, r) => sum + Number(r.base), 0)
 }
 
 async function rollup(start, end) {

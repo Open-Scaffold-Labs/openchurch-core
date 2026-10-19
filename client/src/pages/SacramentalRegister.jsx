@@ -5,7 +5,7 @@ import PageWrapper from '../components/PageWrapper'
 import EmptyState from '../components/EmptyState'
 import { SkeletonRowList } from '../components/Skeleton'
 import { apiUrl } from '../api'
-import { formatLocalDate } from '../utils/dates'
+import { formatStoredDate } from '../utils/dates'
 import { useLocale } from '../i18n'
 import SacramentAnniversaries from '../components/SacramentAnniversaries'
 
@@ -34,7 +34,13 @@ export default function SacramentalRegister() {
     const res = await fetch(apiUrl(`/api/sacraments?${qs.toString()}`))
     if (!res.ok) throw new Error(`Failed (${res.status})`)
     const data = await res.json()
-    return data.records ?? []
+    // `data.records ?? []` treated a 200 with missing/null records as an
+    // empty parish book ("No sacraments recorded yet"). Mirror the member
+    // profile sacraments read: a non-array is UNREAD, not empty.
+    if (!data || !Array.isArray(data.records)) {
+      throw new Error('Failed (malformed)')
+    }
+    return data.records
   }, [])
 
   // Reload from the top when the filter or search changes; debounced so
@@ -200,7 +206,7 @@ export default function SacramentalRegister() {
                       serif, rows given room. This is the parish's book,
                       not a data grid; it should read like the sibling of
                       its own certificates. */}
-                  <td className="px-4 py-3.5 whitespace-nowrap font-display text-[15px]">{r.date ? formatLocalDate(r.date, undefined, dateLocale) : '—'}</td>
+                  <td className="px-4 py-3.5 whitespace-nowrap font-display text-[15px]">{r.date ? formatStoredDate(r.date, undefined, dateLocale) : '—'}</td>
                   <td className="px-4 py-3.5 font-medium">{SACRAMENT_TYPES.includes(r.type) ? t(`sac.${r.type}`) : r.type}</td>
                   <td className="px-4 py-3.5 font-display text-[15px]">
                     {r.client_id && r.member_name ? (

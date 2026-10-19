@@ -143,18 +143,18 @@ const PAROCHIAL_REPORT = {
               FROM (
                 SELECT date, SUM(n) AS n
                   FROM (
-                    SELECT e.date, e.id, ${DISTINCT_PEOPLE}::int AS n
+                    SELECT ck.attended_date AS date, ck.calendar_event_id AS id, ${DISTINCT_PEOPLE}::int AS n
                       FROM ochr_checkins ck
-                      JOIN ochr_calendar_events e ON e.id = ck.calendar_event_id
                      WHERE ck.organization_id = $1
-                       AND e.date >= $2 AND e.date <= $3
-                       AND EXTRACT(DOW FROM e.date) = 0
-                     GROUP BY e.date, e.id
+                       AND ck.attended_date IS NOT NULL
+                       AND ck.attended_date >= $2 AND ck.attended_date <= $3
+                       AND EXTRACT(DOW FROM ck.attended_date) = 0
+                     GROUP BY ck.attended_date, ck.calendar_event_id
                   ) per_service
                  GROUP BY date
               ) per_sunday`,
-      source: 'Mean of the per-Sunday attendance, summing the distinct people at each service, including guests and children. A member checked out and back in at one service is one person there.',
-      note: 'Only Sundays with at least one check-in are averaged. A parish that does not use check-in will see 0 — which means "we have no data", not "nobody came".',
+      source: 'Mean of the per-Sunday attendance, summing the distinct people at each service, including guests and children. A member checked out and back in at one service is one person there. Each Sunday is the service date stamped at check-in.',
+      note: 'Only Sundays with at least one stamped check-in are averaged. A parish that does not use check-in will see 0 — which means "we have no data", not "nobody came". Older check-ins without a stamp are left out of this verified figure rather than dated from today\'s schedule.',
     },
     {
       key: 'easter_attendance', label: 'Easter attendance', requirement: 'unverified',
@@ -165,15 +165,15 @@ const PAROCHIAL_REPORT = {
       key: 'christmas_attendance', label: 'Christmas attendance', requirement: 'unverified',
       sql: `SELECT COALESCE(SUM(n), 0)::int AS value
               FROM (
-                SELECT e.id, ${DISTINCT_PEOPLE} AS n
+                SELECT ck.calendar_event_id AS id, ${DISTINCT_PEOPLE} AS n
                   FROM ochr_checkins ck
-                  JOIN ochr_calendar_events e ON e.id = ck.calendar_event_id
                  WHERE ck.organization_id = $1
-                   AND e.date >= $2 AND e.date <= $3
-                   AND EXTRACT(MONTH FROM e.date) = 12 AND EXTRACT(DAY FROM e.date) IN (24, 25)
-                 GROUP BY e.id
+                   AND ck.attended_date IS NOT NULL
+                   AND ck.attended_date >= $2 AND ck.attended_date <= $3
+                   AND EXTRACT(MONTH FROM ck.attended_date) = 12 AND EXTRACT(DAY FROM ck.attended_date) IN (24, 25)
+                 GROUP BY ck.calendar_event_id
               ) per_service`,
-      source: 'Attendance at services on 24 and 25 December — each service counts its distinct people.',
+      source: 'Attendance at services on 24 and 25 December as attended — each service counts its distinct people. Rows without a stamp are not dated from today\'s schedule.',
     },
     {
       key: 'active_members', label: 'Members on the rolls', requirement: 'unverified',

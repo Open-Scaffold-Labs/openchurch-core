@@ -1,13 +1,14 @@
+import { viewerMayOpen } from './auth/viewerPages'
 import { BrowserRouter, Routes, Route, NavLink, useNavigate, Navigate, useLocation } from 'react-router-dom'
 import { useRef, useState, useEffect, lazy, Suspense } from 'react'
-import { Users, Calendar, DollarSign, Heart, CheckSquare, Clock, Search, Bell, Sun, Moon, LayoutDashboard, LogOut, Settings, User, ChevronDown, ChevronsLeft, ChevronsRight, X, Loader2, Feather, Shield, CreditCard, ScrollText, SlidersHorizontal, BookOpen, Building2, BarChart3, FileText, UserCheck, Menu, Newspaper, ListMusic, Church, Flame, MessageCircle, Landmark, HelpCircle, LifeBuoy, ArchiveRestore, HandCoins, PackageOpen, Compass } from 'lucide-react'
+import { Users, Calendar, DollarSign, Heart, CheckSquare, Clock, Search, Bell, Sun, Moon, LayoutDashboard, LogOut, Settings, User, ChevronDown, ChevronsLeft, ChevronsRight, Loader2, Feather, Shield, CreditCard, ScrollText, SlidersHorizontal, BookOpen, Building2, BarChart3, FileText, UserCheck, Menu, Newspaper, ListMusic, Church, Flame, MessageCircle, Landmark, HelpCircle, LifeBuoy, ArchiveRestore, HandCoins, PackageOpen, Compass } from 'lucide-react'
 import { AlertTriangle } from 'lucide-react'
 import { Users2 } from 'lucide-react'
 import FeedbackModal from './components/FeedbackModal'
 import OpenMark from './components/OpenMark'
 import { ThemeProvider, useTheme } from './context/ThemeContext'
-import { AuthProvider, useAuth } from './context/AuthContext'
-import { LocaleProvider, useLocale } from './i18n'
+import { useAuth } from './context/AuthContext'
+import { useLocale } from './i18n'
 import { ConfirmProvider } from './components/ConfirmProvider'
 import { apiUrl } from './api'
 // Shell components load eagerly — they're the always-present chrome
@@ -33,6 +34,8 @@ const Schedule = lazy(() => import('./pages/Schedule'))
 const ScheduleConflicts = lazy(() => import('./pages/ScheduleConflicts'))
 const Groups = lazy(() => import('./pages/Groups'))
 const Dashboard = lazy(() => import('./pages/Dashboard'))
+const MemberOutreachUnbuilt = lazy(() =>
+  import('./pages/Dashboard').then((m) => ({ default: m.MemberOutreachUnbuilt })))
 const Tasks = lazy(() => import('./pages/Tasks'))
 const Payroll = lazy(() => import('./pages/Payroll'))
 const Finance = lazy(() => import('./pages/Finance'))
@@ -95,8 +98,9 @@ const AssistantWidget = lazy(() => import('./components/AssistantWidget'))
 // Centered spinner shown while a route chunk loads. Lives inside the
 // content area (or full public viewport), so the app shell never flickers.
 function PageFallback() {
+  const { t } = useLocale()
   return (
-    <div className="flex items-center justify-center py-24" role="status" aria-label="Loading page">
+    <div className="flex items-center justify-center py-24" role="status" aria-label={t('shell.loadingPage')}>
       <Loader2 className="animate-spin text-church-700 dark:text-brass-300" size={24} />
     </div>
   )
@@ -171,7 +175,9 @@ const NAV_ITEMS = [
 // until this parish actually has a live diocese affiliation.
 function visibleNavFor(role, affiliated) {
   return NAV_ITEMS.filter(item =>
-    (!item.adminOnly || role === 'admin') && (!item.affiliatedOnly || affiliated))
+    (!item.adminOnly || role === 'admin') && (!item.affiliatedOnly || affiliated)
+    // SP-021: a Viewer's sidebar lists only the pages their role can read.
+    && (role !== 'viewer' || viewerMayOpen(item.to)))
 }
 
 // Bucket nav items into sections preserving NAV_ITEMS order. Items
@@ -195,7 +201,10 @@ function groupNavBySection(items) {
 // The Open Mark rendered beside "Dashboard" in the Sidebar (inherits the
 // nav item's currentColor).
 function BrandMark() {
-  return <OpenMark className="h-[17px] w-auto" />
+  // Decorative beside the destination name. Left named, the monogram's
+  // own "OpenChurch" label became the collapsed Dashboard link's name
+  // and the title tooltip never entered the accessible-name algorithm.
+  return <OpenMark aria-hidden="true" className="h-[17px] w-auto" />
 }
 
 // Sidebar. `collapsed` shrinks it to a 64px icon rail; `onToggle`
@@ -203,7 +212,7 @@ function BrandMark() {
 // rail state, labels + section headings + the legal footer are
 // hidden, icons center, and nav items carry a native `title` tooltip
 // so the destination is still discoverable on hover.
-function Sidebar({ collapsed: collapsedProp, onToggle, mobileOpen }) {
+export function Sidebar({ collapsed: collapsedProp, onToggle, mobileOpen }) {
   const { dark, toggle } = useTheme()
   const { user } = useAuth()
   const { t } = useLocale()
@@ -211,14 +220,18 @@ function Sidebar({ collapsed: collapsedProp, onToggle, mobileOpen }) {
   // diocese? Failure is treated as "no" — a missing nav item is a smaller
   // wrong than a nav item leading to an empty page.
   const [affiliated, setAffiliated] = useState(false)
+  // SP-029: a Viewer's scope has no /api/affiliation (diocese items are
+  // admin/staff nav only), so don't make a call that can only 403.
+  const viewerRole = user?.role === 'viewer'
   useEffect(() => {
+    if (viewerRole) return undefined
     let alive = true
     fetch(apiUrl('/api/affiliation'))
       .then(r => (r.ok ? r.json() : { affiliation: null }))
       .then(d => { if (alive) setAffiliated(d.affiliation?.status === 'active') })
       .catch(() => {})
     return () => { alive = false }
-  }, [])
+  }, [viewerRole])
   const items = visibleNavFor(user?.role, affiliated)
 
   // POL.4 — below md the sidebar is an off-canvas drawer, so the
@@ -246,16 +259,17 @@ function Sidebar({ collapsed: collapsedProp, onToggle, mobileOpen }) {
   }`
 
   return (
-    <aside className={`${collapsed ? 'w-16' : 'w-60'} ${mobileOpen ? 'translate-x-0' : '-translate-x-full'} md:translate-x-0 flex flex-col fixed inset-y-0 left-0 z-30 bg-parchment-100 dark:bg-ink-900 border-r border-parchment-300/60 dark:border-brass-900/30 transition-[width,transform] duration-200 ease-out print:hidden`}>
+    <aside className={`${collapsed ? 'w-16' : 'w-60'} ${mobileOpen ? 'translate-x-0' : '-translate-x-full'} md:translate-x-0 flex flex-col safe-pt safe-pb fixed inset-y-0 left-0 z-30 bg-parchment-100 dark:bg-ink-900 border-r border-parchment-300/60 dark:border-brass-900/30 transition-[width,transform] duration-200 ease-out print:hidden`}>
       {/* Wordmark — mark only when collapsed, mark + text when open */}
       <NavLink
         to="/"
+        aria-label="OpenChurch"
         className={`flex items-center h-16 border-b border-parchment-300/60 dark:border-brass-900/30 hover:opacity-90 transition-opacity ${
           collapsed ? 'justify-center px-0' : 'gap-3 px-5'
         }`}
       >
         <div className="w-9 h-9 rounded-lg bg-church-900 dark:bg-brass-200 flex items-center justify-center shadow-warm shrink-0">
-          <OpenMark className="h-6 w-auto text-brass-200 dark:text-church-900" />
+          <OpenMark aria-hidden="true" className="h-6 w-auto text-brass-200 dark:text-church-900" />
         </div>
         {!collapsed && (
           <span className="font-display text-2xl font-semibold text-church-900 dark:text-parchment-100 leading-none">
@@ -284,6 +298,7 @@ function Sidebar({ collapsed: collapsedProp, onToggle, mobileOpen }) {
                   key={to}
                   to={to}
                   end={to === '/'}
+                  aria-label={t(`nav.${label}`)}
                   title={collapsed ? t(`nav.${label}`) : undefined}
                   className={({ isActive }) =>
                     `relative flex items-center rounded-lg text-sm font-medium transition-colors group ${
@@ -321,8 +336,8 @@ function Sidebar({ collapsed: collapsedProp, onToggle, mobileOpen }) {
 
         <button
           onClick={onToggle}
-          title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-          aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          title={collapsed ? t('shell.expandSidebar') : t('shell.collapseSidebar')}
+          aria-label={collapsed ? t('shell.expandSidebar') : t('shell.collapseSidebar')}
           aria-pressed={collapsed}
           className={bottomBtnCls}
         >
@@ -332,7 +347,7 @@ function Sidebar({ collapsed: collapsedProp, onToggle, mobileOpen }) {
 
         <button
           onClick={toggle}
-          title={collapsed ? (dark ? 'Light mode' : 'Dark mode') : undefined}
+          title={collapsed ? (dark ? t('shell.light') : t('shell.dark')) : undefined}
           className={bottomBtnCls}
         >
           {dark ? <Sun size={17} /> : <Moon size={17} />}
@@ -360,7 +375,7 @@ function Sidebar({ collapsed: collapsedProp, onToggle, mobileOpen }) {
   )
 }
 
-function Header({ onMenuClick }) {
+export function Header({ onMenuClick }) {
   const { t } = useLocale()
   const [open, setOpen] = useState(false)
   const [helpOpen, setHelpOpen] = useState(false)
@@ -422,12 +437,17 @@ function Header({ onMenuClick }) {
 
   const unread = notifications.filter(n => !n.read).length
 
+  // Whole words in Spanish ("hace 5 minutos"), compact English the panel
+  // already showed ("5m ago"). Unit letters must not be glued into `hace`.
   function timeAgo(dateStr) {
     const s = Math.floor((Date.now() - new Date(dateStr)) / 1000)
-    if (s < 60) return 'just now'
-    if (s < 3600) return `${Math.floor(s / 60)}m ago`
-    if (s < 86400) return `${Math.floor(s / 3600)}h ago`
-    return `${Math.floor(s / 86400)}d ago`
+    if (s < 60) return t('aist.justNow')
+    const mins = Math.floor(s / 60)
+    if (s < 3600) return mins === 1 ? t('aist.agoMinOne') : t('aist.agoMin', { n: mins })
+    const hours = Math.floor(s / 3600)
+    if (s < 86400) return hours === 1 ? t('aist.agoHourOne') : t('aist.agoHour', { n: hours })
+    const days = Math.floor(s / 86400)
+    return days === 1 ? t('aist.agoDayOne') : t('aist.agoDay', { n: days })
   }
 
   // Global search palette (Sprint G). Trigger lives in the header,
@@ -453,7 +473,7 @@ function Header({ onMenuClick }) {
   }, [])
 
   return (
-    <header className="h-16 flex items-center justify-between gap-2 px-4 sm:px-6 bg-parchment-100 dark:bg-ink-900 border-b border-parchment-300/60 dark:border-brass-900/30 sticky top-0 z-10 print:hidden">
+    <header className="safe-h-16 safe-pt flex items-center justify-between gap-2 px-4 sm:px-6 bg-parchment-100 dark:bg-ink-900 border-b border-parchment-300/60 dark:border-brass-900/30 sticky top-0 z-10 print:hidden">
       {/* Left group: mobile nav toggle + search. Capped at max-w-xs so
           the right-side controls still pin to the right edge. */}
       <div className="flex items-center gap-2 flex-1 min-w-0 max-w-xs">
@@ -462,7 +482,7 @@ function Header({ onMenuClick }) {
         <button
           type="button"
           onClick={onMenuClick}
-          aria-label="Open navigation menu"
+          aria-label={t('shell.openNav')}
           className="tap md:hidden -ml-1 shrink-0 inline-flex items-center justify-center p-2 rounded-lg text-ink-500 dark:text-parchment-300/70 hover:bg-parchment-200/60 dark:hover:bg-ink-800/80 transition-colors"
         >
           <Menu size={18} />
@@ -472,12 +492,12 @@ function Header({ onMenuClick }) {
         <button
           type="button"
           onClick={() => setSearchOpen(true)}
-          aria-label="Open search"
+          aria-label={t('shell.openSearch')}
           className="tap inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-parchment-50 dark:bg-ink-800 border border-parchment-300/70 dark:border-brass-900/40 text-ink-500 dark:text-parchment-300/70 hover:bg-parchment-200/60 dark:hover:bg-ink-800/80 transition-colors w-full"
         >
           <Search size={14} className="shrink-0" />
           <span className="text-sm flex-1 text-left hidden sm:inline">{t('shell.search')}</span>
-          <span className="text-sm flex-1 text-left sm:hidden">Search</span>
+          <span className="text-sm flex-1 text-left sm:hidden">{t('shell.searchShort')}</span>
           <kbd className="hidden md:inline px-1.5 py-0.5 rounded border border-parchment-300 dark:border-brass-900/40 bg-parchment-100 dark:bg-ink-900 font-mono text-[10px] text-ink-500 dark:text-parchment-300/70">
             ⌘K
           </kbd>
@@ -507,7 +527,7 @@ function Header({ onMenuClick }) {
         <div className="relative" ref={ref}>
           <button
             onClick={() => setOpen(o => !o)}
-            aria-label={unread > 0 ? `Notifications, ${unread} unread` : 'Notifications'}
+            aria-label={unread > 0 ? t('shell.notif.unread', { n: unread }) : t('nav.Notifications')}
             aria-expanded={open}
             className="tap relative inline-flex items-center justify-center p-2 rounded-lg text-ink-500 hover:text-church-900 dark:text-parchment-200/70 dark:hover:text-brass-200 hover:bg-parchment-200/60 dark:hover:bg-ink-800 transition-colors"
           >
@@ -532,26 +552,26 @@ function Header({ onMenuClick }) {
               {/* Notifications section */}
               <div className="flex items-center justify-between px-4 py-2.5 border-b border-parchment-300/60 dark:border-brass-900/30">
                 <p className="text-xs font-semibold text-ink-500 dark:text-parchment-300/70 uppercase tracking-wider">
-                  Notifications {unread > 0 && <span className="text-brass-700 dark:text-brass-300">({unread})</span>}
+                  {t('nav.Notifications')} {unread > 0 && <span className="text-brass-700 dark:text-brass-300">({unread})</span>}
                 </p>
                 {unread > 0 && (
                   <button onClick={markAllRead} className="text-xs text-church-700 dark:text-brass-300 hover:text-church-900 dark:hover:text-brass-200 transition-colors">
-                    Mark all read
+                    {t('shell.notif.markAll')}
                   </button>
                 )}
               </div>
 
               {notificationsFailed && notifications.length > 0 && (
                 <p role="status" className="px-4 py-2 text-[11px] text-amber-700 dark:text-amber-400 border-b border-parchment-200/60 dark:border-brass-900/25">
-                  This list may be out of date — the last check didn't reach the server.
+                  {t('shell.notif.stale')}
                 </p>
               )}
 
               {notifications.length === 0 ? (
                 <p role="status" className={`px-4 py-4 text-xs text-center ${notificationsFailed ? 'text-amber-700 dark:text-amber-400' : 'text-ink-500 dark:text-parchment-300/70'}`}>
                   {notificationsFailed
-                    ? "We couldn't check your notifications just now."
-                    : 'No notifications yet'}
+                    ? t('shell.notif.checkFailed')
+                    : t('shell.notif.empty')}
                 </p>
               ) : (
                 <ul className="max-h-56 overflow-y-auto divide-y divide-parchment-200/60 dark:divide-brass-900/25">
@@ -570,7 +590,7 @@ function Header({ onMenuClick }) {
                           </p>
                           <p className="flex items-center gap-1.5 text-[10px] text-ink-400 dark:text-parchment-400/50 mt-0.5">
                             <TypeIcon size={10} className={isEvent ? 'text-church-700 dark:text-brass-300' : 'text-ink-400 dark:text-parchment-400/60'} />
-                            <span>{isEvent ? 'Event' : 'Task'}</span>
+                            <span>{isEvent ? t('shell.notif.event') : t('shell.notif.task')}</span>
                             <span>·</span>
                             <span>{timeAgo(n.created_at)}</span>
                           </p>
@@ -597,6 +617,14 @@ function Header({ onMenuClick }) {
 // trigger button + mounts the palette. See
 // components/GlobalSearchPalette.jsx (Sprint G).
 
+function accountRole(t, role) {
+  if (role === 'admin') return t('shell.role.admin')
+  if (role === 'staff') return t('shell.role.staff')
+  if (role === 'viewer') return t('shell.role.viewer')
+  if (!role) return t('dash.member')
+  return role
+}
+
 function ProfileDropdown() {
   const { t } = useLocale()
   const [open, setOpen] = useState(false)
@@ -606,10 +634,10 @@ function ProfileDropdown() {
   const { user, logout } = useAuth()
   const navigate = useNavigate()
 
-  const displayName  = user?.name  || 'OpenChurch Admin'
+  const displayName  = user?.name  || t('shell.account.fallbackName')
   const displayEmail = user?.email || ''
   const orgName      = user?.organization?.name || 'OpenChurch'
-  const displayRole  = user?.role === 'admin' ? 'Administrator' : (user?.role || 'Member')
+  const displayRole  = accountRole(t, user?.role)
 
   async function handleLogout() {
     setOpen(false)
@@ -655,7 +683,7 @@ function ProfileDropdown() {
     <div className="relative" ref={ref}>
       <button
         onClick={() => setOpen(o => !o)}
-        aria-label={`Account menu for ${displayName}`}
+        aria-label={t('shell.account.menu', { name: displayName })}
         aria-expanded={open}
         className="tap flex items-center gap-2 p-1 pr-2 rounded-lg hover:bg-parchment-200/60 dark:hover:bg-ink-800 transition-colors"
       >
@@ -686,15 +714,15 @@ function ProfileDropdown() {
           <div className="grid grid-cols-3 divide-x divide-parchment-300/60 dark:divide-brass-900/30 border-b border-parchment-300/60 dark:border-brass-900/30">
             <button onClick={() => { navigate('/clients'); setOpen(false) }} className="px-3 py-3 text-center hover:bg-parchment-100 dark:hover:bg-ink-800/60 transition-colors cursor-pointer">
               <p className="text-sm font-bold text-ink-900 dark:text-parchment-50">{fmt(stats.members)}</p>
-              <p className="text-[10px] text-ink-500 dark:text-parchment-300/70 uppercase tracking-wider">Members</p>
+              <p className="text-[10px] text-ink-500 dark:text-parchment-300/70 uppercase tracking-wider">{t('dash.glance.members')}</p>
             </button>
             <button onClick={() => { navigate('/events'); setOpen(false) }} className="px-3 py-3 text-center hover:bg-parchment-100 dark:hover:bg-ink-800/60 transition-colors cursor-pointer">
               <p className="text-sm font-bold text-ink-900 dark:text-parchment-50">{fmt(stats.events)}</p>
-              <p className="text-[10px] text-ink-500 dark:text-parchment-300/70 uppercase tracking-wider">Events</p>
+              <p className="text-[10px] text-ink-500 dark:text-parchment-300/70 uppercase tracking-wider">{t('dash.glance.events')}</p>
             </button>
             <button onClick={() => { navigate('/tasks'); setOpen(false) }} className="px-3 py-3 text-center hover:bg-parchment-100 dark:hover:bg-ink-800/60 transition-colors cursor-pointer">
               <p className="text-sm font-bold text-ink-900 dark:text-parchment-50">{fmt(stats.tasks)}</p>
-              <p className="text-[10px] text-ink-500 dark:text-parchment-300/70 uppercase tracking-wider">Tasks</p>
+              <p className="text-[10px] text-ink-500 dark:text-parchment-300/70 uppercase tracking-wider">{t('dash.glance.tasks')}</p>
             </button>
           </div>
 
@@ -705,14 +733,14 @@ function ProfileDropdown() {
               className="flex items-center gap-3 w-full px-4 py-2.5 text-sm text-ink-700 dark:text-parchment-200 hover:bg-parchment-100 dark:hover:bg-ink-800/60 hover:text-ink-900 dark:hover:text-parchment-50 transition-colors"
             >
               <User size={15} className="text-ink-400 dark:text-parchment-400/60" />
-              View Members
+              {t('shell.account.viewMembers')}
             </button>
             <button
               onClick={() => { navigate('/tasks'); setOpen(false) }}
               className="flex items-center gap-3 w-full px-4 py-2.5 text-sm text-ink-700 dark:text-parchment-200 hover:bg-parchment-100 dark:hover:bg-ink-800/60 hover:text-ink-900 dark:hover:text-parchment-50 transition-colors"
             >
               <Settings size={15} className="text-ink-400 dark:text-parchment-400/60" />
-              Manage Tasks
+              {t('shell.account.manageTasks')}
             </button>
           </div>
 
@@ -739,7 +767,7 @@ function ProfileDropdown() {
               onClick={handleLogout}
             >
               <LogOut size={15} />
-              Sign Out
+              {t('shell.account.signOut')}
             </button>
           </div>
         </div>
@@ -751,6 +779,17 @@ function ProfileDropdown() {
 // Wraps the signed-in shell (sidebar + header + page). Anyone hitting one
 // of these routes without a valid session is bounced to /login, preserving
 // the attempted URL so we can return them there after sign-in.
+// SP-021: shown instead of a page a Viewer's role cannot read.
+function ViewerNotAvailable() {
+  const { t } = useLocale()
+  return (
+    <div role="status" className="max-w-lg mx-auto mt-16 text-center">
+      <h1 className="font-display text-2xl font-semibold text-ink-900 dark:text-parchment-50">{t('viewer.notAvailableTitle')}</h1>
+      <p className="mt-2 text-sm text-ink-600 dark:text-parchment-300/80">{t('viewer.notAvailableBody')}</p>
+    </div>
+  )
+}
+
 function ProtectedLayout() {
   const { isAuthenticated, loading, user, authUnavailable } = useAuth()
   const location = useLocation()
@@ -825,12 +864,17 @@ function ProtectedLayout() {
               route's chunk fetch the sidebar + header stay put and just
               the page body shows the spinner (POL.1). */}
           <Suspense fallback={<PageFallback />}>
+          {user?.role === 'viewer' && !viewerMayOpen(location.pathname) ? <ViewerNotAvailable /> : (
           <Routes>
             {/* Each route is wrapped in a PageErrorBoundary so a render
                 error inside a single page leaves the sidebar + header
-                fully usable. The root ErrorBoundary still catches
-                catastrophic above-layout failures (AuthProvider, etc.). */}
+                fully usable. The inner ErrorBoundary (inside LocaleProvider
+                in main.jsx) still catches catastrophic App-tree failures. */}
             <Route path="/"          element={<PageErrorBoundary scope="Dashboard"><Dashboard /></PageErrorBoundary>} />
+            {/* Unfinished on purpose — there is no inbox. A missing route
+                used to leave the main pane blank, which looks like a
+                crash, not an unbuilt feature. */}
+            <Route path="/messages"  element={<PageErrorBoundary scope="Member Outreach"><MemberOutreachUnbuilt /></PageErrorBoundary>} />
             <Route path="/clients"   element={<PageErrorBoundary scope="Members"><Clients /></PageErrorBoundary>} />
             <Route path="/groups"    element={<PageErrorBoundary scope="Groups"><Groups /></PageErrorBoundary>} />
             <Route path="/clients/:id" element={<PageErrorBoundary scope="Member profile"><MemberDetail /></PageErrorBoundary>} />
@@ -880,6 +924,7 @@ function ProtectedLayout() {
             <Route path="/notifications" element={<PageErrorBoundary scope="Notifications"><Notifications /></PageErrorBoundary>} />
             <Route path="/preferences" element={<PageErrorBoundary scope="Preferences"><Preferences /></PageErrorBoundary>} />
           </Routes>
+          )}
           </Suspense>
         </main>
       </div>
@@ -922,13 +967,10 @@ export default function App() {
   return (
     <ThemeProvider>
       <BrowserRouter>
-        <AuthProvider>
-        {/* Locale spine — inside AuthProvider so the parish default
-            (user.organization.locale) can join the fallback chain. */}
-        <LocaleProvider>
-        {/* Inside the locale spine, because the confirmation dialog now
-            speaks: its "a recoverable copy is kept" note is a translated
-            string, and a provider can only read contexts above it. */}
+        {/* ConfirmProvider stays here — below LocaleProvider (main.jsx).
+            The dialog calls useLocale(); mounting it above the locale
+            spine throws on first paint. Auth + Locale live in main.jsx
+            between the outer and inner ErrorBoundaries. */}
         <ConfirmProvider>
           {/* Install prompt lives outside Routes so it can render on
               any page — including /login + /p/:slug/events where the
@@ -981,8 +1023,6 @@ export default function App() {
           </Routes>
           </Suspense>
         </ConfirmProvider>
-        </LocaleProvider>
-        </AuthProvider>
       </BrowserRouter>
     </ThemeProvider>
   )

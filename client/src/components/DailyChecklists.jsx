@@ -1,11 +1,22 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import { ClipboardCheck, Plus, X, Loader2, Settings2 } from 'lucide-react'
 import { apiUrl } from '../api'
 import { useAuth } from '../context/AuthContext'
 import { useToast } from '../components/ToastProvider'
 import { useLocale } from '../i18n'
 import { useConfirm } from './ConfirmProvider'
+import { SkeletonBlock } from './Skeleton'
 import { loadList } from '../utils/format'
+
+// In flight is not an empty day and not a parish with no routines.
+function ChecklistPending() {
+  return (
+    <div role="status" aria-label="Loading" className="space-y-2">
+      <SkeletonBlock className="h-3 w-1/3" />
+      <SkeletonBlock className="h-3 w-2/3" />
+    </div>
+  )
+}
 
 // Daily operational checklists (OPS.1) — the dashboard widget. Renders
 // nothing at all when the org has no active templates and the viewer
@@ -23,6 +34,13 @@ export default function DailyChecklists() {
   // A dropped request must not look like a day with nothing to do.
   const [runsFailed, setRunsFailed] = useState(false)
   const [templates, setTemplates] = useState([])
+  // A failed routines read must not look like a parish with no checklists.
+  const [templatesFailed, setTemplatesFailed] = useState(false)
+  // While the routines read is in flight, Manage must not look settled-empty.
+  const [templatesLoading, setTemplatesLoading] = useState(false)
+  // Only the latest templates claim may paint. An older {templates:[]}
+  // must not wipe a newer list into a quiet empty parish.
+  const templatesLoadGen = useRef(0)
   const [managing, setManaging] = useState(false)
   const [form, setForm] = useState({ title: '', items: '' })
   const [busy, setBusy] = useState(false)
@@ -32,20 +50,47 @@ export default function DailyChecklists() {
     // itself when the list is empty and you cannot write — so the checklist
     // did not merely look empty, it VANISHED. A closing checklist that is
     // not on screen is one nobody does.
-    loadList(apiUrl('/api/checklists/today'), d => d.runs ?? []).then(({ ok, data }) => {
+    // `d.runs ?? []` treated a missing, null, or wrong-shaped `runs` as a
+    // successful empty day. A body whose runs is not an array is a failed
+    // load. A genuine { runs: [] } stays the real empty day.
+    loadList(apiUrl('/api/checklists/today'), d => d?.runs).then(({ ok, data }) => {
       setRuns(data)
       setRunsFailed(!ok)
     })
     if (canWrite) {
+      const gen = ++templatesLoadGen.current
+      setTemplatesLoading(true)
       fetch(apiUrl('/api/checklists/templates'))
-        .then(r => (r.ok ? r.json() : { templates: [] }))
-        .then(d => setTemplates(d.templates ?? []))
-        .catch(() => {})
+        .then(async r => {
+          if (!r.ok) throw new Error('templates')
+          return r.json()
+        })
+        .then(d => {
+          if (gen !== templatesLoadGen.current) return
+          const list = d?.templates
+          if (!Array.isArray(list)) {
+            setTemplates([])
+            setTemplatesFailed(true)
+            setTemplatesLoading(false)
+            return
+          }
+          setTemplates(list)
+          setTemplatesFailed(false)
+          setTemplatesLoading(false)
+        })
+        .catch(() => {
+          if (gen !== templatesLoadGen.current) return
+          setTemplates([])
+          setTemplatesFailed(true)
+          setTemplatesLoading(false)
+        })
     }
   }, [canWrite])
   useEffect(() => { load() }, [load])
 
   const toggle = async (run, index, done) => {
+    // A viewer must not get an optimistic tick the server will refuse.
+    if (!canWrite) return
     // Optimistic tick — the whole point of a checklist is that it
     // responds like paper.
     setRuns(rs => rs.map(r => r.id === run.id
@@ -94,7 +139,19 @@ export default function DailyChecklists() {
     } catch { toast.error(t('chk.saveError')) }
   }
 
-  if (runs === null) return null
+  // Still reading today. A viewer must not look the same as a real empty
+  // day, which is the only case that returns null.
+  if (runs === null) {
+    return (
+      <div className="rounded-2xl border border-parchment-300/60 dark:border-brass-900/30 bg-parchment-50 dark:bg-ink-900 shadow-warm p-4">
+        <div className="flex items-center gap-2 mb-3">
+          <ClipboardCheck size={16} className="text-church-700 dark:text-brass-300" />
+          <p className="text-[11px] font-semibold uppercase tracking-widest text-brass-700 dark:text-brass-300">{t('chk.title')}</p>
+        </div>
+        <ChecklistPending />
+      </div>
+    )
+  }
   // Only disappear when the list is genuinely empty. If it failed to load,
   // stay on screen and say so — silence is the one answer that is never true.
   if (runs.length === 0 && !canWrite && !runsFailed) return null
@@ -140,7 +197,7 @@ export default function DailyChecklists() {
                 {run.items.map((item, i) => (
                   <li key={i}>
                     <label className={`flex items-start gap-2 text-sm cursor-pointer ${item.done ? 'text-ink-400 dark:text-parchment-400/50 line-through' : 'text-ink-700 dark:text-parchment-200'}`}>
-                      <input type="checkbox" checked={item.done} disabled={!canWrite && false}
+                      <input type="checkbox" checked={item.done} disabled={!canWrite}
                         onChange={e => toggle(run, i, e.target.checked)}
                         className="mt-0.5 h-4 w-4 accent-church-700" />
                       <span>{item.text}</span>
@@ -155,6 +212,14 @@ export default function DailyChecklists() {
 
       {canWrite && managing && (
         <div className="mt-4 pt-4 border-t border-parchment-300/60 dark:border-brass-900/25 space-y-3">
+          {templatesFailed && (
+            <p role="status" className="text-[12px] text-amber-700 dark:text-amber-400 leading-snug">
+              {t('chk.templatesUnread')}
+            </p>
+          )}
+          {templatesLoading && templates.length === 0 && !templatesFailed && (
+            <ChecklistPending />
+          )}
           {templates.length > 0 && (
             <ul className="space-y-1">
               {templates.map(tp => (

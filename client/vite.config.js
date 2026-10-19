@@ -32,7 +32,15 @@ export default defineConfig(({ mode }) => ({
       strategies:   'injectManifest',
       srcDir:       'src',
       filename:     'sw.js',
-      includeAssets: ['favicon.ico', 'icon.svg', 'apple-touch-icon.png'],
+      includeAssets: [
+        'favicon.ico',
+        'icon.svg',
+        'apple-touch-icon.png',
+        'icon-192.png',
+        'icon-512.png',
+        'icon-192-maskable.png',
+        'icon-512-maskable.png',
+      ],
       manifest: {
         name: 'OpenChurch',
         short_name: 'OpenChurch',
@@ -40,17 +48,19 @@ export default defineConfig(({ mode }) => ({
         theme_color: '#7B2D26',       // church-600 burgundy
         background_color: '#FBF8F2',  // parchment-50
         display: 'standalone',
-        orientation: 'portrait',
+        orientation: 'any',
         start_url: '/',
         scope: '/',
         icons: [
-          // SVG icon — modern PWA installers (Android / Chrome) accept
-          // SVG via purpose: 'any'. iOS still expects PNG via the
-          // apple-touch-icon <link>, which is wired in index.html.
-          // Replace this and add PNG variants (192, 512, maskable) per
-          // your parish branding before public launch.
-          { src: '/icon.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any' },
-          { src: '/icon.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'maskable' },
+          // PNG install icons (OC-READY-01). Chrome / Android require
+          // 192 + 512 raster icons; SVG-only was not enough. Generated
+          // from the existing apple-touch PNG (gold mark on church
+          // burgundy). Maskable variants keep the mark in the inner
+          // 80% safe zone. iOS still uses apple-touch-icon via index.html.
+          { src: '/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
+          { src: '/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
+          { src: '/icon-192-maskable.png', sizes: '192x192', type: 'image/png', purpose: 'maskable' },
+          { src: '/icon-512-maskable.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
         ],
       },
       injectManifest: {

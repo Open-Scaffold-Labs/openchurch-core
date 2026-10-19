@@ -4,6 +4,9 @@ import { normalizeDonorEmail } from '../finance/donorIdentity.js'
 import { requireIntParam, parsePagination } from '../utils/params.js'
 import { parseCSVToObjects } from '../utils/csv.js'
 import { protectedDelete } from '../vault/deleteRoute.js'
+import { requireRole } from '../middleware/auth.js'
+import { withOrganizationAdmission } from '../auth/loginDeactivation.js'
+import { markStewardship } from '../middleware/auditLog.js'
 
 const router = Router()
 
@@ -42,7 +45,7 @@ const IMPORT_COLUMNS = ['name', 'email', 'phone', 'role', 'tags']
 const CLIENT_PUBLIC_COLUMNS = [
   'id', 'organization_id', 'name', 'company', 'email', 'phone', 'notes',
   'status', 'role', 'tags', 'preferred_language', 'birth_date', 'joined_date',
-  'avatar', 'reminders_opt_out', 'created_at', 'updated_at',
+  'avatar', 'reminders_opt_out', 'created_at', 'updated_at', 'deidentified_at',
 ].join(', ')
 
 // Every query in this router filters by `organization_id = $orgId` so the
@@ -104,6 +107,32 @@ router.get('/', async (req, res) => {
   }
 })
 
+// GET /api/clients/picker?search=&limit=  (SP-052 / R285-2)
+// Names-only lookup for pickers (Mass intention requester link). Fixed
+// projection {id, name}: no contact, note, birth date or capability field,
+// and no caller-chosen columns. Session organization only. Name match only.
+// Bounded: limit 1..25 (default 10). Same auth as the roster it replaces.
+router.get('/picker', async (req, res) => {
+  try {
+    const raw = typeof req.query.search === 'string' ? req.query.search.trim().slice(0, 100) : ''
+    const n = Number.parseInt(String(req.query.limit ?? '10'), 10)
+    const limit = Number.isInteger(n) ? Math.min(Math.max(n, 1), 25) : 10
+    const params = [req.organizationId]
+    let where = 'organization_id = $1'
+    if (raw) {
+      params.push(`%${raw.replace(/[\\%_]/g, m => '\\' + m)}%`)
+      where += ` AND name ILIKE $${params.length}`
+    }
+    params.push(limit)
+    const { rows } = await pool.query(
+      `SELECT id, name FROM ochr_clients WHERE ${where} ORDER BY name, id LIMIT $${params.length}`, params)
+    res.json(rows.map(r => ({ id: r.id, name: r.name })))
+  } catch (err) {
+    console.error('clients picker failed:', err)
+    res.status(500).json({ error: 'Failed to load members' })
+  }
+})
+
 // GET /api/clients/:id
 router.get('/:id', async (req, res) => {
   const id = requireIntParam(req, res); if (id === null) return
@@ -158,17 +187,16 @@ router.get('/:id/donations', async (req, res) => {
 
     const { rows } = await pool.query(
       `SELECT id, donor_name, donor_email, donor_address,
-              amount, category, method, date, notes
-         FROM ochr_donations
+              amount, refunded_total, live_amount, category, method, date, notes
+         FROM ochr_donation_live
         WHERE organization_id = $1
           AND ${filter}
-          AND payment_status IS DISTINCT FROM 'refunded'
         ORDER BY date DESC, id DESC
         LIMIT 200`,
       [req.organizationId, matchKey]
     )
 
-    const total = rows.reduce((sum, r) => sum + Number(r.amount), 0)
+    const total = rows.reduce((sum, r) => sum + Number(r.live_amount), 0)
     res.set('Cache-Control', 'private, max-age=30')
     res.json({
       by:         useEmail ? 'email' : 'name',
@@ -183,9 +211,11 @@ router.get('/:id/donations', async (req, res) => {
   }
 })
 
-// GET /api/clients/:id/checkins (CHK.4)
+// GET /api/clients/:id/checkins (CHK.4 / CHK-04)
 // A member's attendance history — the services they checked in to,
 // newest first. Tenant-scoped on both the member and the check-ins.
+// Title/date/time are the stamps written at check-in. NULL is unknown;
+// this query does not join the live calendar.
 router.get('/:id/checkins', async (req, res) => {
   const id = requireIntParam(req, res); if (id === null) return
   try {
@@ -197,11 +227,13 @@ router.get('/:id/checkins', async (req, res) => {
 
     const { rows } = await pool.query(
       `SELECT ci.id, ci.checked_in_at, ci.checked_out_at,
-              e.id AS event_id, e.title AS event_title, e.date AS event_date
+              ci.calendar_event_id AS event_id,
+              ci.attended_title AS event_title,
+              to_char(ci.attended_date, 'YYYY-MM-DD') AS event_date,
+              to_char(ci.attended_time, 'HH24:MI') AS attended_time
          FROM ochr_checkins ci
-         JOIN ochr_calendar_events e ON e.id = ci.calendar_event_id
         WHERE ci.organization_id = $1 AND ci.client_id = $2
-        ORDER BY e.date DESC, ci.checked_in_at DESC
+        ORDER BY ci.attended_date DESC NULLS LAST, ci.checked_in_at DESC
         LIMIT 100`,
       [req.organizationId, id]
     )
@@ -322,6 +354,64 @@ router.post('/import', async (req, res) => {
   }
 })
 
+// Explicit, admin-only profile minimization. This is not vaulted Remove.
+router.post('/:id/deidentify', requireRole('admin'), async (req, res) => {
+  const id = requireIntParam(req, res); if (id === null) return
+  if (req.body?.confirm !== 'DEIDENTIFY' || req.body?.acknowledge_history_retained !== true) {
+    return res.status(400).json({ error: 'Confirm DEIDENTIFY and acknowledge that parish history and historical names remain.' })
+  }
+  try {
+    // Organization admission first (refuses a held organization with 409),
+    // then the profile row: the same lock order as HOLD and login lifecycle.
+    const result = await withOrganizationAdmission(req.organizationId, async (client) => {
+      // Exclusive for the whole transaction: an audit write about this member
+      // that is still open finishes first (and is scrubbed below), and one
+      // that starts now drops the contact keys itself (migration 114).
+      await client.query('SELECT pg_advisory_xact_lock(ochr_member_minimization_key($1, $2))', [req.organizationId, id])
+      const { rows: [profile] } = await client.query('SELECT id, deidentified_at FROM ochr_clients WHERE id = $1 AND organization_id = $2 FOR UPDATE', [id, req.organizationId])
+      if (!profile) return { status: 404, body: { error: 'Member not found' } }
+      await client.query(`INSERT INTO ochr_profile_minimizations (organization_id, client_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [req.organizationId, id])
+      await client.query(`UPDATE ochr_clients SET email = NULL, phone = NULL, notes = NULL, avatar = NULL, birth_date = NULL, calendar_token = NULL, swap_token = NULL, status = 'inactive', deidentified_at = COALESCE(deidentified_at, NOW()), updated_at = NOW() WHERE id = $1 AND organization_id = $2`, [id, req.organizationId])
+      // Audit rows about this member keep the request bodies that created or
+      // edited it. Drop the contact keys there too (names stay, by design);
+      // the 114 trigger covers rows written later.
+      const { rowCount: auditCopies } = await client.query(
+        `UPDATE ochr_audit_log
+            SET metadata = metadata - 'email' - 'phone' - 'notes' - 'avatar' - 'birth_date'
+          WHERE organization_id = $1 AND entity_type = 'client'
+            AND entity_id ~ '^[0-9]+$' AND ltrim(entity_id, '0') = $2
+            AND metadata ?| ARRAY['email', 'phone', 'notes', 'avatar', 'birth_date']`,
+        [req.organizationId, String(id)]
+      )
+      const { rows: [{ n: vaultCopies }] } = await client.query(
+        `SELECT COUNT(*)::int AS n FROM ochr_vault_entries
+          WHERE organization_id = $1 AND entity_table = 'ochr_clients' AND entity_id = $2 AND restored_at IS NULL`,
+        [req.organizationId, String(id)]
+      )
+      return { status: 200, body: {
+        deidentified: true, already: !!profile.deidentified_at, id,
+        contact_fields_cleared: true, calendar_access_revoked: true, parish_history_retained: true,
+        audit_contact_copies_minimized: auditCopies,
+        // Audit rows about OTHER records (imports, forms, gifts, groups) can
+        // quote this member's details too; they were not searched or counted.
+        other_audit_copies: 'not_measured',
+        // Verified payment-provider events are kept for reconciliation
+        // (ochr_billing_event_receipts) and can name a donor; not searched.
+        billing_event_receipts: 'not_measured',
+        // Earlier vault captures of this member keep their snapshot; the
+        // minimization marker refuses restoring contact data from them.
+        vault_snapshots_retained: vaultCopies,
+        vault_capture_created: false, provider_status: 'not_contacted', backup_status: 'not_erased', all_copies_erased: false,
+      } }
+    })
+    if (result.status === 200) markStewardship(res, { action: 'deidentify', targetId: id, already: result.body.already })
+    res.status(result.status).json(result.body)
+  } catch (err) {
+    console.error('clients.deidentify failed:', err)
+    res.status(500).json({ error: 'Failed to minimize member contact data' })
+  }
+})
+
 // PATCH /api/clients/:id
 router.patch('/:id', async (req, res) => {
   const id = requireIntParam(req, res); if (id === null) return
@@ -331,6 +421,16 @@ router.patch('/:id', async (req, res) => {
     // the member's record. Allowlist is hardcoded; nothing from the
     // request reaches the SQL text.
     const PATCHABLE = ['name', 'company', 'email', 'phone', 'notes', 'status', 'role', 'tags', 'birth_date', 'joined_date', 'avatar']
+    // A present name must be a non-blank string, stored trimmed — the same
+    // rule POST and CSV import already apply. Before, '' became NULL and
+    // hit the NOT NULL constraint (500), and '   ' was saved as a blank
+    // member name that every list and header then showed as empty.
+    if (req.body.name !== undefined) {
+      if (typeof req.body.name !== 'string' || !req.body.name.trim()) {
+        return res.status(400).json({ error: 'Name is required' })
+      }
+      req.body.name = req.body.name.trim()
+    }
     const sets = []
     const vals = []
     for (const col of PATCHABLE) {
@@ -344,11 +444,14 @@ router.patch('/:id', async (req, res) => {
     const { rows } = await pool.query(
       `UPDATE ochr_clients
           SET ${sets.join(', ')}, updated_at = NOW()
-        WHERE id = $${vals.length + 1} AND organization_id = $${vals.length + 2}
+        WHERE id = $${vals.length + 1} AND organization_id = $${vals.length + 2} AND deidentified_at IS NULL
         RETURNING ${CLIENT_PUBLIC_COLUMNS}`,
       [...vals, id, req.organizationId]
     )
-    if (!rows.length) return res.status(404).json({ error: 'Not found' })
+    if (!rows.length) {
+      const { rows: minimized } = await pool.query('SELECT id FROM ochr_clients WHERE id = $1 AND organization_id = $2 AND deidentified_at IS NOT NULL', [id, req.organizationId])
+      return minimized.length ? res.status(409).json({ error: 'This profile contact data has been minimized and cannot be restored by editing.' }) : res.status(404).json({ error: 'Not found' })
+    }
     res.json(rows[0])
   } catch (err) {
     console.error(err)

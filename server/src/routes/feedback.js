@@ -79,11 +79,15 @@ adminRouter.get('/', async (req, res) => {
     params.push(limit, offset)
 
     const { rows } = await pool.query(
-      `SELECT f.id, f.organization_id, o.name AS organization,
-              f.user_email, f.user_role, f.category, f.message, f.route,
+      `SELECT f.id, f.organization_id, f.user_id, o.name AS organization,
+              CASE WHEN u.closed_at IS NOT NULL THEN NULL ELSE f.user_email END AS user_email,
+              (u.closed_at IS NOT NULL) AS actor_closed,
+              f.user_role, f.category, f.message, f.route,
               f.status, f.created_at
          FROM ochr_feedback_ledger f
          JOIN ochr_organizations o ON o.id = f.organization_id
+         LEFT JOIN ochr_users u
+           ON u.id = f.user_id AND u.organization_id = f.organization_id
         ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
         ORDER BY f.created_at DESC
         LIMIT $${params.length - 1} OFFSET $${params.length}`,

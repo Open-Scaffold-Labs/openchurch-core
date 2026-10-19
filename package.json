@@ -18,9 +18,16 @@
     "lint:honest": "node scripts/honest-failure.mjs",
     "lint:honest:list": "node scripts/honest-failure.mjs --list",
     "lint:honest:baseline": "node scripts/honest-failure.mjs --baseline",
+    "check:prepush": "node scripts/prepush.mjs",
     "lint:client-scope": "node scripts/client-scope.mjs",
+    "lint:i18n-critical": "node scripts/i18n-critical-surfaces.mjs",
+    "test:i18n-critical": "node --test scripts/i18n-critical-surfaces.test.mjs",
+    "test:a11y-critical": "npm test --prefix client -- src/a11y/criticalSurfaces.test.jsx",
     "lint:api-shape": "node scripts/api-shape.mjs",
-    "lint:api-shape:baseline": "node scripts/api-shape.mjs --baseline"
+    "lint:api-shape:baseline": "node scripts/api-shape.mjs --baseline",
+    "test:golden": "node scripts/golden-journeys.mjs",
+    "rehearsal:proof": "node scripts/demo-rehearsal.mjs --proof",
+    "test:rehearsal": "node --test scripts/demo-rehearsal.test.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.111.0",

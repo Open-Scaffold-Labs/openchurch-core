@@ -71,6 +71,14 @@ export async function sendPushToUser(userId, payload) {
     return { status: 'no_vapid_configured', sent: 0 }
   }
 
+  const { rows: activeUser } = await pool.query(
+    `SELECT u.id FROM ochr_users u JOIN ochr_organizations o ON o.id = u.organization_id
+      WHERE u.id = $1 AND o.held_at IS NULL
+        AND u.closed_at IS NULL AND u.deactivated_at IS NULL`, [userId],
+  )
+  // R286-3: also refuses a closed/deactivated login, re-read at send time.
+  if (!activeUser.length) return { status: 'recipient_inactive_or_held', sent: 0 }
+
   const { rows: subs } = await pool.query(
     `SELECT id, endpoint, p256dh, auth
        FROM ochr_push_subscriptions
@@ -78,6 +86,16 @@ export async function sendPushToUser(userId, payload) {
     [userId]
   )
   if (subs.length === 0) return { status: 'no_subscriptions', sent: 0 }
+
+  // R286-3 (fda17292 follow-up): the subscription lookup is awaited, so a
+  // closure, deactivation or HOLD can commit during it. Re-read admission
+  // here; everything from this check to sendNotification is synchronous.
+  const { rows: stillActive } = await pool.query(
+    `SELECT u.id FROM ochr_users u JOIN ochr_organizations o ON o.id = u.organization_id
+      WHERE u.id = $1 AND o.held_at IS NULL
+        AND u.closed_at IS NULL AND u.deactivated_at IS NULL`, [userId],
+  )
+  if (!stillActive.length) return { status: 'recipient_inactive_or_held', sent: 0 }
 
   const json = JSON.stringify({
     title: payload?.title ?? 'OpenChurch',

@@ -38,6 +38,8 @@ const mount = () => render(
 const QUEUED_CLAIM = /nothing queued right now/i
 const SENT_CLAIM   = /nothing sent yet/i
 const FAILED       = /this didn'?t load|some of this didn'?t load/i
+const BOOK         = /That list didn't load — nothing was lost/
+const RAW_CAUSE    = /Cannot read properties of null|Unexpected token|TypeError/
 
 beforeEach(() => vi.unstubAllGlobals())
 
@@ -65,12 +67,21 @@ describe('FAILURE must never read as empty', () => {
     ['a 500',           () => err(500)],
     ['a 403',           () => err(403)],
     ['a malformed body', bad],
+    ['a null body',     () => ({ ok: true, status: 200, json: async () => null })],
+    ['a JSON array',    () => ({ ok: true, status: 200, json: async () => [] })],
+    ['a null field',    () => ok({ scheduled: null })],
+    ['a missing field', () => ok({})],
+    ['a scalar field',  () => ok({ scheduled: 'queued' })],
+    ['an object field', () => ok({ scheduled: { nope: true } })],
   ]) {
     it(`${label} on the queue does not claim nothing is queued`, async () => {
       stub(sched, () => ok({ log: LOG }))
       mount()
       await waitFor(() => expect(screen.getByText(FAILED)).toBeInTheDocument())
+      expect(screen.getByText(BOOK)).toBeInTheDocument()
+      expect(screen.queryByText(RAW_CAUSE)).not.toBeInTheDocument()
       expect(screen.queryByText(QUEUED_CLAIM)).not.toBeInTheDocument()
+      expect(screen.getByText('b@x.com')).toBeInTheDocument()
     })
   }
 

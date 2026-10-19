@@ -13,6 +13,7 @@
 import pool from '../db.js'
 import { computeEaster } from '../routes/liturgical.js'
 import { DISTINCT_PEOPLE } from './definitions.js'
+import { guardFormula } from '../utils/csv.js'
 
 // Easter is a movable feast, so its query cannot live as a static string in
 // the definition. It is the one field that needs the liturgical calendar.
@@ -25,11 +26,12 @@ async function easterAttendance(orgId, start, end) {
   const { rows } = await pool.query(
     `SELECT COALESCE(SUM(n), 0)::int AS value
        FROM (
-         SELECT e.id, ${DISTINCT_PEOPLE} AS n
+         SELECT ck.calendar_event_id AS id, ${DISTINCT_PEOPLE} AS n
            FROM ochr_checkins ck
-           JOIN ochr_calendar_events e ON e.id = ck.calendar_event_id
-          WHERE ck.organization_id = $1 AND e.date = ANY($2::date[])
-          GROUP BY e.id
+          WHERE ck.organization_id = $1
+            AND ck.attended_date IS NOT NULL
+            AND ck.attended_date = ANY($2::date[])
+          GROUP BY ck.calendar_event_id
        ) per_service`,
     [orgId, dates]
   )
@@ -92,8 +94,9 @@ export async function runReport(report, { orgId, start, end }) {
 
 export function toCSV(result) {
   const esc = v => {
-    const s = v == null ? '' : String(v)
-    return /[",\n]/.test(s) ? `"${s.replaceAll('"', '""')}"` : s
+    // ARG-LEAK-7: neutralise formula-leading text; plain numbers stay numbers.
+    const s = guardFormula(v, { allowNumbers: true })
+    return /[",\n\r]/.test(s) ? `"${s.replaceAll('"', '""')}"` : s
   }
   const lines = [
     ['field', 'value', 'requirement', 'source', 'note'].join(','),

@@ -43,6 +43,36 @@ const KIND_WORDS = {
 
 const day = v => (v ? String(v).slice(0, 10) : '')
 
+// The server's reasons for a skipped cascaded child (server/src/vault,
+// restoreEntry). Anything it says that we do not recognise is shown as
+// it came — a reason we did not translate is better than one we made up.
+const SKIP_REASONS = {
+  'its related record is gone':  'vault.reasonGone',
+  'could not be re-inserted':    'vault.reasonReinsert',
+}
+
+// A restore answers 200 with both halves: what came back and what did
+// not. `not_restored.relinked` counts connections that now point at
+// another record (the server never overwrites those); `not_restored.
+// cascaded[]` lists children it could not re-insert, each with a reason.
+// Turn that into sentences, or nothing if every count is zero.
+function partialLines(t, notRestored) {
+  const lines = []
+  const relinked = Number(notRestored?.relinked) || 0
+  if (relinked > 0) {
+    lines.push(t(relinked === 1 ? 'vault.notRelinked' : 'vault.notRelinked_plural', { n: relinked }))
+  }
+  const byReason = new Map()
+  for (const c of Array.isArray(notRestored?.cascaded) ? notRestored.cascaded : []) {
+    const reason = SKIP_REASONS[c?.reason] ? t(SKIP_REASONS[c.reason]) : (c?.reason || t('vault.reasonReinsert'))
+    byReason.set(reason, (byReason.get(reason) ?? 0) + 1)
+  }
+  for (const [reason, n] of byReason) {
+    lines.push(t(n === 1 ? 'vault.notCascaded' : 'vault.notCascaded_plural', { n, reason }))
+  }
+  return lines
+}
+
 export default function Archive() {
   const { t } = useLocale()
   const { user } = useAuth()
@@ -53,6 +83,10 @@ export default function Archive() {
   const [error, setError] = useState('')
   const [showRestored, setShowRestored] = useState(false)
   const [busyId, setBusyId] = useState(null)
+  // The last restore that came back incomplete: { label, lines }. Kept on
+  // the page rather than only in a toast, because a toast is gone in four
+  // seconds and this is the one sentence here that must be read.
+  const [partial, setPartial] = useState(null)
 
   const isAdmin = user?.role === 'admin'
 
@@ -77,6 +111,7 @@ export default function Archive() {
       tone: 'neutral',
     }))) return
     setBusyId(entry.id)
+    setPartial(null)
     try {
       const res = await fetch(apiUrl(`/api/vault/${entry.id}/restore`), { method: 'POST' })
       const body = await res.json().catch(() => ({}))
@@ -87,7 +122,16 @@ export default function Archive() {
         toast.error(known ? t(known) : (res.status === 403 ? t('vault.adminOnly') : t('vault.restoreFailed')))
         return
       }
-      toast.success(t('vault.restored', { label: entry.label }))
+      // A 200 is not "everything is back". The card promised "N
+      // connections that would be restored"; if the server kept some of
+      // them as they are, the plain sentence would be a false one.
+      const lines = partialLines(t, body.not_restored)
+      if (lines.length) {
+        setPartial({ label: entry.label, lines })
+        toast.info(t('vault.restoredPartly', { label: entry.label }), { duration: 8000 })
+      } else {
+        toast.success(t('vault.restored', { label: entry.label }))
+      }
       load(showRestored)
     } catch {
       toast.error(t('vault.restoreFailed'))
@@ -159,6 +203,18 @@ export default function Archive() {
           {showRestored ? t('vault.hideRestored') : t('vault.showRestored')}
         </button>
       </motion.div>
+
+      {partial && (
+        <div
+          role="status"
+          className="mb-4 rounded-2xl border border-brass-300/60 dark:border-brass-800/40 bg-brass-50 dark:bg-brass-900/20 px-5 py-4 text-[13px] leading-relaxed text-ink-800 dark:text-parchment-100"
+        >
+          <p className="font-medium">{t('vault.restoredPartly', { label: partial.label })}</p>
+          <ul className="mt-1.5 space-y-1 text-ink-600 dark:text-parchment-300/80">
+            {partial.lines.map(line => <li key={line}>{line}</li>)}
+          </ul>
+        </div>
+      )}
 
       {entries.length === 0 ? (
         <EmptyState icon={LifeBuoy} title={t('vault.empty')} body={t('vault.emptyBody')} />

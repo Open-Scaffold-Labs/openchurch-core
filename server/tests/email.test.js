@@ -23,6 +23,7 @@ import pool from '../src/db.js'
 import { RUN_ID, app, bindServer, closeServer, migrateOnce } from './support/harness.js'
 import { signUnsubscribe, verifyUnsubscribe } from '../src/notifications/unsubscribeToken.js'
 import { notify } from '../src/notifications/transport.js'
+import { SESSION_COOKIE } from '../src/auth/sessionCookie.js'
 
 let server
 let orgId, userId, userEmail
@@ -515,8 +516,10 @@ describe('calendar subscription links', () => {
     process.env.BASE_URL = '/'
     process.env.NODE_ENV = 'production'
     try {
+      // Production refuses Bearer with no test exception, so this request
+      // carries the session cookie — the production client's transport.
       const res = await request(server).post('/api/calendar-sync/my-rotate')
-        .set('Authorization', `Bearer ${token}`)
+        .set('Cookie', `${SESSION_COOKIE}=${token}`)
       expect(res.status).toBe(500)
       expect(res.body.code).toBe('base_url_unconfigured')
 

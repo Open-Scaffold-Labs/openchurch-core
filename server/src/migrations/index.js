@@ -9,13 +9,16 @@
 // SKIP its up() entirely on later runs, so a warm DB doesn't re-execute all
 // 40-odd CREATE/ALTER statements — and, crucially, the destructive backfill
 // UPDATEs inside baseMigrate ('base') run at most once. Concurrent runs are
-// serialized by a Postgres session advisory lock so two boots can't race the
-// ledger.
+// serialized by a Postgres advisory lock held in one open transaction for
+// the length of the run (see runAllMigrations for why a transaction and not
+// a session), so two boots can't race the ledger.
 
 import pool from '../db.js'
 import { MIGRATION_NAMES } from './names.js'
 import { migrate as baseMigrate, DEMO_ORG_SLUG } from '../migrate.js'
 import { seedSampleData } from '../onboarding/sampleSeed.js'
+import { seedAppReviewTenant } from '../seed/appReviewTenant.js'
+import { monitor } from '../monitoring/index.js'
 import { up as bilingual }      from './001-bilingual.js'
 import { up as passwordReset }  from './002-password-reset.js'
 import { up as rolesCheck }     from './003-roles-check.js'
@@ -114,6 +117,27 @@ import { up as languageLookupIndex } from './095-language-lookup-index.js'
 import { up as emailSuppressions } from './096-email-suppressions.js'
 import { up as donorEmailLowerIndex } from './097-donor-email-lower-index.js'
 import { up as submissionNoOverlap } from './098-submission-no-overlap.js'
+import { up as periodAdjustments } from './099-period-adjustments.js'
+import { up as aiAccounting } from './100-ai-accounting.js'
+import { up as manifestCalendarTenant } from './101-manifest-calendar-tenant.js'
+import { up as fulfilledMassStamps } from './102-fulfilled-mass-stamps.js'
+import { up as attendedServiceStamps } from './103-attended-service-stamps.js'
+import { up as donationRefundFacts } from './104-donation-refund-facts.js'
+import { up as periodAdjustmentPerRefund } from './105-period-adjustment-per-refund.js'
+import { up as periodAdjustmentCredits } from './106-period-adjustment-credits.js'
+import { up as periodAdjustmentAssessableImpact } from './107-period-adjustment-assessable-impact.js'
+import { up as periodAdjustmentAssessableUnknown } from './108-period-adjustment-assessable-unknown.js'
+import { up as issuedGivingStatements } from './109-issued-giving-statements.js'
+import { up as priorFulfilmentLabel } from './110-prior-fulfilment-label.js'
+import { up as loginDeactivation } from './111-login-deactivation.js'
+import { up as loginClosure } from './112-login-closure.js'
+import { up as closureSubjectCopies } from './113-closure-subject-copies.js'
+import { up as profileAndOrganizationHold } from './114-profile-and-organization-hold.js'
+import { up as billingEventReceipts } from './115-billing-event-receipts.js'
+import { up as stage7AiStopAndPlaintextGuard } from './116-stage7-ai-stop-and-plaintext-guard.js'
+import { up as neutralizeDemoAdmin } from './117-neutralize-demo-admin.js'
+import { up as viewsSecurityInvoker } from './118-views-security-invoker.js'
+import { up as closedAddressSuppression } from './119-closed-address-suppression.js'
 
 // The ordered chain, each with a stable ledger name. baseMigrate runs
 // FIRST because it creates the core tables (organizations, users, and the
@@ -219,6 +243,27 @@ const MIGRATIONS = [
   ['096-email-suppressions', emailSuppressions],
   ['097-donor-email-lower-index', donorEmailLowerIndex],
   ['098-submission-no-overlap', submissionNoOverlap],
+  ['099-period-adjustments', periodAdjustments],
+  ['100-ai-accounting', aiAccounting],
+  ['101-manifest-calendar-tenant', manifestCalendarTenant],
+  ['102-fulfilled-mass-stamps',    fulfilledMassStamps],
+  ['103-attended-service-stamps',  attendedServiceStamps],
+  ['104-donation-refund-facts',    donationRefundFacts],
+  ['105-period-adjustment-per-refund', periodAdjustmentPerRefund],
+  ['106-period-adjustment-credits', periodAdjustmentCredits],
+  ['107-period-adjustment-assessable-impact', periodAdjustmentAssessableImpact],
+  ['108-period-adjustment-assessable-unknown', periodAdjustmentAssessableUnknown],
+  ['109-issued-giving-statements', issuedGivingStatements],
+  ['110-prior-fulfilment-label', priorFulfilmentLabel],
+  ['111-login-deactivation', loginDeactivation],
+  ['112-login-closure', loginClosure],
+  ['113-closure-subject-copies', closureSubjectCopies],
+  ['114-profile-and-organization-hold', profileAndOrganizationHold],
+  ['115-billing-event-receipts', billingEventReceipts],
+  ['116-stage7-ai-stop-and-plaintext-guard', stage7AiStopAndPlaintextGuard],
+  ['117-neutralize-demo-admin', neutralizeDemoAdmin],
+  ['118-views-security-invoker', viewsSecurityInvoker],
+  ['119-closed-address-suppression', closedAddressSuppression],
 ]
 
 // names.js carries this same chain for /api/health, which needs the names
@@ -239,8 +284,8 @@ const MIGRATIONS = [
   }
 }
 
-// Fixed key for the session advisory lock. Any constant works as long as
-// it's the same across every process that runs migrations.
+// Fixed key for the advisory lock. Any constant works as long as it's the
+// same across every process that runs migrations.
 const MIGRATION_LOCK_KEY = 727274
 
 // High-water mark for the existing-DB baseline (below). When adopting a
@@ -257,13 +302,15 @@ const BASELINE_THROUGH = '042-service-plans'
 // our IF NOT EXISTS check and our CREATE". They are not schema errors — they
 // are the signature of two migration runs overlapping.
 //
-// Overlap is possible despite the advisory lock: through Supabase's
-// transaction-mode pooler the session lock is best-effort (see the note in
-// runAllMigrations), and `node --watch` restarts can leave the outgoing
-// process still migrating while the incoming one starts. That is exactly what
-// happened to 084 on 2026-08-20 — CREATE INDEX IF NOT EXISTS is a check and a
-// create, not one atomic step, so both runs passed the check and the loser
-// raised 23505 on pg_class_relname_nsp_index.
+// Overlap was possible despite the advisory lock: until 8 Sep it was a
+// SESSION lock, which a transaction-mode pooler could not keep on one backend
+// (see the note in runAllMigrations), and `node --watch` restarts can leave
+// the outgoing process still migrating while the incoming one starts. That
+// is exactly what happened to 084 on 2026-08-20 — CREATE INDEX IF NOT EXISTS
+// is a check and a create, not one atomic step, so both runs passed the
+// check and the loser raised 23505 on pg_class_relname_nsp_index. The lock
+// now holds through the pooler too, but this stays: it costs nothing when
+// the lock works and is the only net under it if it ever does not.
 const CONCURRENT_DDL_CODES = new Set([
   '23505', // unique_violation — typically pg_class_relname_nsp_index
   '42P07', // duplicate_table (indexes live in pg_class too)
@@ -279,14 +326,14 @@ const CONCURRENT_DDL_CODES = new Set([
 // and we can move on. If it did not, we retry the up() once — by then the
 // objects it raced us over exist, so the IF NOT EXISTS clauses no-op and the
 // remainder applies. A second failure is real and propagates.
-async function applyMigration(client, name, up, ctx) {
+async function applyMigration(db, name, up, ctx) {
   try {
     await up(ctx)
     return
   } catch (err) {
     if (!CONCURRENT_DDL_CODES.has(err?.code)) throw err
 
-    const { rows } = await client.query(
+    const { rows } = await db.query(
       'SELECT 1 FROM ochr_schema_migrations WHERE name = $1', [name])
     if (rows.length > 0) {
       console.log(`  ${name}: applied concurrently by another runner — continuing.`)
@@ -298,25 +345,57 @@ async function applyMigration(client, name, up, ctx) {
   }
 }
 
-export async function runAllMigrations() {
-  // Run the whole thing on ONE dedicated connection. pg_advisory_lock is
-  // SESSION-scoped — bound to the exact backend that acquired it — so the lock
-  // and its matching unlock must run on the same client; issuing them via
-  // pool.query() (as before) could unlock on a different pooled backend, which
-  // silently returns false and leaks the lock. (Through Supabase's
-  // transaction-mode pooler even a pinned client is multiplexed per
-  // transaction, so the lock is best-effort there; the ledger's
-  // ON CONFLICT DO NOTHING idempotency below is the real guard. On a direct
-  // session connection — CI and a direct DATABASE_URL — it serializes cleanly.)
+export async function runAllMigrations({ appReviewEnv } = {}) {
+  // THE LOCK LIVES IN A TRANSACTION, AND ONLY THE LOCK (8 Sep).
+  //
+  // It used to be a SESSION lock (pg_advisory_lock) taken on a pinned
+  // client and released on the same client. On a direct connection that is
+  // sound. Through a transaction-mode pooler — Supabase's 6543, which is
+  // what production's DATABASE_URL is — it is not: the pooler hands the
+  // pinned client a backend per TRANSACTION, and a client between
+  // statements is between transactions, so whenever other traffic exists
+  // the backend under it changes mid-run. The unlock then ran on a backend
+  // that never held the lock ("you don't own a lock of type
+  // ExclusiveLock"), returned false, and the lock stayed granted to an idle
+  // pooled backend. Every runner after that hung on pg_advisory_lock until
+  // the pooler happened to recycle that backend. Reproduced through
+  // PgBouncer 1.22 in transaction mode with churn traffic: 4 of 6 runs left
+  // the next runner blocked indefinitely, 1 of 6 let it in without
+  // exclusion.
+  //
+  // So: BEGIN, take a TRANSACTION-scoped lock (pg_advisory_xact_lock), keep
+  // that transaction open for the whole run, COMMIT at the end. A
+  // transaction pins one backend under transaction pooling, so the lock
+  // lives on exactly one backend for exactly as long as the run — and it
+  // cannot leak: COMMIT, ROLLBACK, a dead process or a dead backend all
+  // release it. On a direct connection nothing observable changes: runs
+  // serialise as before.
+  //
+  // NOTHING ELSE GOES IN THAT TRANSACTION. Every write that must PERSIST
+  // regardless of a later failure — the ledger table, each per-migration
+  // ledger row, the baseline — and every read that must see the latest
+  // committed state goes through `pool` (autocommit), not the pinned client.
+  // That is what keeps today's resumability: a failure in migration N rolls
+  // back nothing but the lock, and the ledger still says 1..N-1 are done.
+  // The pinned client also touches no table, so it holds no relation lock
+  // that could block a migration's DDL on another connection.
+  //
+  // (If a deployment sets idle_in_transaction_session_timeout shorter than a
+  // cold migration run, the lock holder is killed and COMMIT fails loudly —
+  // a visible failure, not a silent one, and the ledger is intact.)
   const client = await pool.connect()
-  await client.query('SELECT pg_advisory_lock($1)', [MIGRATION_LOCK_KEY])
+  await client.query('BEGIN')
   try {
+    await client.query('SELECT pg_advisory_xact_lock($1)', [MIGRATION_LOCK_KEY])
+
     // Probe BEFORE we create anything. `to_regclass` returns NULL (not an
     // error) when a relation is absent, so it's the cheapest way to ask two
     // questions: does the ledger already exist, and does the schema already
     // exist? We key "schema exists" off ochr_clients — a core table present
-    // on any database that has ever been migrated.
-    const { rows: probe } = await client.query(
+    // on any database that has ever been migrated. Through the pool, not the
+    // lock's transaction: it must see what the runner we just waited for
+    // committed.
+    const { rows: probe } = await pool.query(
       `SELECT to_regclass('public.ochr_schema_migrations') AS ledger,
               to_regclass('public.ochr_clients')           AS clients`
     )
@@ -328,13 +407,13 @@ export async function runAllMigrations() {
     // rls_disabled_in_public otherwise). No policy is defined on purpose: this
     // is a server-only bookkeeping table never reached through the tenant API,
     // so RLS-on-with-no-policy (deny-all to non-owner roles) is exactly right.
-    await client.query(`
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS ochr_schema_migrations (
         name       TEXT PRIMARY KEY,
         applied_at TIMESTAMPTZ DEFAULT NOW()
       )
     `)
-    await client.query('ALTER TABLE ochr_schema_migrations ENABLE ROW LEVEL SECURITY')
+    await pool.query('ALTER TABLE ochr_schema_migrations ENABLE ROW LEVEL SECURITY')
 
     // ADOPTING AN EXISTING DATABASE. If the ledger didn't exist yet but the
     // schema did, this DB has already had every migration applied under the
@@ -349,7 +428,7 @@ export async function runAllMigrations() {
     // adoption still runs instead of being marked applied without executing.
     if (!ledgerExisted && schemaExisted) {
       for (const [name] of MIGRATIONS) {
-        await client.query(
+        await pool.query(
           'INSERT INTO ochr_schema_migrations (name) VALUES ($1) ON CONFLICT (name) DO NOTHING',
           [name]
         )
@@ -357,7 +436,7 @@ export async function runAllMigrations() {
       }
     }
 
-    const { rows: applied } = await client.query('SELECT name FROM ochr_schema_migrations')
+    const { rows: applied } = await pool.query('SELECT name FROM ochr_schema_migrations')
     const done = new Set(applied.map(r => r.name))
 
     // Context handed to every migration. Almost all ignore it; 060 needs to
@@ -371,8 +450,8 @@ export async function runAllMigrations() {
 
     for (const [name, up] of MIGRATIONS) {
       if (done.has(name)) continue
-      await applyMigration(client, name, up, ctx)
-      await client.query(
+      await applyMigration(pool, name, up, ctx)
+      await pool.query(
         'INSERT INTO ochr_schema_migrations (name) VALUES ($1) ON CONFLICT (name) DO NOTHING',
         [name]
       )
@@ -381,7 +460,7 @@ export async function runAllMigrations() {
     // The ledger is only honest if every migration we were asked to run is in
     // it. A gap here means one was skipped without raising — the failure mode
     // that leaves a database serving traffic on a schema nobody verified.
-    const { rows: ledgerNow } = await client.query('SELECT name FROM ochr_schema_migrations')
+    const { rows: ledgerNow } = await pool.query('SELECT name FROM ochr_schema_migrations')
     const recorded = new Set(ledgerNow.map(r => r.name))
     const missing = MIGRATIONS.map(([n]) => n).filter(n => !recorded.has(n))
     if (missing.length > 0) {
@@ -400,7 +479,7 @@ export async function runAllMigrations() {
     // data made this call re-insert the whole set on the next deploy — see
     // the header of onboarding/sampleSeed.js.
     try {
-      const { rows } = await client.query(
+      const { rows } = await pool.query(
         'SELECT id, tradition FROM ochr_organizations WHERE slug = $1',
         [DEMO_ORG_SLUG],
       )
@@ -413,9 +492,68 @@ export async function runAllMigrations() {
     } catch (seedErr) {
       console.error('demo-org sample seed failed (migration continuing):', seedErr)
     }
+
+    // Ending the transaction is what releases the lock; there is no unlock
+    // call to land on the wrong backend. The transaction wrote nothing, so
+    // COMMIT and ROLLBACK differ only in intent — COMMIT on the way out
+    // because that is the honest word for "the run finished".
+    await client.query('COMMIT')
+  } catch (err) {
+    // A failed run releases the lock the same way. If the backend under the
+    // transaction is already gone, so is the lock — nothing to do.
+    await client.query('ROLLBACK').catch(() => {})
+    throw err
   } finally {
-    // Unlock on the SAME client that holds the session lock, then return it.
-    try { await client.query('SELECT pg_advisory_unlock($1)', [MIGRATION_LOCK_KEY]) } catch { /* ignore */ }
     client.release()
   }
+
+  // App Review sandbox (OC-READY-01-010) runs only AFTER the schema run has
+  // committed and released its lock. It is optional operator setup, not
+  // schema: its outcome is reported on its own line and returned, and it
+  // can neither turn a finished migration into "FATAL: migrations failed"
+  // nor hold the migration lock while it writes.
+  const appReviewSeed = await runAppReviewSeedAfterMigrations(pool, appReviewEnv)
+  return { appReviewSeed }
+}
+
+// The App Review seed, separated from schema truth.
+//
+// Flag off → { status: 'skipped' } and nothing is printed (production).
+// Created / already present → one informational line.
+// Refused (a named gate said no) or failed (anything else threw) → a loud
+// block on stderr plus monitor.error, and the outcome is returned so a
+// caller that WANTS a hard stop (the explicit seed script) can have one.
+// It never throws: the schema run it follows has already committed, and
+// reporting a seed problem as a migration failure would be false.
+export async function runAppReviewSeedAfterMigrations(db = pool, env) {
+  let outcome
+  try {
+    const result = env === undefined
+      ? await seedAppReviewTenant(db)
+      : await seedAppReviewTenant(db, env)
+    if (result.reason === 'flag_off') return { status: 'skipped', reason: 'flag_off' }
+    outcome = {
+      status: result.seeded ? 'created' : 'already_exists',
+      reason: result.reason,
+      organizationSlug: result.organizationSlug,
+    }
+    console.log(`App Review seed: ${outcome.status} ('${outcome.organizationSlug}').`)
+    return outcome
+  } catch (err) {
+    outcome = {
+      status: err?.reason ? 'refused' : 'failed',
+      reason: err?.reason || 'error',
+      message: err?.message || String(err),
+    }
+  }
+  console.error([
+    '',
+    `APP REVIEW SEED ${outcome.status.toUpperCase()}: ${outcome.reason}`,
+    `  ${outcome.message}`,
+    '  The schema migrations above completed and are ledgered; this is only the',
+    '  optional App Review sandbox requested by SEED_APP_REVIEW_TENANT.',
+    '',
+  ].join('\n'))
+  monitor.error('migrations.app_review_seed', new Error(`${outcome.status}: ${outcome.reason}`))
+  return outcome
 }

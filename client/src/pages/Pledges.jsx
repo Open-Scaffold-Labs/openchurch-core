@@ -1,10 +1,11 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   Heart, Plus, X, Pencil, Trash2, AlertTriangle, Loader2, User as UserIcon, Mail,
 } from 'lucide-react'
 import PageWrapper from '../components/PageWrapper'
 import EmptyState from '../components/EmptyState'
+import LoadFailure from '../components/LoadFailure'
 import { SkeletonRowList } from '../components/Skeleton'
 import TextField from '../components/TextField'
 import SaveButton, { useSaveStatus } from '../components/SaveButton'
@@ -15,6 +16,7 @@ import { apiUrl } from '../api'
 import { todayLocalISO } from '../utils/dates'
 import { useConfirm } from '../components/ConfirmProvider'
 import { loadList } from '../utils/format'
+import { useLocale } from '../i18n'
 
 // Pledges admin page (Sprint D / D.2). Lists every pledge with
 // computed fulfillment, supports create/edit/cancel via modal.
@@ -40,8 +42,60 @@ const STATUS_PILL = {
   cancelled: 'bg-parchment-200 text-ink-700 dark:bg-ink-800/40 dark:text-parchment-200',
 }
 
-function fmtCurrency(n) {
-  return Number(n).toLocaleString(undefined, { style: 'currency', currency: 'USD' })
+// A figure counts only as a finite number or a plain decimal string
+// (including zero and Postgres numeric text). Booleans, arrays, objects,
+// and blanks are not zero.
+function knownNumber(v) {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null
+  if (typeof v === 'string' && /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(v)) {
+    const n = Number(v)
+    return Number.isFinite(n) ? n : null
+  }
+  return null
+}
+
+function positiveIntId(v) {
+  if (typeof v === 'number' && Number.isSafeInteger(v) && v > 0) return v
+  if (typeof v === 'string' && /^[1-9]\d*$/.test(v)) {
+    const n = Number(v)
+    if (Number.isSafeInteger(n)) return n
+  }
+  return null
+}
+
+function fmtCurrency(n, unavailable) {
+  const v = knownNumber(n)
+  if (v == null) return unavailable
+  return v.toLocaleString(undefined, { style: 'currency', currency: 'USD' })
+}
+
+function sumMoney(rows, key) {
+  let sum = 0
+  for (const row of rows) {
+    const n = knownNumber(row[key])
+    if (n == null) return null
+    sum += n
+  }
+  return sum
+}
+
+function isPledgeRow(row) {
+  return !!row && typeof row === 'object' && !Array.isArray(row)
+    && positiveIntId(row.id) != null && typeof row.frequency === 'string'
+}
+
+// `{ pledges: null }`, a bare array, or an error object is not an empty book.
+function asPledgeList(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return null
+  if (!Array.isArray(body.pledges)) return null
+  if (body.pledges.some(row => !isPledgeRow(row))) return null
+  return body.pledges
+}
+
+function writeError(res, data, t) {
+  const server = data && typeof data.error === 'string' ? data.error.trim() : ''
+  if (res && res.status >= 400 && res.status < 500 && server && !/\b\d{3}\b/.test(server)) return server
+  return t('err.save')
 }
 
 function fmtDate(iso) {
@@ -52,11 +106,15 @@ function fmtDate(iso) {
 
 // Progress bar — colored by fulfillment ratio. Green at full, amber
 // in mid, rose when underfunded (< 0.5 of expected for the period).
-function FulfillmentBar({ fulfillment }) {
-  const pct = Math.round(fulfillment * 100)
-  const barCls = fulfillment >= 1
+function FulfillmentBar({ fulfillment, unavailable }) {
+  const ratio = knownNumber(fulfillment)
+  if (ratio == null) {
+    return <span className="text-xs font-semibold text-ink-700 dark:text-parchment-200">{unavailable}</span>
+  }
+  const pct = Math.round(ratio * 100)
+  const barCls = ratio >= 1
     ? 'bg-brass-500'
-    : fulfillment >= 0.5
+    : ratio >= 0.5
       ? 'bg-amber-500'
       : 'bg-rose-500'
   return (
@@ -75,6 +133,7 @@ function PledgeModal({ pledge, members, membersFailed, onClose, onSaved }) {
   const isEdit = !!pledge
   const toast = useToast()
   const ask = useConfirm()
+  const { t } = useLocale()
 
   const [form, setForm] = useState(() => ({
     member_id:   pledge?.member_id ?? null,
@@ -102,16 +161,22 @@ function PledgeModal({ pledge, members, membersFailed, onClose, onSaved }) {
     }
     const url = isEdit ? `/api/pledges/${pledge.id}` : '/api/pledges'
     const method = isEdit ? 'PATCH' : 'POST'
-    const res = await fetch(apiUrl(url), {
-      method,
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    })
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({}))
-      throw new Error(data.error || "That didn't save — nothing was lost. Please try again.")
+    let res
+    try {
+      res = await fetch(apiUrl(url), {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+    } catch {
+      throw new Error(t('err.save'))
     }
-    return res.json()
+    const data = await res.json().catch(() => ({}))
+    const returnedId = positiveIntId(data?.id)
+    // true, [7], and a different pledge's id are not this save.
+    const saved = returnedId != null && (!isEdit || returnedId === positiveIntId(pledge.id))
+    if (!res.ok || !saved) throw new Error(writeError(res, data, t))
+    return data
   }, {
     onSuccess: () => { onSaved(); onClose() },
   })
@@ -162,8 +227,7 @@ function PledgeModal({ pledge, members, membersFailed, onClose, onSaved }) {
                 halfway through recording a pledge. Name the difference. */}
             {membersFailed && (
               <p className="mt-1.5 text-[11px] text-amber-700 dark:text-amber-400 leading-snug">
-                The member list didn’t load — this isn’t an empty roster. You can still
-                record the donor by email below.
+                {t('plg.membersUnread')}
               </p>
             )}
             <p className="mt-1.5 text-[11px] text-ink-500 dark:text-parchment-300/70">
@@ -262,6 +326,7 @@ function PledgeModal({ pledge, members, membersFailed, onClose, onSaved }) {
 
 export default function Pledges() {
   const { user } = useAuth()
+  const { t } = useLocale()
   const isAdmin = user?.role === 'admin'
   const toast   = useToast()
   // Same defect as Forms.jsx: removePledge() referenced an `ask` that only
@@ -272,19 +337,36 @@ export default function Pledges() {
   const [members, setMembers] = useState([])
   // Distinguishes an empty roster from a roster we could not load.
   const [membersFailed, setMembersFailed] = useState(false)
-  const [loading, setLoad]    = useState(true)
-  const [err, setErr]         = useState('')
+  const [loading, setLoading] = useState(true)
+  // A refused or shapeless read is not an empty book and not a $0 summary.
+  const [failed, setFailed] = useState(false)
   const [modal, setModal]     = useState(null)   // null | 'new' | pledge object
   const [showCancelled, setShowCancelled] = useState(false)
+  const loadGen = useRef(0)
 
   const load = useCallback(() => {
     if (!isAdmin) return
-    setLoad(true)
-    fetch(apiUrl('/api/pledges'))
-      .then(r => r.ok ? r.json() : Promise.reject(new Error(`Failed (${r.status})`)))
-      .then(d => setPledges(d.pledges ?? []))
-      .catch(() => setErr("Couldn't load pledges. Nothing was lost — please retry."))
-      .finally(() => setLoad(false))
+    const gen = ++loadGen.current
+    setLoading(true)
+    setFailed(false)
+    ;(async () => {
+      try {
+        const res = await fetch(apiUrl('/api/pledges'))
+        if (!res.ok) throw new Error('unread')
+        const body = await res.json()
+        const list = asPledgeList(body)
+        if (!list) throw new Error('shape')
+        if (gen !== loadGen.current) return
+        setPledges(list)
+        setFailed(false)
+      } catch {
+        if (gen !== loadGen.current) return
+        setPledges([])
+        setFailed(true)
+      } finally {
+        if (gen === loadGen.current) setLoading(false)
+      }
+    })()
   }, [isAdmin])
 
   useEffect(() => { load() }, [load])
@@ -309,7 +391,8 @@ export default function Pledges() {
     }))) return
     try {
       const res = await fetch(apiUrl(`/api/pledges/${p.id}`), { method: 'DELETE' })
-      if (!res.ok) throw new Error(`Delete failed (${res.status})`)
+      // 204 is the only success. A 200 error body must not read as deleted.
+      if (res.status !== 204) throw new Error('delete')
       toast.info('Pledge deleted')
       load()
     } catch (e) {
@@ -331,9 +414,11 @@ export default function Pledges() {
     )
   }
 
+  const unavailable = t('money.unavailable')
   const visible = (pledges ?? []).filter(p => showCancelled || p.status !== 'cancelled')
-  const totalPledged = visible.reduce((sum, p) => sum + Number(p.period_total ?? 0), 0)
-  const totalMatched = visible.reduce((sum, p) => sum + Number(p.matched_total ?? 0), 0)
+  const listReady = !loading && !failed
+  const totalPledged = listReady ? sumMoney(visible, 'period_total') : null
+  const totalMatched = listReady ? sumMoney(visible, 'matched_total') : null
 
   return (
     <PageWrapper>
@@ -355,14 +440,15 @@ export default function Pledges() {
           <button
             type="button"
             onClick={() => setModal('new')}
-            className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-church-900 hover:bg-church-800 text-parchment-50 text-sm font-semibold shadow-sm transition-colors"
+            disabled={loading || failed}
+            className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-church-900 hover:bg-church-800 text-parchment-50 text-sm font-semibold shadow-sm transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <Plus size={16} /> New pledge
           </button>
         </motion.div>
 
         {/* Summary card */}
-        {!loading && visible.length > 0 && (
+        {listReady && visible.length > 0 && (
           <motion.div
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
@@ -378,13 +464,13 @@ export default function Pledges() {
             <div>
               <p className="text-[11px] font-semibold uppercase tracking-wider text-brass-700 dark:text-brass-300">Expected</p>
               <p className="font-display text-2xl font-semibold text-ink-900 dark:text-parchment-50 mt-1">
-                {fmtCurrency(totalPledged)}
+                {fmtCurrency(totalPledged, unavailable)}
               </p>
             </div>
             <div>
               <p className="text-[11px] font-semibold uppercase tracking-wider text-brass-700 dark:text-brass-300">Received</p>
               <p className="font-display text-2xl font-semibold text-ink-900 dark:text-parchment-50 mt-1">
-                {fmtCurrency(totalMatched)}
+                {fmtCurrency(totalMatched, unavailable)}
               </p>
             </div>
           </motion.div>
@@ -393,18 +479,13 @@ export default function Pledges() {
         {/* Body */}
         {loading ? (
           <SkeletonRowList count={5} />
-        ) : err ? (
-          <EmptyState
-            icon={AlertTriangle}
-            title="Couldn't load pledges"
-            body={err}
-            action={{ label: 'Retry', onClick: load }}
-          />
+        ) : failed ? (
+          <LoadFailure body={t('plg.loadFailedBody')} onRetry={load} />
         ) : visible.length === 0 ? (
           <EmptyState
             icon={Heart}
-            title="No pledges yet"
-            body="Record donor commitments so you can track fulfillment against actual gifts."
+            title={t('plg.emptyTitle')}
+            body={t('plg.emptyBody')}
             action={{ label: 'New pledge', onClick: () => setModal('new') }}
           />
         ) : (
@@ -435,14 +516,14 @@ export default function Pledges() {
                   <div className="hidden sm:block text-right shrink-0 min-w-[110px]">
                     <p className="text-[10px] font-semibold uppercase tracking-wider text-ink-500 dark:text-parchment-300/70">Pledged</p>
                     <p className="text-sm font-semibold text-ink-900 dark:text-parchment-50 tabular-nums">
-                      {fmtCurrency(p.amount)}<span className="text-ink-500 text-xs"> / {p.frequency.replace('_', ' ')}</span>
+                      {fmtCurrency(p.amount, unavailable)}<span className="text-ink-500 text-xs"> / {p.frequency.replace('_', ' ')}</span>
                     </p>
                   </div>
                   <div className="hidden md:block shrink-0 w-44">
                     <p className="text-[10px] font-semibold uppercase tracking-wider text-ink-500 dark:text-parchment-300/70 mb-1">Fulfillment</p>
-                    <FulfillmentBar fulfillment={p.fulfillment} />
+                    <FulfillmentBar fulfillment={p.fulfillment} unavailable={unavailable} />
                     <p className="text-[10px] text-ink-500 dark:text-parchment-300/70 mt-1 tabular-nums">
-                      {fmtCurrency(p.matched_total)} of {fmtCurrency(p.period_total)}
+                      {fmtCurrency(p.matched_total, unavailable)} of {fmtCurrency(p.period_total, unavailable)}
                     </p>
                   </div>
                   <div className="flex items-center gap-1 shrink-0">

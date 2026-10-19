@@ -206,12 +206,20 @@ let baseline = []
 try { baseline = JSON.parse(readFileSync(BASELINE, 'utf8')) } catch { /* first run */ }
 const known = new Set(baseline)
 const fresh = findings.filter(f => !known.has(key(f)))
+// A baseline entry that matches no current finding is STALE. It is not
+// harmless: it pre-approves that exact code, so if the same line is ever
+// written back into that file it passes as "known". 40 of 55 entries had
+// gone stale this way after fixes that did not prune them. The baseline
+// must equal the current findings, the same rule the i18n-critical gate
+// applies to its classify file (STALE CLASSIFICATION).
+const current = new Set(findings.map(key))
+const stale = baseline.filter(k => !current.has(k))
 
 if (process.argv.includes('--list')) {
   for (const f of findings) {
     console.log(`${known.has(key(f)) ? '  known ' : '  NEW   '}${f.rule.padEnd(16)} ${f.file}:${f.line}`)
   }
-  console.log(`\n${scanned} files scanned, ${findings.length} site(s), ${fresh.length} new.`)
+  console.log(`\n${scanned} files scanned, ${findings.length} site(s), ${fresh.length} new, ${stale.length} stale baseline entr${stale.length === 1 ? 'y' : 'ies'}.`)
 }
 
 if (fresh.length) {
@@ -228,4 +236,12 @@ if (fresh.length) {
   process.exit(1)
 }
 
-console.log(`honest-failure: ${scanned} files, ${findings.length} known site(s), no new drift.`)
+if (stale.length) {
+  console.error(`\nhonest-failure: ${stale.length} STALE baseline entr${stale.length === 1 ? 'y' : 'ies'} — no current site matches:\n`)
+  for (const k of stale) console.error(`  ${k}`)
+  console.error(`\nA stale entry would let that exact code come back unflagged. Remove it`)
+  console.error(`(or re-record with:  node scripts/honest-failure.mjs --baseline)\n`)
+  process.exit(1)
+}
+
+console.log(`honest-failure: ${scanned} files, ${findings.length} known site(s), no new drift, no stale entries.`)

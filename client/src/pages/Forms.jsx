@@ -13,6 +13,7 @@ import SaveButton, { useSaveStatus } from '../components/SaveButton'
 import { sheetOverlayCls, sheetPanelCls, MobileSheetGrip } from '../components/MobileSheet'
 import { useToast } from '../components/ToastProvider'
 import { useAuth } from '../context/AuthContext'
+import { useLocale } from '../i18n'
 import { apiUrl } from '../api'
 import { useConfirm } from '../components/ConfirmProvider'
 
@@ -470,6 +471,7 @@ export default function Forms() {
   const isAdmin = user?.role === 'admin'
   const orgSlug = user?.organization?.slug ?? null
   const toast   = useToast()
+  const { t }   = useLocale()
   // `ask` was referenced by removeForm() and never declared in this component
   // — the confirm dialog threw a ReferenceError instead of opening. Found by
   // client-scope 27 Aug once it became function-scoped.
@@ -486,9 +488,9 @@ export default function Forms() {
     fetch(apiUrl('/api/forms'))
       .then(r => r.ok ? r.json() : Promise.reject(new Error(`Failed (${r.status})`)))
       .then(d => setForms(d.forms ?? []))
-      .catch(() => setErr("Couldn't load forms. Nothing was lost — please retry."))
+      .catch(() => setErr(t('form.loadFailBody')))
       .finally(() => setLoad(false))
-  }, [isAdmin])
+  }, [isAdmin, t])
 
   useEffect(() => { load() }, [load])
 
@@ -607,7 +609,7 @@ export default function Forms() {
         ) : err ? (
           <EmptyState
             icon={AlertTriangle}
-            title="Couldn't load forms"
+            title={t('form.loadFailTitle')}
             body={err}
             action={{ label: 'Retry', onClick: load }}
           />

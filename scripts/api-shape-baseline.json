@@ -1,3 +1,1 @@
-[
-  "server/src/routes/calendarSync.js :: ochr_clients :: SELECT * FROM ochr_clients WHERE calendar_token = $1 -- tenancy: the token IS the capability for the public IC"
-]
+[]

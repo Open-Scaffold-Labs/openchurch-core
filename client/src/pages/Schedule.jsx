@@ -1,26 +1,31 @@
 import { useState, useEffect, useRef } from 'react'
-import { useSearchParams, Link } from 'react-router-dom'
+import { useSearchParams, Link, useNavigate } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
-import { ChevronLeft, ChevronRight, Plus, X, Trash2, Clock, Users, Users2, Repeat, AlertTriangle, History, Cross, CalendarDays } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Plus, X, Trash2, Clock, Users, Users2, Repeat, AlertTriangle, History, Cross, CalendarDays, Printer, UserCheck } from 'lucide-react'
+import { useLocale } from '../i18n'
 import { apiUrl } from '../api'
 import { useAuth } from '../context/AuthContext'
+import { viewerMayOpen } from '../auth/viewerPages'
 import { useToast } from '../components/ToastProvider'
+import LoadFailure from '../components/LoadFailure'
 import MemberPicker from '../components/MemberPicker'
 import OrderedMemberPicker from '../components/OrderedMemberPicker'
 import PageWrapper from '../components/PageWrapper'
 import { sheetOverlayCls, sheetPanelCls, MobileSheetGrip } from '../components/MobileSheet'
 import { LIT_COLOR_DOT, LIT_COLOR_TEXT, LIT_COLOR_STRIPE } from '../utils/liturgicalColors'
+import { seasonLabel } from '../i18n/liturgical'
 import { initials, loadList } from '../utils/format'
-import { toLocalISO } from '../utils/dates'
+import { toLocalISO, parseLocalDate, calendarDay } from '../utils/dates'
 import { useConfirm } from '../components/ConfirmProvider'
+import MassIntentionAssign from '../components/MassIntentionAssign'
+import { isIntentionDraftNonce } from '../utils/intentionDraft'
+import { isMassCalendarEvent } from '../utils/massEvent'
 
 // ── Constants ────────────────────────────────────────────────
 const START_HOUR  = 7
 const END_HOUR    = 21
 const HOUR_HEIGHT = 64 // px per hour
 const HOURS       = Array.from({ length: END_HOUR - START_HOUR }, (_, i) => START_HOUR + i)
-const DAY_LABELS  = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
-
 // Parchment & Brass inversion: the liturgical color of the day owns each
 // tile's left edge; the event *type* is expressed as a quiet ink glyph,
 // not a color fill. All tiles share one parchment surface so the season's
@@ -43,6 +48,23 @@ function toMinutes(t) {
   if (!t) return 0
   const [h, m] = t.split(':').map(Number)
   return h * 60 + m
+}
+
+// R321-1: the conflict and availability checks validate every entry the
+// modal consumes before committing a result. One unusable entry makes the
+// whole check UNKNOWN (the amber note), never a crash and never a silently
+// shortened, clean-looking result. Shapes follow GET /api/calendar/conflicts
+// (routes/calendar.js) and GET /api/availability?date= (routes/availability.js).
+const isRowId = v => Number.isInteger(v) && v > 0
+function validConflictList(list) {
+  return Array.isArray(list) && list.every(c =>
+    isPlainObject(c) && isRowId(c.id) && typeof c.title === 'string'
+    && typeof c.start_time === 'string' && typeof c.end_time === 'string'
+    && Array.isArray(c.conflicting_members) && c.conflicting_members.length > 0
+    && c.conflicting_members.every(m => isPlainObject(m) && typeof m.name === 'string'))
+}
+function validUnavailabilityList(list) {
+  return Array.isArray(list) && list.every(u => isPlainObject(u) && isRowId(u.client_id))
 }
 
 function fmt12(t) {
@@ -75,6 +97,95 @@ function toDateStr(date) {
 
 function isSameDay(a, b) {
   return toDateStr(a) === toDateStr(b)
+}
+
+// Open(eventId): a Mass is a stable destination, named by
+// ochr_calendar_events.id — never by title or date. The same gate as
+// check-in's ?event= reader. A garbled token is not a Mass.
+export function parseScheduleEventId(raw) {
+  if (raw == null) return null
+  const s = String(raw).trim()
+  if (s === '') return null
+  const n = Number(s)
+  if (!Number.isInteger(n) || n <= 0 || String(n) !== s) return null
+  return n
+}
+
+export function findCalendarEventById(events, id) {
+  const n = parseScheduleEventId(id)
+  if (n == null || !Array.isArray(events)) return null
+  return events.find(e => parseScheduleEventId(e?.id) === n) ?? null
+}
+
+export function weekStartForEventDate(dateRaw) {
+  const dateStr = dateRaw != null ? String(dateRaw).slice(0, 10) : ''
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return null
+  return getMondayOf(parseLocalDate(dateStr))
+}
+
+export function dayIndexForEventDate(weekStart, dateRaw) {
+  const monday = weekStart instanceof Date ? weekStart : null
+  if (!monday) return null
+  const dateStr = dateRaw != null ? String(dateRaw).slice(0, 10) : ''
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return null
+  const day = parseLocalDate(dateStr)
+  day.setHours(0, 0, 0, 0)
+  const start = new Date(monday)
+  start.setHours(0, 0, 0, 0)
+  const idx = Math.round((day.getTime() - start.getTime()) / (24 * 60 * 60 * 1000))
+  return idx >= 0 && idx < 7 ? idx : null
+}
+
+export function scheduleEventHref(eventId) {
+  const id = parseScheduleEventId(eventId)
+  return id == null ? '/schedule' : `/schedule?event=${id}`
+}
+
+// Intention book → existing Schedule create flow, for one calendar day.
+// The query value is a fixed token, never a caller-supplied URL.
+export const INTENTION_RETURN_TOKEN = 'intention'
+const RETURN_PARAM = 'return'
+
+export function isIntentionReturn(value) {
+  return value === INTENTION_RETURN_TOKEN
+}
+
+const DRAFT_PARAM = 'draft'
+
+export function isCalendarDayParam(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false
+  const [y, m, d] = value.split('-').map(Number)
+  const utc = new Date(Date.UTC(y, m - 1, d))
+  return utc.getUTCFullYear() === y && utc.getUTCMonth() === m - 1 && utc.getUTCDate() === d
+}
+
+export function scheduleNewMassHref(date, nonce) {
+  const qs = new URLSearchParams()
+  qs.set('new', '1')
+  qs.set(RETURN_PARAM, INTENTION_RETURN_TOKEN)
+  if (isCalendarDayParam(date)) qs.set('date', date)
+  if (isIntentionDraftNonce(nonce)) qs.set(DRAFT_PARAM, nonce)
+  return `/schedule?${qs.toString()}`
+}
+
+// After that Mass is saved, come back to the book with the new id.
+// resume is the one-time nonce from this trip, never a standing "1".
+export function intentionResumeHref({ eventId, date, nonce } = {}) {
+  const qs = new URLSearchParams()
+  const id = parseScheduleEventId(eventId)
+  if (id != null) qs.set('event', String(id))
+  if (isCalendarDayParam(date)) qs.set('date', date)
+  if (isIntentionDraftNonce(nonce)) qs.set('resume', nonce)
+  const q = qs.toString()
+  return q ? `/mass-intentions?${q}` : '/mass-intentions'
+}
+
+export function withScheduleEventParam(searchParams, eventId) {
+  const next = new URLSearchParams(searchParams)
+  const id = parseScheduleEventId(eventId)
+  if (id == null) next.delete('event')
+  else next.set('event', String(id))
+  return next
 }
 
 // ── Current time indicator ───────────────────────────────────
@@ -241,9 +352,62 @@ function MobileEventCard({ event, onClick, members, litColor, intentions = [] })
   )
 }
 
+// A figure counts only as a finite number or a plain decimal string
+// (including zero and Postgres numeric text). Booleans, arrays, objects,
+// and blanks are not zero. Same rule as the offerings workbench.
+function knownNumber(v) {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null
+  if (typeof v === 'string' && /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(v)) {
+    const n = Number(v)
+    return Number.isFinite(n) ? n : null
+  }
+  return null
+}
+
+function positiveIntId(v) {
+  if (typeof v === 'number' && Number.isSafeInteger(v) && v > 0) return v
+  if (typeof v === 'string' && /^[1-9]\d*$/.test(v)) {
+    const n = Number(v)
+    if (Number.isSafeInteger(n)) return n
+  }
+  return null
+}
+
+function isPlainObject(v) {
+  return !!v && typeof v === 'object' && !Array.isArray(v)
+}
+
+function isInvoiceRow(row) {
+  return isPlainObject(row) && positiveIntId(row.id) != null
+}
+
+// A bare array of invoice rows. An object, a non-array, or a row without
+// a canonical id is not "no invoices".
+function asInvoiceList(body) {
+  if (!Array.isArray(body)) return null
+  if (body.some(row => !isInvoiceRow(row))) return null
+  return body
+}
+
+async function readEventInvoices(eventId) {
+  const id = positiveIntId(eventId)
+  if (id == null) return { failed: true }
+  try {
+    const res = await fetch(apiUrl(`/api/invoices?event=${id}&limit=20`))
+    if (!res.ok) return { failed: true }
+    const body = await res.json()
+    const list = asInvoiceList(body)
+    if (!list) return { failed: true }
+    return { failed: false, invoices: list.filter(i => i.status !== 'cancelled') }
+  } catch {
+    return { failed: true }
+  }
+}
+
 // ── Add/Edit Modal ───────────────────────────────────────────
-function EventModal({ event, onClose, onSave, onDelete, members, membersFailed = false, groups = [], intentions = [] }) {
+export function EventModal({ event, onClose, onSave, onDelete, members, membersFailed = false, groups = [], groupsFailed = false, intentions = [], intentionsFailed = false, onIntentionsChanged }) {
   const { isAdmin } = useAuth()
+  const { t, tradition } = useLocale()
   const [form, setForm] = useState(() => {
     if (!event) return EMPTY_FORM
     // Normalize assigned_to in case the server returns it as null / a string
@@ -261,17 +425,48 @@ function EventModal({ event, onClose, onSave, onDelete, members, membersFailed =
   // no Delete, "Add Event" button).
   const isEdit = !!event?.id
 
-  // Offerings & fees linked to this event (BILL.2) — fetched once per
-  // open; the block below renders only when something is linked.
+  // Offerings & fees linked to this event (BILL.2). A failed read stays
+  // visible with retry. An empty linked list still hides the block.
   const [eventInvoices, setEventInvoices] = useState([])
+  const [invoicesFailed, setInvoicesFailed] = useState(false)
+  const invoiceGen = useRef(0)
+  const eventIdRef = useRef(event?.id)
+  eventIdRef.current = event?.id
+  const applyInvoices = (forId, result) => {
+    if (positiveIntId(eventIdRef.current) !== positiveIntId(forId)) return
+    if (result.failed) {
+      setEventInvoices([])
+      setInvoicesFailed(true)
+    } else {
+      setEventInvoices(result.invoices)
+      setInvoicesFailed(false)
+    }
+  }
+  const retryInvoices = async () => {
+    const forId = event?.id
+    const gen = ++invoiceGen.current
+    const result = await readEventInvoices(forId)
+    if (gen !== invoiceGen.current || positiveIntId(eventIdRef.current) !== positiveIntId(forId)) return
+    applyInvoices(forId, result)
+  }
   useEffect(() => {
-    if (!isEdit) { setEventInvoices([]); return }
+    if (!isEdit) {
+      invoiceGen.current += 1
+      setEventInvoices([])
+      setInvoicesFailed(false)
+      return
+    }
+    const forId = event.id
+    const gen = ++invoiceGen.current
     let cancelled = false
-    fetch(apiUrl(`/api/invoices?event=${event.id}&limit=20`))
-      .then(r => (r.ok ? r.json() : []))
-      .then(d => { if (!cancelled) setEventInvoices(Array.isArray(d) ? d.filter(i => i.status !== 'cancelled') : []) })
-      .catch(() => { if (!cancelled) setEventInvoices([]) })
-    return () => { cancelled = true }
+    setInvoicesFailed(false)
+    setEventInvoices([])
+    ;(async () => {
+      const result = await readEventInvoices(forId)
+      if (cancelled || gen !== invoiceGen.current) return
+      applyInvoices(forId, result)
+    })()
+    return () => { cancelled = true; invoiceGen.current += 1 }
   }, [isEdit, event?.id]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Liturgical context for the event's date. Fetched whenever the
@@ -296,9 +491,13 @@ function EventModal({ event, onClose, onSave, onDelete, members, membersFailed =
   // soft warning shape; we render but never block saving — admins
   // sometimes intentionally double-book ("the choir leader IS in
   // both the rehearsal and the performance").
+  // A failed or malformed check is UNKNOWN, not "no conflicts": it is
+  // reported as such (conflictCheckFailed) and never shown as clean.
   const [conflicts, setConflicts] = useState([])
+  const [conflictCheckFailed, setConflictCheckFailed] = useState(false)
   useEffect(() => {
     const ready = form.date && form.start_time && form.end_time && form.assigned_to?.length
+    setConflictCheckFailed(false)
     if (!ready) { setConflicts([]); return }
     const params = new URLSearchParams({
       date:        form.date,
@@ -310,9 +509,21 @@ function EventModal({ event, onClose, onSave, onDelete, members, membersFailed =
     let cancelled = false
     const t = setTimeout(() => {
       fetch(apiUrl(`/api/calendar/conflicts?${params}`))
-        .then(r => (r.ok ? r.json() : { conflicts: [] }))
-        .then(d => { if (!cancelled) setConflicts(d.conflicts ?? []) })
-        .catch(() => { if (!cancelled) setConflicts([]) })
+        .then(r => {
+          if (!r.ok) throw new Error(`conflicts ${r.status}`)
+          return r.json()
+        })
+        .then(d => {
+          if (cancelled) return
+          if (!validConflictList(d?.conflicts)) throw new Error('conflicts: malformed')
+          setConflicts(d.conflicts)
+          setConflictCheckFailed(false)
+        })
+        .catch(() => {
+          if (cancelled) return
+          setConflicts([])
+          setConflictCheckFailed(true)
+        })
     }, 400)
     return () => { cancelled = true; clearTimeout(t) }
   }, [form.date, form.start_time, form.end_time, form.assigned_to, event?.id])
@@ -322,19 +533,32 @@ function EventModal({ event, onClose, onSave, onDelete, members, membersFailed =
   // spirit as the conflict warning: the admin may knowingly assign
   // someone who said they're out. Re-runs when the date or roster
   // changes. `unavailableIds` is the subset of assigned_to that's out.
+  // Same rule: a failed or malformed availability read is reported, not
+  // shown as "everyone is available".
   const [unavailableIds, setUnavailableIds] = useState([])
+  const [availabilityCheckFailed, setAvailabilityCheckFailed] = useState(false)
   useEffect(() => {
     const ready = form.date && form.assigned_to?.length
+    setAvailabilityCheckFailed(false)
     if (!ready) { setUnavailableIds([]); return }
     let cancelled = false
     fetch(apiUrl(`/api/availability?date=${form.date}`))
-      .then(r => (r.ok ? r.json() : { unavailability: [] }))
+      .then(r => {
+        if (!r.ok) throw new Error(`availability ${r.status}`)
+        return r.json()
+      })
       .then(d => {
         if (cancelled) return
-        const outSet = new Set((d.unavailability ?? []).map(u => u.client_id))
+        if (!validUnavailabilityList(d?.unavailability)) throw new Error('availability: malformed')
+        const outSet = new Set(d.unavailability.map(u => u.client_id))
         setUnavailableIds(form.assigned_to.filter(id => outSet.has(id)))
+        setAvailabilityCheckFailed(false)
       })
-      .catch(() => { if (!cancelled) setUnavailableIds([]) })
+      .catch(() => {
+        if (cancelled) return
+        setUnavailableIds([])
+        setAvailabilityCheckFailed(true)
+      })
     return () => { cancelled = true }
   }, [form.date, form.assigned_to])
 
@@ -362,7 +586,7 @@ function EventModal({ event, onClose, onSave, onDelete, members, membersFailed =
         }),
       })
     } catch (err) {
-      toast.error("That didn't save — nothing was lost. Please check your connection and try again.")
+      toast.error(t('sched.saveLost'))
       setRotationBusy(false)
       return
     }
@@ -423,13 +647,13 @@ function EventModal({ event, onClose, onSave, onDelete, members, membersFailed =
 
           {/* Title */}
           <div>
-            <label className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1.5">Title *</label>
-            <input value={form.title} onChange={field('title')} placeholder="Event title" aria-label="Event title" className={inputCls} />
+            <label className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1.5">{t('sched.field.title')} *</label>
+            <input value={form.title} onChange={field('title')} placeholder={t('sched.field.titlePh')} aria-label={t('sched.field.titlePh')} className={inputCls} />
           </div>
 
           {/* Date */}
           <div>
-            <label className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1.5">Date *</label>
+            <label className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1.5">{t('sched.field.date')} *</label>
             <input type="date" value={form.date} onChange={field('date')} className={inputCls} />
             {/* Liturgical context for this date — purely informational.
                 Fades in once the /api/liturgical fetch resolves; absent
@@ -437,7 +661,7 @@ function EventModal({ event, onClose, onSave, onDelete, members, membersFailed =
             {liturgical?.season && (
               <div className={`mt-2 flex items-center gap-2 px-2.5 py-1.5 rounded-md border text-[11px] font-medium ${LIT_COLOR_TEXT[liturgical.color] ?? LIT_COLOR_TEXT.White}`}>
                 <span className={`w-2 h-2 rounded-full shrink-0 ${LIT_COLOR_DOT[liturgical.color] ?? 'bg-parchment-300'}`} />
-                <span className="font-semibold">{liturgical.season}</span>
+                <span className="font-semibold">{seasonLabel(t, liturgical.season, { tradition, block: liturgical.ordinary_block })}</span>
                 {liturgical.feast_name && (
                   <span className="opacity-75">· {liturgical.feast_name}</span>
                 )}
@@ -448,11 +672,11 @@ function EventModal({ event, onClose, onSave, onDelete, members, membersFailed =
           {/* Times */}
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1.5">Start Time *</label>
+              <label className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1.5">{t('sched.field.start')} *</label>
               <input type="time" value={form.start_time} onChange={field('start_time')} className={inputCls} />
             </div>
             <div>
-              <label className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1.5">End Time *</label>
+              <label className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1.5">{t('sched.field.end')} *</label>
               <input type="time" value={form.end_time} onChange={field('end_time')} className={inputCls} />
             </div>
           </div>
@@ -474,57 +698,57 @@ function EventModal({ event, onClose, onSave, onDelete, members, membersFailed =
                 <option key={g.id} value={g.id}>{g.name}</option>
               ))}
             </select>
+            {/* An empty list here can mean the groups did not load, not
+                that the parish has none. */}
+            {groupsFailed && (
+              <p role="status" className="mt-1 text-[11px] text-amber-800 dark:text-amber-200">{t('sched.groupsLoadFailed')}</p>
+            )}
           </div>
 
-          {/* Mass intentions offered at this Mass (MI.3) — read-only here;
-              the intention book stays the single place they're edited. */}
-          {isEdit && intentions.length > 0 && (
-            <div className="px-2.5 py-2 rounded-md border border-brass-200/70 dark:border-brass-800/40 bg-brass-50 dark:bg-brass-900/20">
-              <p className="text-[11px] font-semibold uppercase tracking-widest text-brass-700 dark:text-brass-300 mb-1">
-                Mass intentions
-              </p>
-              <ul className="space-y-0.5">
-                {intentions.map(mi => (
-                  <li key={mi.id} className="text-xs text-ink-800 dark:text-parchment-100">
-                    <span className="font-display">†</span>{' '}
-                    {(mi.formatted_intention || mi.intention).replace(/^†\s*/, '')}
-                    {mi.requester_name || mi.requested_by ? (
-                      <span className="text-ink-500 dark:text-parchment-300/70"> — {mi.requester_name || mi.requested_by}</span>
-                    ) : null}
-                  </li>
-                ))}
-              </ul>
-              <Link to="/mass-intentions" className="mt-1 inline-block text-[11px] font-semibold text-brass-700 dark:text-brass-300 hover:underline">
-                Open the intention book →
-              </Link>
-            </div>
+          {/* Mass intentions at this Mass (MI.4) — assign from the drawer
+              so the book, week, weekly sheet, and packet share one fact. */}
+          {isEdit && isMassCalendarEvent(event) && (
+            <MassIntentionAssign
+              event={event}
+              assigned={intentions}
+              assignedFailed={intentionsFailed}
+              onChanged={onIntentionsChanged}
+            />
           )}
 
           {/* Offerings & fees linked to this event (BILL.2) — read-only
               here; the workbench stays the single place money is handled.
-              A wedding's deposit, balance, and date read from one drawer. */}
-          {isEdit && eventInvoices.length > 0 && (
+              A wedding's deposit, balance, and date read from one drawer.
+              Failure stays in the drawer. A real empty link still hides it. */}
+          {isEdit && (invoicesFailed || eventInvoices.length > 0) && (
             <div className="px-2.5 py-2 rounded-md border border-brass-200/70 dark:border-brass-800/40 bg-brass-50 dark:bg-brass-900/20">
               <p className="text-[11px] font-semibold uppercase tracking-widest text-brass-700 dark:text-brass-300 mb-1">
                 Offerings &amp; fees
               </p>
-              <ul className="space-y-0.5">
-                {eventInvoices.map(inv => {
-                  const bal = Math.max(Number(inv.total) - Number(inv.amount_paid), 0)
-                  return (
-                    <li key={inv.id} className="text-xs text-ink-800 dark:text-parchment-100">
-                      {inv.invoice_no ? `${inv.invoice_no} · ` : ''}{inv.title}
-                      <span className="text-ink-500 dark:text-parchment-300/70">
-                        {' — '}
-                        {inv.status === 'paid' ? 'settled'
-                          : inv.status === 'waived' ? 'waived'
-                          : inv.status === 'draft' ? 'draft'
-                          : `$${bal.toFixed(2)} remaining`}
-                      </span>
-                    </li>
-                  )
-                })}
-              </ul>
+              {invoicesFailed ? (
+                <LoadFailure variant="strip" body={t('sched.invoicesUnread')} onRetry={retryInvoices} />
+              ) : (
+                <ul className="space-y-0.5">
+                  {eventInvoices.map(inv => {
+                    const total = knownNumber(inv.total)
+                    const paid = knownNumber(inv.amount_paid)
+                    const bal = total == null || paid == null ? null : Math.max(total - paid, 0)
+                    return (
+                      <li key={inv.id} className="text-xs text-ink-800 dark:text-parchment-100">
+                        {inv.invoice_no ? `${inv.invoice_no} · ` : ''}{inv.title}
+                        <span className="text-ink-500 dark:text-parchment-300/70">
+                          {' — '}
+                          {inv.status === 'paid' ? 'settled'
+                            : inv.status === 'waived' ? 'waived'
+                            : inv.status === 'draft' ? 'draft'
+                            : bal == null ? t('money.unavailable')
+                            : `$${bal.toFixed(2)} remaining`}
+                        </span>
+                      </li>
+                    )
+                  })}
+                </ul>
+              )}
               <Link to="/offerings" className="mt-1 inline-block text-[11px] font-semibold text-brass-700 dark:text-brass-300 hover:underline">
                 Open the offerings workbench →
               </Link>
@@ -541,6 +765,7 @@ function EventModal({ event, onClose, onSave, onDelete, members, membersFailed =
               members={members}
               value={form.assigned_to}
               onChange={(ids) => setForm(f => ({ ...f, assigned_to: ids }))}
+              linkProfiles
             />
             <p className="mt-1.5 text-[11px] text-ink-500 dark:text-parchment-300/70">
               Assigned members see this on their calendar feed and get a
@@ -575,6 +800,25 @@ function EventModal({ event, onClose, onSave, onDelete, members, membersFailed =
                   </li>
                 ))}
               </ul>
+            </div>
+          )}
+
+          {/* A conflict check that did not complete is not a clean result. */}
+          {conflictCheckFailed && (
+            <div role="status" className="rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800/30 px-3 py-2.5">
+              <div className="flex items-center gap-1.5">
+                <AlertTriangle size={13} className="text-amber-600 dark:text-amber-300 shrink-0" />
+                <span className="text-xs text-amber-800 dark:text-amber-200">{t('sched.conflictCheckFailed')}</span>
+              </div>
+            </div>
+          )}
+
+          {availabilityCheckFailed && (
+            <div role="status" className="rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800/30 px-3 py-2.5">
+              <div className="flex items-center gap-1.5">
+                <AlertTriangle size={13} className="text-amber-600 dark:text-amber-300 shrink-0" />
+                <span className="text-xs text-amber-800 dark:text-amber-200">{t('sched.availabilityCheckFailed')}</span>
+              </div>
             </div>
           )}
 
@@ -713,6 +957,22 @@ function EventModal({ event, onClose, onSave, onDelete, members, membersFailed =
                 <Repeat size={13} /> Delete series
               </button>
             )}
+            {/* Take attendance for THIS service. The desk already has the
+                service open; without this it leaves for Check-in and finds
+                the same one again in a thirty-day dropdown, and for a Mass
+                that has already happened it could not be reached at all.
+                `?event=` is the check-in page's source of truth, so the
+                service on that screen is the service written to. Not gated on
+                edit rights — taking attendance is not editing the schedule. */}
+            {isEdit && (
+              <Link
+                to={`/checkin?event=${event.id}`}
+                className="flex items-center gap-1.5 text-xs font-medium text-ink-500 dark:text-parchment-300/70 hover:text-ink-900 dark:hover:text-parchment-50 transition-colors"
+                title="Open check-in for this service"
+              >
+                <UserCheck size={13} /> Check-in
+              </Link>
+            )}
             {/* This event's audit trail (AUD.4) — admin-only, edit mode
                 only. Navigating away closes the modal. */}
             {isEdit && isAdmin && (
@@ -760,6 +1020,7 @@ export default function Schedule() {
   const [members, setMembers]     = useState([])
   const [membersFailed, setMembersFailed] = useState(false)
   const [groups, setGroups]       = useState([])
+  const [groupsFailed, setGroupsFailed] = useState(false)
   const [groupFilter, setGroupFilter] = useState('')   // '' = all groups
   const [modal, setModal]         = useState(null)   // null | 'new' | event object
   // True while the week's events are in flight. An empty grid that
@@ -776,16 +1037,25 @@ export default function Schedule() {
   const [litByDate, setLitByDate]   = useState({})
   // Mass intentions scheduled in the visible week (MI.3). Read from the
   // same manifest the sacristy sheet prints, so the schedule and the
-  // printed week can never disagree. Quietly empty on failure — the
-  // schedule must not fail because the intention book hiccuped.
+  // printed week can never disagree. Failure is a banner, not an empty
+  // week — UNKNOWN is not ZERO.
   const [intentions, setIntentions] = useState([])
+  const [intentionsFailed, setIntentionsFailed] = useState(false)
   // Mobile day-list selection. Defaults to today when today is in the
   // visible week, else Monday. Recomputed when the visible week changes.
   const [selectedDayIndex, setSelectedDayIndex] = useState(0)
   const scrollRef = useRef(null)
-  const { canWrite } = useAuth()
+  // Open(eventId): when we jump the week to a named Mass, the week-change
+  // effect must select that Mass's day — not fall back to today/Monday.
+  const pendingSelectDate = useRef(null)
+  const eventResolveGen = useRef(0)
+  const { canWrite, user } = useAuth()
+  // SP-021: intentions and groups are not in the Viewer's role table.
+  const isViewer = user?.role === 'viewer'
+  const { t, dateLocale } = useLocale()
   const toast = useToast()
   const ask = useConfirm()
+  const navigate = useNavigate()
 
   const weekDays = Array.from({ length: 7 }, (_, i) => addDays(weekStart, i))
   const weekEnd  = weekDays[6]
@@ -809,7 +1079,7 @@ export default function Schedule() {
     } catch {
       // Never fail silently — a quiet week and a failed load must not
       // look identical.
-      toast.error("Couldn't open the week. Your records are safe — please retry.")
+      toast.error(t('sched.weekOpenFailed'))
     } finally {
       setLoadingWeek(false)
     }
@@ -832,20 +1102,56 @@ export default function Schedule() {
   }, [weekStart])
 
   // Pull the week's scheduled Mass intentions alongside the events.
+  const reloadIntentions = () => {
+    const start = toDateStr(weekStart)
+    const end   = toDateStr(weekEnd)
+    setIntentionsFailed(false)
+    if (isViewer) return Promise.resolve()
+    return fetch(apiUrl(`/api/mass-intentions/weekly?start=${start}&end=${end}`))
+      .then(async (r) => {
+        if (!r.ok) throw new Error('weekly')
+        return r.json()
+      })
+      .then(d => {
+        setIntentions(Array.isArray(d.intentions) ? d.intentions : [])
+        setIntentionsFailed(false)
+      })
+      .catch(() => { setIntentionsFailed(true) })
+  }
+
   useEffect(() => {
     let cancelled = false
     const start = toDateStr(weekStart)
     const end   = toDateStr(weekEnd)
+    setIntentionsFailed(false)
+    setIntentions([])
+    if (isViewer) return () => { cancelled = true }
     fetch(apiUrl(`/api/mass-intentions/weekly?start=${start}&end=${end}`))
-      .then(r => r.ok ? r.json() : { intentions: [] })
-      .then(d => { if (!cancelled) setIntentions(d.intentions ?? []) })
-      .catch(() => { if (!cancelled) setIntentions([]) })
+      .then(async (r) => {
+        if (!r.ok) throw new Error('weekly')
+        return r.json()
+      })
+      .then(d => {
+        if (cancelled) return
+        setIntentions(Array.isArray(d.intentions) ? d.intentions : [])
+        setIntentionsFailed(false)
+      })
+      .catch(() => { if (!cancelled) setIntentionsFailed(true) })
     return () => { cancelled = true }
-  }, [weekStart])
+  }, [weekStart, isViewer])
 
   // Sync selected day to today when navigating weeks. If today isn't
-  // in the visible week, fall back to Monday.
+  // in the visible week, fall back to Monday. Open(eventId) stashes the
+  // Mass's date so a week jump lands on that day, not on today.
   useEffect(() => {
+    if (pendingSelectDate.current) {
+      const idx = dayIndexForEventDate(weekStart, pendingSelectDate.current)
+      pendingSelectDate.current = null
+      if (idx != null) {
+        setSelectedDayIndex(idx)
+        return
+      }
+    }
     const t = new Date(); t.setHours(0, 0, 0, 0)
     const ms = t.getTime() - weekStart.getTime()
     const idx = Math.floor(ms / (24 * 60 * 60 * 1000))
@@ -864,26 +1170,169 @@ export default function Schedule() {
 
   // Load groups once for the toolbar filter + the modal's group picker.
   useEffect(() => {
+    if (isViewer) return
+    // A refused, dropped or malformed groups read is not "no groups":
+    // `r.ok ? r.json() : { groups: [] }` hid the toolbar filter and left the
+    // modal's group picker with only "No group", as for a parish without
+    // groups. The flag says so in both places.
+    let cancelled = false
     fetch(apiUrl('/api/groups'))
-      .then(r => (r.ok ? r.json() : { groups: [] }))
-      .then(d => setGroups(d.groups ?? []))
-      .catch(err => console.error('Failed to load groups:', err))
-  }, [])
+      .then(r => {
+        if (!r.ok) throw new Error(`groups ${r.status}`)
+        return r.json()
+      })
+      .then(d => {
+        if (cancelled) return
+        const list = d && typeof d === 'object' && !Array.isArray(d) ? d.groups : null
+        if (!Array.isArray(list) || !list.every(g =>
+          g && typeof g === 'object' && !Array.isArray(g)
+          && Number.isInteger(g.id) && g.id > 0 && typeof g.name === 'string')) {
+          throw new Error('groups: malformed')
+        }
+        setGroups(list)
+        setGroupsFailed(false)
+      })
+      .catch(() => {
+        if (cancelled) return
+        setGroups([])
+        setGroupsFailed(true)
+      })
+    return () => { cancelled = true }
+  }, [isViewer])
 
   // Deep-link entry from the Groups page: /schedule?group=ID&new=1
   // pre-selects the group filter and (when new=1) opens the modal with
-  // that group pre-filled. We strip `new` from the URL afterward so a
-  // refresh or back-nav doesn't keep re-opening the modal.
+  // that group pre-filled. The intention book adds &date=YYYY-MM-DD so
+  // the same modal opens on that day. We strip `new` from the URL
+  // afterward so a refresh or back-nav doesn't keep re-opening the modal.
+  // `date` and `return=intention` stay so a saved Mass can come back.
+  // A named Mass (?event=) wins — do not also open New over the Mass
+  // that was asked for.
   useEffect(() => {
     const g = searchParams.get('group')
     if (g) setGroupFilter(g)
     if (searchParams.get('new') === '1') {
-      openNew('', g || '')
-      searchParams.delete('new')
-      setSearchParams(searchParams, { replace: true })
+      if (parseScheduleEventId(searchParams.get('event')) != null) {
+        const next = new URLSearchParams(searchParams)
+        next.delete('new')
+        setSearchParams(next, { replace: true })
+        return
+      }
+      const dateRaw = searchParams.get('date')
+      const date = isCalendarDayParam(dateRaw) ? dateRaw : ''
+      openNew(date, g || '')
+      if (date) {
+        const monday = weekStartForEventDate(date)
+        if (monday) {
+          pendingSelectDate.current = date
+          const idx = dayIndexForEventDate(monday, date)
+          setWeekStart(prev => (toDateStr(prev) === toDateStr(monday) ? prev : monday))
+          if (idx != null) setSelectedDayIndex(idx)
+        }
+      }
+      const next = new URLSearchParams(searchParams)
+      next.delete('new')
+      setSearchParams(next, { replace: true })
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  const askedEventRaw = searchParams.get('event')
+
+  const writeEventParam = (eventId) => {
+    const next = withScheduleEventParam(searchParams, eventId)
+    if (next.toString() === searchParams.toString()) return
+    setSearchParams(next, { replace: true })
+  }
+
+  const clearEventParam = () => {
+    if (!searchParams.has('event')) return
+    const next = new URLSearchParams(searchParams)
+    next.delete('event')
+    setSearchParams(next, { replace: true })
+  }
+
+  const positionToEvent = (event) => {
+    const monday = weekStartForEventDate(event?.date)
+    if (!monday) return
+    const dateStr = String(event.date).slice(0, 10)
+    const idx = dayIndexForEventDate(monday, event.date)
+    if (idx != null) setSelectedDayIndex(idx)
+    setWeekStart(prev => {
+      if (toDateStr(prev) === toDateStr(monday)) return prev
+      pendingSelectDate.current = dateStr
+      return monday
+    })
+  }
+
+  const openEvent = (event) => {
+    const id = parseScheduleEventId(event?.id)
+    if (id == null) return
+    positionToEvent(event)
+    setModal(event)
+    writeEventParam(id)
+  }
+
+  const closeEvent = () => {
+    setModal(null)
+    clearEventParam()
+  }
+
+  // Open(eventId): ?event=<positive-integer> is the source of truth for
+  // which Mass is open. Resolve against the loaded week, or ask
+  // GET /api/calendar/:id when the Mass sits outside this window.
+  // Refuse — do not invent a Mass by title, date, or "today" — and take
+  // the id off the URL so a refresh cannot claim a Mass that is not open.
+  useEffect(() => {
+    const askedId = parseScheduleEventId(askedEventRaw)
+    if (searchParams.has('event') && askedId == null) {
+      clearEventParam()
+      return
+    }
+    if (askedId == null) return
+
+    const found = findCalendarEventById(events, askedId)
+    if (found) {
+      eventResolveGen.current += 1
+      positionToEvent(found)
+      setModal(found)
+      return
+    }
+    if (loadingWeek) return
+
+    const gen = ++eventResolveGen.current
+    let cancelled = false
+    fetch(apiUrl(`/api/calendar/${askedId}`))
+      .then(async (res) => {
+        if (cancelled || gen !== eventResolveGen.current) return
+        if (res.ok) {
+          const ev = await res.json().catch(() => null)
+          if (parseScheduleEventId(ev?.id) === askedId) {
+            positionToEvent(ev)
+            setModal(ev)
+            return
+          }
+        }
+        const next = new URLSearchParams(searchParams)
+        next.delete('event')
+        setSearchParams(next, { replace: true })
+        if (res.status === 404) {
+          toast.error(t('sched.massMissing'))
+        } else {
+          toast.error(t('sched.massOpenFailed'))
+        }
+      })
+      .catch(() => {
+        if (cancelled || gen !== eventResolveGen.current) return
+        const next = new URLSearchParams(searchParams)
+        next.delete('event')
+        setSearchParams(next, { replace: true })
+        toast.error(t('sched.massOpenFailed'))
+      })
+    return () => { cancelled = true }
+    // askedEventRaw is the URL token; events/loadingWeek are the resolve inputs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [askedEventRaw, events, loadingWeek])
 
   const prevWeek = () => setWeekStart(d => addDays(d, -7))
   const nextWeek = () => setWeekStart(d => addDays(d, 7))
@@ -893,6 +1342,7 @@ export default function Schedule() {
     setPrefillDate(date)
     setPrefillGroup(groupId)
     setModal('new')
+    clearEventParam()
   }
 
   // scope is undefined for a single-row save and 'following' when
@@ -916,15 +1366,30 @@ export default function Schedule() {
         body: JSON.stringify(body),
       })
     } catch (err) {
-      toast.error("That didn't save — nothing was lost. Please check your connection and try again.")
+      toast.error(t('sched.saveLost'))
       return
     }
     if (!res.ok) {
       const data = await res.json().catch(() => ({}))
-      toast.error(data.error || `Save failed (${res.status})`)
+      toast.error(data.error || t('sched.saveFailed', { status: res.status }))
       return // keep the modal open so the user can see their input + retry
     }
-    setModal(null)
+    // The intention book asked for a Mass on a day that had none.
+    // Hand the new event back; do not leave the secretary on the week.
+    if (!isEdit && isIntentionReturn(searchParams.get(RETURN_PARAM))) {
+      const created = await res.json().catch(() => null)
+      const id = parseScheduleEventId(created?.id)
+      const date = calendarDay(created?.date) || calendarDay(form.date)
+      if (id != null) {
+        navigate(intentionResumeHref({
+          eventId: id,
+          date,
+          nonce: searchParams.get(DRAFT_PARAM),
+        }))
+        return
+      }
+    }
+    closeEvent()
     load()
   }
 
@@ -945,15 +1410,15 @@ export default function Schedule() {
     try {
       res = await fetch(url, { method: 'DELETE' })
     } catch (err) {
-      toast.error("That didn't save — nothing was lost. Please check your connection and try again.")
+      toast.error(t('sched.saveLost'))
       return
     }
     if (!res.ok && res.status !== 204) {
       const data = await res.json().catch(() => ({}))
-      toast.error(data.error || `Delete failed (${res.status})`)
+      toast.error(data.error || t('sched.deleteFailed', { status: res.status }))
       return
     }
-    setModal(null)
+    closeEvent()
     load()
   }
 
@@ -976,8 +1441,8 @@ export default function Schedule() {
     intentions.filter(mi => mi.calendar_event_id == null && mi.mass_date === toDateStr(day))
 
   // Week label
-  const monthA = weekStart.toLocaleDateString('en-US', { month: 'short' })
-  const monthB = weekEnd.toLocaleDateString('en-US', { month: 'short' })
+  const monthA = weekStart.toLocaleDateString(dateLocale, { month: 'short' })
+  const monthB = weekEnd.toLocaleDateString(dateLocale, { month: 'short' })
   const yearA  = weekStart.getFullYear()
   const yearB  = weekEnd.getFullYear()
   const weekLabel = monthA === monthB
@@ -986,18 +1451,36 @@ export default function Schedule() {
       ? `${monthA} ${weekStart.getDate()} – ${monthB} ${weekEnd.getDate()}, ${yearA}`
       : `${monthA} ${weekStart.getDate()}, ${yearA} – ${monthB} ${weekEnd.getDate()}, ${yearB}`
 
+  const returningToIntention = isIntentionReturn(searchParams.get(RETURN_PARAM))
+  const intentionBackDate = isCalendarDayParam(searchParams.get('date') || '')
+    ? searchParams.get('date')
+    : ''
+  const intentionDraftNonce = searchParams.get(DRAFT_PARAM)
+
   return (
     <PageWrapper className="flex flex-col h-full max-w-full">
 
       {/* ── Toolbar ── */}
       <div className="flex items-center justify-between mb-5 gap-4 flex-wrap">
         <div>
-          <h1 className="font-display text-3xl font-semibold text-ink-900 dark:text-parchment-50 tracking-tight">Schedule</h1>
+          <h1 className="font-display text-3xl font-semibold text-ink-900 dark:text-parchment-50 tracking-tight">{t('sched.title')}</h1>
           <p className="text-sm text-ink-500 dark:text-parchment-300/70 mt-0.5">{weekLabel}</p>
+          {returningToIntention && (
+            <Link
+              to={intentionResumeHref({ date: intentionBackDate, nonce: intentionDraftNonce })}
+              data-testid="back-to-intention"
+              className="mt-1 inline-block text-xs font-semibold text-brass-700 dark:text-brass-300 hover:underline"
+            >
+              {t('sched.backIntention')}
+            </Link>
+          )}
         </div>
         <div className="flex items-center gap-3">
           {/* Group filter — only shown once the org has groups. Narrows
               the visible week to a single ministry / committee. */}
+          {groupsFailed && (
+            <span role="status" className="text-[11px] text-amber-800 dark:text-amber-200">{t('sched.groupsLoadFailed')}</span>
+          )}
           {groups.length > 0 && (
             <div className="relative flex items-center">
               <Users2 size={14} className="absolute left-2.5 text-ink-400 pointer-events-none" />
@@ -1005,9 +1488,9 @@ export default function Schedule() {
                 value={groupFilter}
                 onChange={e => setGroupFilter(e.target.value)}
                 className="appearance-none pl-8 pr-7 py-2 text-xs font-semibold rounded-xl bg-parchment-50 dark:bg-ink-900 border border-parchment-300/60 dark:border-brass-900/30 text-ink-600 dark:text-parchment-200 focus:outline-none focus:ring-2 focus:ring-brass-400/40 cursor-pointer"
-                title="Filter the schedule by group"
+                title={t('sched.filterGroup')}
               >
-                <option value="">All groups</option>
+                <option value="">{t('sched.allGroups')}</option>
                 {groups.map(g => (
                   <option key={g.id} value={g.id}>{g.name}</option>
                 ))}
@@ -1016,22 +1499,33 @@ export default function Schedule() {
           )}
           {/* Week nav */}
           <div className="flex items-center gap-1 bg-parchment-50 dark:bg-ink-900 border border-parchment-300/60 dark:border-brass-900/30 rounded-xl p-1">
-            <button onClick={prevWeek} aria-label="Previous week" className="tap-reach p-1.5 rounded-lg text-ink-400 hover:text-ink-700 dark:hover:text-parchment-50 hover:bg-parchment-200 dark:hover:bg-ink-800 transition-colors">
+            <button onClick={prevWeek} aria-label={t('sched.prevWeek')} className="tap-reach p-1.5 rounded-lg text-ink-400 hover:text-ink-700 dark:hover:text-parchment-50 hover:bg-parchment-200 dark:hover:bg-ink-800 transition-colors">
               <ChevronLeft size={16} />
             </button>
             <button onClick={goToday} className="px-3 py-1 text-xs font-semibold text-ink-600 dark:text-parchment-200 hover:text-ink-900 dark:hover:text-parchment-50 hover:bg-parchment-200 dark:hover:bg-ink-800 rounded-lg transition-colors">
-              Today
+              {t('sched.today')}
             </button>
-            <button onClick={nextWeek} aria-label="Next week" className="tap-reach p-1.5 rounded-lg text-ink-400 hover:text-ink-700 dark:hover:text-parchment-50 hover:bg-parchment-200 dark:hover:bg-ink-800 transition-colors">
+            <button onClick={nextWeek} aria-label={t('sched.nextWeek')} className="tap-reach p-1.5 rounded-lg text-ink-400 hover:text-ink-700 dark:hover:text-parchment-50 hover:bg-parchment-200 dark:hover:bg-ink-800 transition-colors">
               <ChevronRight size={16} />
             </button>
           </div>
+          {/* Sunday Packet — serving print already lives at /packet; this
+              is the one-click hop from the week the secretary is looking at
+              (Sunday of the visible Mon–Sun grid, same YYYY-MM-DD as
+              SundayPacket.jsx). */}
+          {/* SP-029: hidden for a Viewer unless the Viewer scope opens /packet. */}
+          {(!isViewer || viewerMayOpen('/packet')) && <Link
+            to={`/packet?date=${toDateStr(weekEnd)}&from=schedule`}
+            className="flex items-center gap-2 px-3 py-2 text-sm font-semibold rounded-xl border border-parchment-300/60 dark:border-brass-900/30 text-ink-600 dark:text-parchment-200 hover:bg-parchment-100 dark:hover:bg-ink-800/60 transition-colors"
+          >
+            <Printer size={15} /> {t('plan.packet')}
+          </Link>}
           {canWrite && (
             <button
               onClick={() => openNew()}
               className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-church-900 dark:bg-parchment-100 text-parchment-50 dark:text-church-900 text-sm font-semibold shadow hover:opacity-90 transition-opacity"
             >
-              <Plus size={15} /> Add Event
+              <Plus size={15} /> {t('sched.addEvent')}
             </button>
           )}
         </div>
@@ -1043,15 +1537,27 @@ export default function Schedule() {
           the primary write CTA for staff/admin). */}
       {loadingWeek && visibleEvents.length === 0 && (
         <div className="mb-4 px-4 py-3 rounded-xl bg-parchment-100 dark:bg-ink-800/40 border border-parchment-300/60 dark:border-brass-900/30 text-sm text-ink-500 dark:text-parchment-300/70 italic">
-          Opening the week…
+          {t('sched.openingWeek')}
         </div>
       )}
       {!loadingWeek && visibleEvents.length === 0 && (
         <div className="mb-4 px-4 py-3 rounded-xl bg-parchment-100 dark:bg-ink-800/40 border border-parchment-300/60 dark:border-brass-900/30 text-sm text-ink-600 dark:text-parchment-300">
           {groupFilter
-            ? 'No events for this group this week.'
-            : 'No events scheduled this week.'}
-          {canWrite && !groupFilter && <span className="text-ink-500 dark:text-parchment-300/70"> Click any day above to add one.</span>}
+            ? t('sched.weekEmptyGroup')
+            : t('sched.weekEmpty')}
+          {canWrite && !groupFilter && <span className="text-ink-500 dark:text-parchment-300/70"> {t('sched.weekEmptyHint')}</span>}
+        </div>
+      )}
+      {intentionsFailed && (
+        <div role="status" className="mb-4 px-4 py-3 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200/70 dark:border-amber-900/40 text-sm text-amber-900 dark:text-amber-200">
+          {t('sched.intentionsFailed')}
+          <button
+            type="button"
+            onClick={reloadIntentions}
+            className="ml-2 font-semibold underline hover:no-underline"
+          >
+            {t('sched.intentionsRetry')}
+          </button>
         </div>
       )}
 
@@ -1072,9 +1578,9 @@ export default function Schedule() {
                   canWrite ? 'cursor-pointer hover:bg-parchment-100 dark:hover:bg-ink-800/60' : ''
                 }`}
                 onClick={canWrite ? () => openNew(toDateStr(day)) : undefined}
-                title={canWrite ? `Add event on ${day.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}` : undefined}
+                title={canWrite ? t('sched.addOnDay', { date: day.toLocaleDateString(dateLocale, { weekday: 'long', month: 'long', day: 'numeric' }) }) : undefined}
               >
-                <p className="text-xs font-semibold text-ink-500 dark:text-parchment-300/70 uppercase tracking-wider">{DAY_LABELS[i]}</p>
+                <p className="text-xs font-semibold text-ink-500 dark:text-parchment-300/70 uppercase tracking-wider">{day.toLocaleDateString(dateLocale, { weekday: 'short' })}</p>
                 <div className={`text-sm font-bold mt-0.5 w-7 h-7 mx-auto flex items-center justify-center rounded-full transition-colors ${
                   isToday
                     ? 'bg-church-900 dark:bg-parchment-100 text-parchment-50 dark:text-church-900'
@@ -1155,7 +1661,7 @@ export default function Schedule() {
                         members={members}
                         litColor={litByDate[ev.date]?.color}
                         intentions={intentionsForEvent(ev)}
-                        onClick={e => setModal(e)}
+                        onClick={openEvent}
                       />
                     ))}
                   </AnimatePresence>
@@ -1188,7 +1694,7 @@ export default function Schedule() {
                   isSelected
                     ? 'text-parchment-50/90 dark:text-church-900/80'
                     : 'text-ink-500 dark:text-parchment-300/70'
-                }`}>{DAY_LABELS[i]}</p>
+                }`}>{day.toLocaleDateString(dateLocale, { weekday: 'short' })}</p>
                 <p className={`text-base font-bold mt-0.5 ${
                   isSelected
                     ? 'text-parchment-50 dark:text-church-900'
@@ -1216,13 +1722,13 @@ export default function Schedule() {
             if (dayEvents.length === 0) {
               return (
                 <div className="text-center py-12 text-sm text-ink-500 dark:text-parchment-300/70">
-                  <p>No events on {day.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}.</p>
+                  <p>{t('sched.dayEmpty', { date: day.toLocaleDateString(dateLocale, { weekday: 'long', month: 'long', day: 'numeric' }) })}</p>
                   {canWrite && (
                     <button
                       onClick={() => openNew(toDateStr(day))}
                       className="mt-3 inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-church-900 dark:bg-parchment-100 text-parchment-50 dark:text-church-900 text-xs font-semibold"
                     >
-                      <Plus size={14} /> Add an event
+                      <Plus size={14} /> {t('sched.dayAdd')}
                     </button>
                   )}
                 </div>
@@ -1233,13 +1739,13 @@ export default function Schedule() {
                 {/* Dated-but-unassigned intentions for the selected day (MI.3) */}
                 {unassignedIntentionsOnDay(day).length > 0 && (
                   <Link
-                    to="/mass-intentions"
+                    to={`/mass-intentions?date=${toDateStr(day)}`}
                     className="block px-3 py-2 rounded-lg border border-brass-200/70 dark:border-brass-800/40 bg-brass-50 dark:bg-brass-900/20 text-xs text-brass-700 dark:text-brass-300"
                   >
                     <span className="font-display">†</span>{' '}
                     {(unassignedIntentionsOnDay(day)[0].formatted_intention || unassignedIntentionsOnDay(day)[0].intention)}
                     {unassignedIntentionsOnDay(day).length > 1 ? ` +${unassignedIntentionsOnDay(day).length - 1} more` : ''}
-                    <span className="block mt-0.5 text-[10px] opacity-80">Awaiting a Mass — open the intention book to assign.</span>
+                    <span className="block mt-0.5 text-[10px] opacity-80">{t('sched.awaitingDay')}</span>
                   </Link>
                 )}
                 {dayEvents.map(ev => (
@@ -1249,7 +1755,7 @@ export default function Schedule() {
                     members={members}
                     litColor={litByDate[ev.date]?.color}
                     intentions={intentionsForEvent(ev)}
-                    onClick={e => setModal(e)}
+                    onClick={openEvent}
                   />
                 ))}
               </>
@@ -1262,14 +1768,18 @@ export default function Schedule() {
       <AnimatePresence>
         {modal && (
           <EventModal
+            key={modal === 'new' ? 'new' : modal.id}
             event={modal === 'new'
               ? (prefillDate || prefillGroup ? { ...EMPTY_FORM, date: prefillDate, group_id: prefillGroup } : null)
               : modal}
             members={members}
             membersFailed={membersFailed}
             groups={groups}
+            groupsFailed={groupsFailed}
             intentions={modal !== 'new' && modal ? intentionsForEvent(modal) : []}
-            onClose={() => setModal(null)}
+            intentionsFailed={intentionsFailed}
+            onIntentionsChanged={reloadIntentions}
+            onClose={closeEvent}
             onSave={handleSave}
             onDelete={handleDelete}
           />

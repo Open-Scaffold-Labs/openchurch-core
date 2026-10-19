@@ -25,14 +25,38 @@ export function initials(name = '') {
 // Returns { ok, data }. `ok` is false for a network error, a non-2xx, or a
 // body that is not the shape asked for. The caller decides what to show;
 // what it must not do is quietly substitute emptiness.
+// A members roster is an array of member records. HTTP 200 with `{}`,
+// `null`, a scalar, `{ clients: [...] }`, or a nested array such as
+// `[[member]]` is a body this screen cannot read — not an empty parish.
+// Callers that used `body.clients ?? []` turned that object into "no
+// members". A nested array used to pass the array check and then render
+// as a member with no name.
+function isMemberRecord(row) {
+  return row !== null && typeof row === 'object' && !Array.isArray(row)
+}
+
+export function asMemberRoster(body) {
+  if (!Array.isArray(body)) return { ok: false, members: [] }
+  if (body.some(row => !isMemberRecord(row))) return { ok: false, members: [] }
+  return { ok: true, members: body }
+}
+
+// Render gate. `null` is "not loaded yet" (the dashboard's first paint).
+// A present non-array, or an explicit failed read, must not say the roll
+// is empty. `failed` covers a load that already substituted `[]`.
+export function memberRosterUnreadable(members, failed = false) {
+  if (failed) return true
+  return members != null && !Array.isArray(members)
+}
+
 export async function loadList(url, pick = d => d) {
   try {
     const res = await fetch(url)
     if (!res.ok) return { ok: false, data: [] }
     const body = await res.json()
-    const data = pick(body)
-    if (!Array.isArray(data)) return { ok: false, data: [] }
-    return { ok: true, data }
+    const roster = asMemberRoster(pick(body))
+    if (!roster.ok) return { ok: false, data: [] }
+    return { ok: true, data: roster.members }
   } catch {
     return { ok: false, data: [] }
   }

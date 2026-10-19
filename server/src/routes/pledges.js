@@ -22,31 +22,38 @@ import { Router } from 'express'
 import pool from '../db.js'
 import { normalizeDonorEmail } from '../finance/donorIdentity.js'
 import { requireIntParam } from '../utils/params.js'
+import { civilDateInTimeZone } from '../utils/timezone.js'
+import { inclusiveCivilDays, isoDatePrefix } from '../utils/civilDay.js'
 
 const router = Router()
 
 const VALID_FREQUENCIES = new Set(['weekly', 'monthly', 'yearly', 'one_time'])
 const VALID_STATUSES    = new Set(['active', 'completed', 'cancelled'])
 
-// Multiplier converts the per-period pledge amount into the total
-// expected over the actual pledge window. Walks the date range and
-// counts periods — exact enough for fulfillment %, simple enough to
-// reason about.
-function expectedPeriodTotal({ amount, frequency, start_date, end_date }) {
-  const start = new Date(start_date)
-  // Open-ended pledges: cap the comparison window at 'today' so the
-  // expected total reflects the period the donor has actually been
-  // pledging against, not some imagined far-future total.
-  const end   = end_date ? new Date(end_date) : new Date()
-  if (end < start) return Number(amount)
-  const msDay = 24 * 60 * 60 * 1000
-  const days  = Math.max(1, Math.ceil((end - start) / msDay) + 1)
+// A DATE is a civil day. "Today" for an open pledge is the current
+// civil date in the organization's timezone, not the UTC day and not
+// the process-local midnight. A missing or invalid zone falls back to
+// UTC inside civilDateInTimeZone. The day count is date-only arithmetic.
+//
+// If the org's civil today is still before the start, the total is 0,
+// open or closed — not the full amount. Once the pledge has begun, an
+// open window caps at today and a closed window uses its stored end
+// date, and that end day is included.
+function expectedPeriodTotal({ amount, frequency, start_date, end_date }, now = new Date(), timeZone) {
+  const start = isoDatePrefix(start_date)
+  const today = civilDateInTimeZone(now, timeZone)
+  if (!start || !today || today < start) return 0
+  const end = end_date ? isoDatePrefix(end_date) : today
+  if (!end || end < start) return 0
+  const days = inclusiveCivilDays(start, end)
+  if (!Number.isFinite(days) || days < 1) return 0
 
-  if (frequency === 'one_time') return Number(amount)
-  if (frequency === 'weekly')   return Number(amount) * (days / 7)
-  if (frequency === 'monthly')  return Number(amount) * (days / 30.4375) // avg days/month
-  if (frequency === 'yearly')   return Number(amount) * (days / 365.25)
-  return Number(amount)
+  const n = Number(amount)
+  if (frequency === 'one_time') return n
+  if (frequency === 'weekly')   return n * (days / 7)
+  if (frequency === 'monthly')  return n * (days / 30.4375) // avg days/month
+  if (frequency === 'yearly')   return n * (days / 365.25)
+  return n
 }
 
 // Resolve the matching donor key for a pledge. Prefers the member's
@@ -103,8 +110,14 @@ async function donorKeyForPledge(pledge, orgId) {
 // latency queued behind a five-connection pool — the round-trip count is
 // the number that actually travels to production, so treat it, not the
 // milliseconds, as the durable result.
-async function attachFulfillment(orgId, pledges) {
+async function attachFulfillment(orgId, pledges, now = new Date()) {
   if (!pledges.length) return pledges
+
+  const { rows: orgRows } = await pool.query(
+    'SELECT timezone FROM ochr_organizations WHERE id = $1',
+    [orgId],
+  )
+  const timeZone = orgRows[0]?.timezone
 
   // One lookup for every member-linked pledge. The org scope here is
   // defence in depth, not the load-bearing guard, and the falsification
@@ -143,10 +156,10 @@ async function attachFulfillment(orgId, pledges) {
          SELECT * FROM unnest($2::int[], $3::text[], $4::date[], $5::date[])
        )
        SELECT w.pledge_id,
-              COALESCE(SUM(d.amount), 0)::numeric(12,2) AS total,
+              COALESCE(SUM(d.live_amount), 0)::numeric(12,2) AS total,
               COUNT(d.id)::int AS n
          FROM wanted w
-         LEFT JOIN ochr_donations d
+         LEFT JOIN ochr_donation_live d
                 ON d.organization_id = $1
                -- Case-insensitive donor identity, as with members (F5): a
                -- pledge stored under one casing must still be credited the
@@ -154,7 +167,6 @@ async function attachFulfillment(orgId, pledges) {
                AND lower(d.donor_email) = lower(w.donor_email)
                AND d.date           >= w.start_date
                AND (w.end_date IS NULL OR d.date <= w.end_date)
-               AND d.payment_status IS DISTINCT FROM 'refunded'
         GROUP BY w.pledge_id`,
       [
         orgId,
@@ -171,7 +183,7 @@ async function attachFulfillment(orgId, pledges) {
     const got = totals.get(pledge.id) ?? { total: 0, n: 0 }
     const matched_total = got.total
     const gift_count = got.n
-    const period_total = expectedPeriodTotal(pledge)
+    const period_total = expectedPeriodTotal(pledge, now, timeZone)
     const fulfillment  = period_total > 0
       ? Math.min(1, matched_total / period_total)
       : 0
@@ -244,16 +256,12 @@ router.get('/:id', async (req, res) => {
     let lines = []
     if (donor) {
       const { rows: dRows } = await pool.query(
-        `SELECT id, amount, category, method, date, notes
-           FROM ochr_donations
+        `SELECT id, amount, refunded_total, live_amount, category, method, date, notes
+           FROM ochr_donation_live
           WHERE organization_id = $1
             AND lower(donor_email) = lower($2)
             AND date >= $3
             AND ($4::date IS NULL OR date <= $4)
-            -- matched_total above already excludes refunds; without the same
-            -- predicate here the listed lines did not add up to the total
-            -- printed beside them.
-            AND payment_status IS DISTINCT FROM 'refunded'
        ORDER BY date DESC, id DESC`,
         [req.organizationId, donor.key, pledge.start_date, pledge.end_date]
       )

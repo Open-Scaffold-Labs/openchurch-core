@@ -1,12 +1,38 @@
 import { Router } from 'express'
 import pool from '../db.js'
 import { normalizeDonorEmail } from '../finance/donorIdentity.js'
+import {
+  findPendingRefund,
+  insertPendingRefund,
+  lockGift,
+  parseRefundAmount,
+  postRefundFact,
+  postedRefundTotal,
+  refreshGiftRefundStamps,
+  refundIdempotencyKey,
+  reservedRefundTotal,
+} from '../finance/donationRefunds.js'
 import { requireIntParam, parsePagination, parseDays } from '../utils/params.js'
+import { civilDateInTimeZone } from '../utils/timezone.js'
 import { createRefund } from '../payments/index.js'
 import { protectedDelete } from '../vault/deleteRoute.js'
 import { VaultError } from '../vault/index.js'
 
 const router = Router()
+
+// Parish civil today for an undated gift. civilDateInTimeZone is the
+// helper pledges and care already use, and it matches the checklist,
+// kiosk, and packet clocks: ochr_organizations.timezone, with UTC when
+// the zone is blank or invalid. The day is computed in JS and bound as
+// a date string, so neither the process TZ nor the Postgres session
+// TimeZone chooses it.
+async function parishCivilToday(orgId, now = new Date()) {
+  const { rows } = await pool.query(
+    'SELECT timezone FROM ochr_organizations WHERE id = $1',
+    [orgId],
+  )
+  return civilDateInTimeZone(now, rows[0]?.timezone)
+}
 
 // Explicit columns rather than SELECT *. search_vec is a tsvector the ledger
 // screen never renders — it was riding on every row of every page purely
@@ -16,9 +42,19 @@ const router = Router()
 //
 // Measured on a 10,400-gift ledger, one 100-row page: 25 kB with SELECT *,
 // 15 kB with the allowlist — 41% of every ledger page was the tsvector.
+// `date` is a calendar day, not a moment, and it ships as one. node-postgres
+// parses a Postgres DATE into a JS Date at the SERVER's local midnight, which
+// JSON then serialises as a full ISO timestamp — so the client received
+// '2031-04-04T00:00:00.000Z' for a column whose whole meaning is '2031-04-04'.
+// Every row of the donation log rendered 'Invalid Date' (13 of 13, measured
+// 4 Sep), and a reader west of the server would have been shown the previous
+// day even once it parsed. to_char is what the rest of the codebase already
+// does with a DATE (bulletins.js, availability.js); this column had been
+// missed.
 const DONATION_PUBLIC_COLUMNS = [
   'id', 'organization_id', 'donor_name', 'donor_email', 'donor_address',
-  'amount', 'category', 'method', 'date', 'notes', 'source', 'fund_id',
+  'amount', 'category', 'method', "to_char(date, 'YYYY-MM-DD') AS date",
+  'notes', 'source', 'fund_id',
   'payment_ref', 'payment_status', 'refunded_at', 'refund_ref', 'created_at',
 ].join(', ')
 
@@ -29,7 +65,8 @@ const DONATION_PUBLIC_COLUMNS = [
 // started shipping it. An explicit list is what makes a new column a
 // decision instead of an accident.
 const CASH_SESSION_PUBLIC_COLUMNS = [
-  'id', 'organization_id', 'service_name', 'service_date', 'category',
+  'id', 'organization_id', 'service_name',
+  "to_char(service_date, 'YYYY-MM-DD') AS service_date", 'category',
   'counted_by', 'verified_by', 'denominations', 'total', 'status',
   'donation_id', 'notes', 'created_at',
 ].join(', ')
@@ -65,14 +102,13 @@ router.get('/summary', async (req, res) => {
   try {
     const { rows } = await pool.query(`
       SELECT
-        COALESCE(SUM(amount) FILTER (WHERE date >= date_trunc('month', NOW())), 0)::NUMERIC(10,2) AS month_total,
-        COALESCE(SUM(amount) FILTER (WHERE date >= date_trunc('week',  NOW())), 0)::NUMERIC(10,2) AS week_total,
-        COALESCE(MAX(amount), 0)::NUMERIC(10,2)                                                   AS largest,
-        COUNT(DISTINCT donor_name)                                                                AS donor_count,
-        COUNT(*)                                                                                  AS total_count
-      FROM ochr_donations
+        COALESCE(SUM(live_amount) FILTER (WHERE date >= date_trunc('month', NOW())), 0)::NUMERIC(10,2) AS month_total,
+        COALESCE(SUM(live_amount) FILTER (WHERE date >= date_trunc('week',  NOW())), 0)::NUMERIC(10,2) AS week_total,
+        COALESCE(MAX(live_amount), 0)::NUMERIC(10,2)                                                   AS largest,
+        COUNT(DISTINCT donor_name)                                                                     AS donor_count,
+        COUNT(*)                                                                                       AS total_count
+      FROM ochr_donation_live
       WHERE organization_id = $1
-        AND payment_status IS DISTINCT FROM 'refunded'
     `, [req.organizationId])
     res.json(rows[0])
   } catch (err) {
@@ -88,10 +124,9 @@ router.get('/chart', async (req, res) => {
       SELECT
         to_char(date, 'MM/DD') AS label,
         date::TEXT             AS date,
-        SUM(amount)::NUMERIC(10,2) AS total
-      FROM ochr_donations
+        SUM(live_amount)::NUMERIC(10,2) AS total
+      FROM ochr_donation_live
       WHERE organization_id = $1 AND date >= NOW() - ($2 || ' days')::INTERVAL
-        AND payment_status IS DISTINCT FROM 'refunded'
       GROUP BY date
       ORDER BY date ASC
     `, [req.organizationId, days])
@@ -113,11 +148,10 @@ router.get('/by-fund', async (req, res) => {
     const { rows } = await pool.query(`
       SELECT
         COALESCE(NULLIF(TRIM(category), ''), 'Uncategorized') AS category,
-        SUM(amount)::NUMERIC(10,2) AS total,
-        COUNT(*)::int              AS count
-      FROM ochr_donations
+        SUM(live_amount)::NUMERIC(10,2) AS total,
+        COUNT(*)::int                   AS count
+      FROM ochr_donation_live
       WHERE organization_id = $1 AND date >= NOW() - ($2 || ' days')::INTERVAL
-        AND payment_status IS DISTINCT FROM 'refunded'
       GROUP BY COALESCE(NULLIF(TRIM(category), ''), 'Uncategorized')
       ORDER BY total DESC
     `, [req.organizationId, days])
@@ -160,6 +194,12 @@ router.post('/', async (req, res) => {
     // grouping key for year-end giving statements (Sprint Y) — falls
     // back to donor_name when absent, so older walk-in cash gifts
     // still aggregate, just less reliably across spelling variants.
+    //
+    // An omitted date is the parish's civil today, not the UTC day.
+    // Statements read this column, and this route never updates it.
+    // UTC-today stores tomorrow for a gift entered late in the evening
+    // west of UTC.
+    const giftDate = date || await parishCivilToday(req.organizationId)
     const { rows } = await pool.query(
       `INSERT INTO ochr_donations (organization_id, donor_name, donor_email, donor_address, amount, category, method, date, notes, fund_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
@@ -167,10 +207,7 @@ router.post('/', async (req, res) => {
       [req.organizationId, donor_name.trim(),
        normalizeDonorEmail(donor_email), donor_address?.trim() || null,
        amount, category || 'tithe', method || 'cash',
-       // Last-resort fallback only. The client form prefills the donor's LOCAL
-       // day (todayLocalISO), so `date` is normally set; the server has no
-       // caller timezone, so UTC-today is the only defensible default here.
-       date || new Date().toISOString().slice(0, 10), notes, fundId]
+       giftDate, notes, fundId]
     )
     res.status(201).json(rows[0])
   } catch (err) {
@@ -210,75 +247,207 @@ router.delete('/:id', protectedDelete('donation', {
   failure: 'Failed to delete donation', before: refuseDeletingChargedGift,
 }))
 
-// POST /api/donations/:id/refund (GIV.6)
+// POST /api/donations/:id/refund (GIV.6 / GIV-06 Option A)
 // Refund/void a gift the provider charged. Manual entries aren't
-// refundable here — they're just deleted. Runs the refund through the
-// payments provider, then stamps the row (payment_status='refunded' +
-// refunded_at/refund_ref) so it drops out of giving stats and shows as
-// refunded.
+// refundable here — they're just deleted.
+//
+// A refund is a NEW linked financial fact. gift.amount is never rewritten.
+// The gift stamps (payment_status / refunded_at / refund_ref) are a derived
+// cache of Σ(posted refund rows): full `refunded` only when that sum covers
+// the gift. Live books keep the gift and subtract posted refunds.
 //
 // Refundable iff payment_ref IS NOT NULL and source IN ('online',
-// 'recurring') (1 Sep). It used to be `source === 'online'` alone, which
-// was wrong in both directions: a 'recurring' row — charged by the cron,
-// payment_ref and all — could not be refunded in-app; and an 'online' row
-// with NO payment_ref would have been sent to the provider with chargeId
-// null. The charge id is what makes a refund possible, so it is what the
-// guard reads.
+// 'recurring') (1 Sep). The charge id is what makes a refund possible.
+//
+// Amount omitted = remaining balance (so existing full-refund callers keep
+// working). An amount that would push Σ(posted+pending) over gift.amount
+// is a hard 409 — never a silent clamp.
+//
+// Provider idempotency is per refund row (`refund-{org}-{donation}-{refundId}`),
+// not per gift: two partials of one gift are two movements of money. The
+// pending row is committed BEFORE the provider call so a retry after a
+// failed stamp UPDATE reuses the same key.
 router.post('/:id/refund', async (req, res) => {
   const id = requireIntParam(req, res); if (id === null) return
+  const asked = parseRefundAmount(req.body?.amount)
+  if (asked.kind === 'invalid') {
+    return res.status(400).json({ error: 'Amount must be greater than $0' })
+  }
   try {
-    const { rows } = await pool.query(
+    const peek = await pool.query(
       `SELECT id, source, amount, payment_ref, payment_status
          FROM ochr_donations WHERE id = $1 AND organization_id = $2`,
       [id, req.organizationId]
     )
-    const gift = rows[0]
+    const gift = peek.rows[0]
     if (!gift) return res.status(404).json({ error: 'Not found' })
     if (!['online', 'recurring'].includes(gift.source) || gift.payment_ref == null) {
       return res.status(400).json({
         error: 'Only gifts charged through the payment provider can be refunded. This one has no provider charge; delete it instead.',
       })
     }
-    if (gift.payment_status === 'refunded') {
-      return res.status(409).json({ error: 'Already refunded' })
+
+    // Phase 1 — reserve the fact under FOR UPDATE so concurrent partials
+    // cannot together exceed gift.amount. The pending row is the name of
+    // THIS refund at the provider.
+    const reserve = await pool.connect()
+    let refundRow
+    try {
+      await reserve.query('BEGIN')
+      const locked = await lockGift(reserve, id, req.organizationId)
+      if (!locked) {
+        await reserve.query('ROLLBACK')
+        return res.status(404).json({ error: 'Not found' })
+      }
+      const pending = await findPendingRefund(reserve, id, req.organizationId)
+      if (pending) {
+        if (asked.kind === 'explicit' && Number(asked.amount) !== Number(pending.amount)) {
+          await reserve.query('ROLLBACK')
+          return res.status(409).json({ error: 'A refund is already in progress for this gift.' })
+        }
+        refundRow = pending
+      } else {
+        const reserved = Number(await reservedRefundTotal(reserve, id, req.organizationId))
+        const remaining = Number(locked.amount) - reserved
+        if (remaining <= 0) {
+          await reserve.query('ROLLBACK')
+          return res.status(409).json({ error: 'Already refunded' })
+        }
+        const amount = asked.kind === 'explicit' ? asked.amount : remaining
+        if (amount > remaining) {
+          await reserve.query('ROLLBACK')
+          return res.status(409).json({ error: 'Refund would exceed the remaining gift amount.' })
+        }
+        refundRow = await insertPendingRefund(reserve, req.organizationId, id, amount)
+      }
+      await reserve.query('COMMIT')
+    } catch (err) {
+      await reserve.query('ROLLBACK').catch(() => {})
+      if (err?.code === '23514') {
+        return res.status(409).json({ error: 'Refund would exceed the remaining gift amount.' })
+      }
+      throw err
+    } finally {
+      reserve.release()
     }
 
+    const idempotencyKey = refundIdempotencyKey(req.organizationId, id, refundRow.id)
     let refund
     try {
       refund = await createRefund({
         organizationId: req.organizationId,
         chargeId:       gift.payment_ref,
-        amount:         Number(gift.amount),
+        amount:         Number(refundRow.amount),
+        idempotencyKey,
       })
     } catch {
       return res.status(502).json({ error: 'Refund could not be processed.' })
     }
 
-    // The 409 above is a check on one connection and this is a write on
-    // another, so two concurrent refunds both passed it and both landed —
-    // the second overwriting refunded_at and refund_ref, so the row named
-    // the wrong refund and the first one became untraceable. The same file
-    // already guards the cash-count post this way (see the status predicate
-    // there, "so even a bypassed lock cannot double-post").
-    //
-    // This closes the RECORD. It does not close the provider call above:
-    // both requests still reach createRefund(). Stripe rejects a second
-    // full refund of one charge, so the live exposure is the provider's
-    // backstop rather than ours — stated here rather than implied, because
-    // a comment claiming this race is fully closed would be the same kind
-    // of lie this pass keeps removing.
-    const { rows: updated } = await pool.query(
-      `UPDATE ochr_donations
-          SET payment_status = 'refunded', refunded_at = NOW(), refund_ref = $1
-        WHERE id = $2 AND organization_id = $3
-          AND payment_status IS DISTINCT FROM 'refunded'
-        RETURNING ${DONATION_PUBLIC_COLUMNS}`,
-      [refund.id, id, req.organizationId]
-    )
-    if (!updated.length) {
-      return res.status(409).json({ error: 'Already refunded' })
+    // Phase 2 — post the fact, refresh the derived gift stamps, and write
+    // the freeze sidecar when this gift sits inside a frozen period.
+    // Period adjustments are NOT live books (GIV-07). The amount recorded
+    // is THIS refund, not the gift.
+    const client = await pool.connect()
+    let updated, posted, adjusted = null, postedSum
+    try {
+      await client.query('BEGIN')
+      await lockGift(client, id, req.organizationId)
+      posted = await postRefundFact(client, {
+        refundId: refundRow.id,
+        organizationId: req.organizationId,
+        donationId: id,
+        refundRef: refund.id,
+      })
+      if (!posted) {
+        await client.query('ROLLBACK')
+        return res.status(409).json({ error: 'Already refunded' })
+      }
+      updated = await refreshGiftRefundStamps(client, id, req.organizationId, DONATION_PUBLIC_COLUMNS)
+      postedSum = await postedRefundTotal(client, id, req.organizationId)
+
+      // THE INVARIANT: an open adjustment exists for a submission iff that
+      // submission's FROZEN totals include money that has since been
+      // refunded. Two predicates decide "is this gift in those totals",
+      // and neither of them is "the period is approved":
+      //
+      // STATUS. The totals are frozen at SUBMIT, not at approval — the
+      // chancery's approve flips a status and copies nothing. Both
+      // 'submitted' and 'approved' hold a frozen result; only 'returned'
+      // does not, because a resubmit recomputes it (and clears these —
+      // see POST /submissions in routes/finance.js).
+      //
+      // SNAPSHOT. created_at <= submitted_at is the snapshot boundary.
+      // UNIQUE (submission_id, donation_refund_id): the SAME refund is
+      // idempotent (ON CONFLICT DO NOTHING); DISTINCT refund facts each
+      // get a sidecar row. totals_json is not rewritten.
+      //
+      // assessable_impact is copied from totals_json.gift_assessable —
+      // the freeze stamp — never from live COA or mappings. A gift that
+      // was not assessable at freeze stamps 0 so APPLIED cannot shrink
+      // the payable base. A missing map, or a gift the map does not
+      // name, is UNKNOWN (NULL). UNKNOWN is not 0: settle must refuse
+      // before APPLIED can change the payable.
+      const ins = await client.query(
+        `INSERT INTO ochr_period_adjustments
+           (organization_id, diocese_org_id, submission_id, donation_id,
+            donation_refund_id, kind, amount, assessable_impact)
+         SELECT s.organization_id, s.diocese_org_id, s.id, d.id, $4, 'refund',
+                $3::NUMERIC(12,2),
+                CASE
+                  WHEN jsonb_typeof(
+                         s.totals_json->'gift_assessable'
+                         ->d.id::text
+                         ->'assessable'
+                       ) = 'boolean'
+                    AND (s.totals_json->'gift_assessable'
+                         ->d.id::text
+                         ->>'assessable')::boolean
+                  THEN $3::NUMERIC(12,2)
+                  WHEN jsonb_typeof(
+                         s.totals_json->'gift_assessable'
+                         ->d.id::text
+                         ->'assessable'
+                       ) = 'boolean'
+                  THEN 0::NUMERIC(12,2)
+                  ELSE NULL
+                END
+           FROM ochr_report_submissions s
+           JOIN ochr_donations d
+             ON d.id = $1 AND d.organization_id = s.organization_id
+          WHERE s.organization_id = $2
+            AND s.status IN ('submitted', 'approved')
+            AND d.date BETWEEN s.period_start AND s.period_end
+            AND d.created_at <= s.submitted_at
+         ON CONFLICT DO NOTHING
+         RETURNING id, submission_id, amount, assessable_impact`,
+        [id, req.organizationId, posted.amount, posted.id]
+      )
+      adjusted = ins.rows[0] ?? null
+      await client.query('COMMIT')
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {})
+      throw err
+    } finally {
+      client.release()
     }
-    res.json(updated[0])
+
+    const liveAmount = Number(gift.amount) - Number(postedSum)
+    const body = {
+      ...updated,
+      refunded_total: postedSum,
+      live_amount: liveAmount,
+      refund: posted,
+    }
+    res.json(adjusted
+      ? { ...body, period_adjustment: {
+          submission_id: Number(adjusted.submission_id),
+          amount: adjusted.amount,
+          message: 'This gift is inside a reporting period the diocese has been sent. ' +
+                   'The frozen totals for that period, and any bill from them, still include it — they are not changed by this refund. ' +
+                   'The adjustment has been recorded against that period for the chancery to settle.',
+        } }
+      : body)
   } catch (err) {
     console.error(err)
     res.status(500).json({ error: 'Failed to refund donation' })
@@ -292,7 +461,8 @@ router.get('/recurring', async (req, res) => {
   try {
     const { rows } = await pool.query(
       `SELECT rg.id, rg.donor_name, rg.donor_email, rg.amount, rg.frequency,
-              rg.next_charge_date, rg.last_charged_at, rg.created_at,
+              to_char(rg.next_charge_date, 'YYYY-MM-DD') AS next_charge_date,
+              rg.last_charged_at, rg.created_at,
               rg.status, rg.failure_count, rg.last_error, rg.last_failed_at,
               f.name AS fund_name
          FROM ochr_recurring_gifts rg

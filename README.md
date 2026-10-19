@@ -97,9 +97,37 @@ only against a local target (or with an explicit `SEED_DEMO=true`), so a
 deployed environment neither creates this account nor honours this password.
 Do not treat the pair above as a way into any running deployment, and do not
 reuse it as a starting point for one — it is published in this file, which is
-the whole reason it is safe to put here.
+the whole reason it is safe to put here. Do not set `SEED_DEMO=true` against
+production to provision App Store reviewers.
+
+The Login page does **not** advertise or auto-fill this pair. A one-click
+"Use demo account" helper exists only for local Vite development when
+`VITE_ENABLE_DEMO_LOGIN=true` is set (see `client/.env.example`). Production
+builds compile `import.meta.env.DEV` to false and drop the helper — the
+password is not in the production client bundle. Never set
+`VITE_ENABLE_DEMO_LOGIN` in `client/.env.production` or a production deploy.
 
 It ships with a handful of sample members, events, and tasks so the Dashboard isn't empty on first login. The Dashboard also surfaces a "Get started" checklist that auto-checks items as you wire up your workspace (add a real member, set your letterhead, invite a teammate, etc.). Clear the samples from the banner whenever you're ready.
+
+App Store review uses a **separate non-prod tenant**, not this pair and not
+production `demo@`. Credentials come from environment variables and go in
+App Store Connect Review Notes only — never in the client. See
+[docs/APP-REVIEW-TENANT.md](docs/APP-REVIEW-TENANT.md).
+
+### Before you push
+
+Every push to a pull request runs the full CI gate (about ten billed minutes). Run the cheap
+checks locally first and push each change set once, green:
+
+```bash
+npm run check:prepush               # changes vs origin/main; --base <ref> for another base
+```
+
+It always runs the honest-failure, OPERATOR and API-shape lints and the CI scope
+regressions, then the client, chancery and server tests *related to the files you changed*.
+Server tests run only against a loopback `DATABASE_URL` (`node scripts/local-db.mjs up`,
+then `eval "$(node scripts/local-db.mjs env)"`); otherwise that step prints `NOT RUN`, which
+is not a pass. It is not a git hook and not a substitute for CI: no builds and no full suites.
 
 ### Running the tests
 
@@ -112,6 +140,30 @@ DATABASE_URL='postgres://postgres@localhost:5432/openchurch_test' \
 JWT_SECRET='test-secret' \
 CHECKIN_CODE_PEPPER='test-pepper' \
 NODE_ENV=test npm test
+```
+
+Parish client tests are jsdom and need no database. Golden Journey 1
+(book → sacristy sheet → print) and Golden Journey 2 (member → linked
+register → certificate → print) share one entry point. It runs both,
+labels each journey, and fails if either is not green:
+
+```bash
+cd client && npm run test:golden
+```
+
+A fail-closed rehearsal command runs that pair plus the GJ2 certificate-path
+file, and refuses `--local-db` unless the environment is a loopback forge.
+It never seeds or follows `server/.env`. See `docs/DEMO-REHEARSAL.md`.
+
+```bash
+npm run rehearsal:proof
+```
+
+Each journey still runs on its own:
+
+```bash
+cd client && npm test -- src/pages/GoldenJourney1.test.jsx
+cd client && npm test -- src/pages/GoldenJourney2.test.jsx
 ```
 
 ## Project Structure
@@ -168,7 +220,7 @@ OpenChurch deploys as a Vercel monorepo:
 
 - Root `vercel.json` builds the client to `client/dist` and routes `/api/*` into `api/index.js`.
 - Set the env vars listed in [Operational](#operational) below in the Vercel project.
-- Automatic deploys from `main` are disabled in `vercel.json`; production ships from a deploy pipeline configured outside this repository, and only after the smoke suite and both client builds pass.
+- Automatic deploys from `main` are disabled in `vercel.json`. Production ships from a deploy pipeline configured outside this repository, and only after the smoke suite and both client builds pass. Tip on `main` is **not** proof of what production is serving; check `/api/health`.
 - Migrations are **not** run on cold-starts in production. After a deploy that includes schema changes, run `npm run migrate` against the production database.
 
 ## Operational
@@ -186,7 +238,10 @@ OpenChurch deploys as a Vercel monorepo:
 | `CRON_SECRET` | Shared secret on `Authorization: Bearer …` for cron endpoints | required for cron |
 | `MONITORING_LEVEL` | `error` / `warn` / `info` / `debug` (default `info`) | optional |
 | `BILLING_PRICE_ID_PRO` | Provider-specific price id for Pro checkout | when billing is wired |
-| `DEMO_EMAIL` / `DEMO_PASSWORD` | Override the seeded demo creds. Read only when the seed runs — local target, or explicit `SEED_DEMO=true`. Inert on a deployed environment. | local only |
+| `DEMO_EMAIL` / `DEMO_PASSWORD` | Override the seeded demo creds. Read only when the seed runs — local target, or explicit `SEED_DEMO=true`. Inert on a deployed environment. Do not use to provision App Review. | local only |
+| `SEED_APP_REVIEW_TENANT` | When `1`/`true`, seed a throwaway App Review org+user on a **non-prod** host from `APP_REVIEW_*` env vars. Refused in production. See [docs/APP-REVIEW-TENANT.md](docs/APP-REVIEW-TENANT.md). | review host only |
+| `APP_REVIEW_EMAIL` / `APP_REVIEW_PASSWORD` / `APP_REVIEW_ORG_NAME` | Review-tenant credentials and org name. No defaults; never compiled into the client. Optional: `APP_REVIEW_ORG_SLUG`, `APP_REVIEW_USER_NAME`, `APP_REVIEW_ALLOW_REMOTE`. | review host only |
+| `VITE_ENABLE_DEMO_LOGIN` | Client / Vite only. When `true` **and** `import.meta.env.DEV`, Login shows a local demo-account helper. Must stay unset in production builds (`client/.env.production`). | local only |
 | `PG_POOL_MAX` | Postgres connection pool size (default 5) | optional |
 
 `JWT_SECRET` and `CHECKIN_CODE_PEPPER` both fail closed at module load in production — a
@@ -194,13 +249,20 @@ missing value crashes the function rather than falling back to an insecure defau
 
 ### Cron schedule (`vercel.json` → `crons`)
 
+Eight entries are declared in `vercel.json`:
+
 | Path | Schedule (UTC) | Purpose |
 |---|---|---|
 | `/api/cron/drain-notifications` | `*/5 * * * *` | Pick up due rows in `ochr_scheduled_notifications` and dispatch them through `notify()` |
 | `/api/cron/enqueue-birthdays` | `0 5 * * *` | Walk every org, enqueue `member_birthday` + `member_anniversary` reminders for tomorrow's matches |
 | `/api/cron/retention-prune` | `0 4 * * *` | Daily prune of audit log, notification log, AI usage, and terminal-state scheduled notifications |
+| `/api/cron/enqueue-sacrament-anniversaries` | `0 6 * * 1` | Weekly sacrament-anniversary digest enqueue per org |
+| `/api/cron/backup-digest` | `0 8 * * 6` | Weekly off-site backup digest |
+| `/api/cron/charge-recurring` | `0 9 * * *` | Charge due recurring gifts (stub-safe when payments are unconfigured) |
+| `/api/cron/nudge-swaps` | `0 16 * * *` | Nudge stale pending schedule-swap requests |
+| `/api/cron/weekly-serving-digest` | `0 15 * * 4` | Weekly serving digest per assignee |
 
-Vercel cron passes `Authorization: Bearer ${CRON_SECRET}` on each invocation. The endpoints under `/api/cron/*` accept ONLY this auth (no JWT). The same underlying functions are also reachable via `/api/admin/...` for manual operator pokes from the UI; those paths use the standard admin JWT.
+Vercel cron passes `Authorization: Bearer ${CRON_SECRET}` on each invocation. The endpoints under `/api/cron/*` accept ONLY this auth (no JWT). Three of these also have `/api/admin/...` manual-poke counterparts (drain, enqueue-birthdays, retention-prune); the other five are cron-only today.
 
 ### Vendor-neutral integrations
 

@@ -9,11 +9,12 @@ import { useLocale } from '../i18n'
 // widget once the fuller Liturgical Day Detail panel landed under the
 // greeting (the widget had become a smaller copy of the same data).
 //
-// Prop-driven, NOT self-fetching: the Dashboard already loads
-// /api/events into `data.events`, so this reuses that array rather
-// than firing a duplicate request. Renders nothing until that array
-// has arrived (events == null), same defensive pattern as the other
-// Dashboard widgets so the layout never jumps.
+// Prop-driven, NOT self-fetching: the Dashboard loads the calendar
+// (/api/calendar, the Schedule's services and events) from today forward
+// and passes it in. Renders nothing until that array has arrived
+// (events == null), same defensive pattern as the other Dashboard widgets
+// so the layout never jumps. A refused read (`failed`) says it did not
+// load; it never reads as "Nothing scheduled yet." (SP-059)
 
 // Parse a YYYY-MM-DD into a month-abbrev + day, built from the date
 // parts directly so there's no UTC/local off-by-one on the day number.
@@ -40,7 +41,7 @@ function todayStr() {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
 
-export default function NextOnCalendar({ events }) {
+export default function NextOnCalendar({ events, failed = false }) {
   const { t, dateLocale } = useLocale()
   // Upcoming = dated today or later, soonest first, capped at 3.
   // String comparison on YYYY-MM-DD is correct and timezone-proof.
@@ -53,14 +54,14 @@ export default function NextOnCalendar({ events }) {
         const ad = String(a.date).slice(0, 10)
         const bd = String(b.date).slice(0, 10)
         if (ad !== bd) return ad < bd ? -1 : 1
-        return (a.time ?? '').localeCompare(b.time ?? '')
+        return (a.start_time ?? a.time ?? '').localeCompare(b.start_time ?? b.time ?? '')
       })
       .slice(0, 3)
   }, [events])
 
   // Not loaded yet — render nothing so the slot doesn't flash an
   // empty state before /api/events resolves.
-  if (events == null) return null
+  if (events == null && !failed) return null
 
   return (
     <motion.div
@@ -77,7 +78,11 @@ export default function NextOnCalendar({ events }) {
         </span>
       </div>
 
-      {upcoming.length === 0 ? (
+      {failed ? (
+        <p role="alert" className="text-sm text-ink-500 dark:text-parchment-300/70 py-1">
+          {t('noc.unread')}
+        </p>
+      ) : upcoming.length === 0 ? (
         <p className="text-sm text-ink-500 dark:text-parchment-300/70 py-1">
           {t('noc.empty')}
         </p>
@@ -85,7 +90,7 @@ export default function NextOnCalendar({ events }) {
         <ul className="space-y-2.5">
           {upcoming.map(e => {
             const { month, day } = monthDay(e.date, dateLocale)
-            const time = fmtTime(e.time)
+            const time = fmtTime(e.start_time ?? e.time)
             const sub  = [time, e.service_division || e.location].filter(Boolean).join(' · ')
             return (
               <li key={e.id} className="flex items-center gap-3">

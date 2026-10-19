@@ -26,8 +26,10 @@ import { parsePagination } from '../utils/params.js'
 import { parseCSVToObjects } from '../utils/csv.js'
 import { monitor } from '../monitoring/index.js'
 import { computePeriodTotals } from '../finance/periodTotals.js'
+import { giftAssessableAtFreeze } from '../finance/giftAssessableFreeze.js'
 import { EFFECTIVE_COA } from '../finance/effectiveCoa.js'
-import { findOverlappingSubmission, overlapMessage } from '../finance/fiscalPeriod.js'
+import { findOverlappingSubmission, overlapMessage, overlapRemedy } from '../finance/fiscalPeriod.js'
+import { PERIOD_ADJUSTMENT_LIST_COLS, PERIOD_ADJUSTMENT_LIST_JOINS } from '../finance/periodAdjustmentRollup.js'
 
 const router = Router()
 
@@ -81,13 +83,10 @@ router.get('/mappings', async (req, res) => {
     const { rows: funds } = await pool.query(
       `SELECT f.id, f.name, f.active,
               COUNT(d.id)::int AS gift_count,
-              COALESCE(SUM(d.amount), 0)::NUMERIC(12,2) AS gift_total
+              COALESCE(SUM(d.live_amount), 0)::NUMERIC(12,2) AS gift_total
          FROM ochr_funds f
-         LEFT JOIN ochr_donations d
+         LEFT JOIN ochr_donation_live d
                 ON d.fund_id = f.id AND d.organization_id = f.organization_id
-               -- "what is at stake in mapping this fund" must not count
-               -- money the parish already gave back.
-               AND d.payment_status IS DISTINCT FROM 'refunded'
         WHERE f.organization_id = $1
         GROUP BY f.id, f.name, f.active
         ORDER BY f.sort_order, f.name`,
@@ -283,16 +282,18 @@ router.post('/ledger/import', async (req, res) => {
   }
 })
 
-// GET /api/finance/summary?start&end — totals by rollup group, plus the
-// assessable revenue base. Computed by the SAME function that freezes a
-// submission's totals_json (finance/periodTotals.js), so the live view
-// and the submitted report can never disagree.
+// GET /api/finance/summary?start&end — LIVE totals by rollup group, plus
+// the assessable revenue base. Computed by the SAME function that freezes
+// a submission's totals_json (finance/periodTotals.js). After a later
+// refund those two numbers can disagree: this response is the live books,
+// not the approved snapshot. `basis: 'live'` says so; do not read it as
+// an approved period.
 router.get('/summary', async (req, res) => {
   const start = ISO_DATE.test(req.query.start ?? '') ? req.query.start : '1900-01-01'
   const end   = ISO_DATE.test(req.query.end ?? '')   ? req.query.end   : '2999-12-31'
   try {
     const t = await computePeriodTotals(req.organizationId, start, end)
-    res.json({ start, end, ...t })
+    res.json({ start, end, basis: 'live', ...t })
   } catch (err) {
     monitor.error('finance.summary', err, { orgId: req.organizationId })
     res.status(500).json({ error: 'Failed to build the summary' })
@@ -311,9 +312,15 @@ router.get('/submissions', async (req, res) => {
               to_char(s.period_end, 'YYYY-MM-DD') AS period_end,
               s.status, s.review_note, s.submitted_at, s.reviewed_at,
               s.totals_json->'totals' AS totals,
+              -- Frozen totals are archival (099). OPEN is the unresolved
+              -- condition; APPLIED credits (106) are the payable net.
+              -- Shipping totals without these lets every renderer imply
+              -- the figures already net later refunds. They do not.
+              ${PERIOD_ADJUSTMENT_LIST_COLS},
               d.name AS diocese_name
          FROM ochr_report_submissions s
          JOIN ochr_organizations d ON d.id = s.diocese_org_id
+         ${PERIOD_ADJUSTMENT_LIST_JOINS}
         WHERE s.organization_id = $1
         ORDER BY s.period_end DESC
         LIMIT 60`,
@@ -327,44 +334,72 @@ router.get('/submissions', async (req, res) => {
 })
 
 // POST /api/finance/submissions — body: { period_start, period_end }
+//
+// ONE TRANSACTION, ONE SNAPSHOT (4 Sep). The totals used to be computed by
+// an autocommit SELECT and the row written by a second statement, and a
+// gift committed in the gap between them was inside the period, outside
+// the frozen totals, and EARLIER than the row's own submitted_at. The
+// frozen report then said, in its own timestamp, that the gift should have
+// been in it. Reproduced deterministically: revenue 1000.00 frozen at
+// 01:05:35.377Z, a 777.00 gift dated in-period committed at .368Z.
+//
+// So the affiliation read, the overlap check, the totals and the write now
+// run on one client at REPEATABLE READ. The isolation level is what makes
+// the promise structural rather than probable: the totals SELECT sees the
+// transaction's snapshot, and submitted_at = NOW() is the transaction's
+// start time, so the row's timestamp and its figures describe the same
+// instant — everything committed before it is in, everything after is
+// out, by construction. Not SERIALIZABLE, because nothing here needs the
+// write-skew guarantee and the retry burden that comes with it.
 router.post('/submissions', async (req, res) => {
   const start = ISO_DATE.test(req.body?.period_start ?? '') ? req.body.period_start : null
   const end   = ISO_DATE.test(req.body?.period_end ?? '')   ? req.body.period_end   : null
   if (!start || !end) return res.status(400).json({ error: 'period_start and period_end (YYYY-MM-DD) are required' })
   if (end < start) return res.status(400).json({ error: 'period_end must be on or after period_start' })
 
+  const client = await pool.connect()
+  // Every early exit below has already decided the answer; the transaction
+  // has nothing to keep and must not hold the connection open.
+  const refuse = async (status, body) => { await client.query('ROLLBACK'); return res.status(status).json(body) }
   try {
-    const { rows: aff } = await pool.query(
+    await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ')
+
+    const { rows: aff } = await client.query(
       `SELECT diocese_org_id FROM ochr_diocese_affiliations
         WHERE parish_org_id = $1 AND status = 'active'`,
       [req.organizationId]
     )
-    if (!aff.length) return res.status(400).json({ error: 'This parish has no active diocese affiliation' })
+    if (!aff.length) return refuse(400, { error: 'This parish has no active diocese affiliation' })
     const dioceseId = aff[0].diocese_org_id
 
     // A parish's live periods must not overlap (1 Sep). The UNIQUE below
     // only catches the IDENTICAL period; FY + H2 + Q1 of one year all
     // passed it, all got approved, and the assessment summed them — see
     // findOverlappingSubmission for the reproduction. Refused here, with
-    // the other period named, so the parish can ask for the right one to
-    // be returned. Which one that is, is not this route's decision.
-    const overlap = await findOverlappingSubmission(pool, {
+    // the other period named and a remedy that exists for its status —
+    // see overlapRemedy. Which period is the right one is not this
+    // route's decision.
+    const overlap = await findOverlappingSubmission(client, {
       organizationId: req.organizationId, dioceseOrgId: dioceseId, periodStart: start, periodEnd: end,
     })
     if (overlap) {
-      return res.status(409).json({
-        error: overlapMessage(overlap, 'ask the chancery to return that period first.'),
+      return refuse(409, {
+        error: overlapMessage(overlap, overlapRemedy(overlap, 'parish')),
         code: 'period_overlap',
         overlaps: { id: overlap.id, period_start: overlap.period_start, period_end: overlap.period_end, status: overlap.status },
       })
     }
 
-    const totals = await computePeriodTotals(req.organizationId, start, end)
+    const totals = await computePeriodTotals(req.organizationId, start, end, client)
+    // Per-gift assessable facts from THIS snapshot. A later refund
+    // stamps assessable_impact from this map — never from live COA.
+    totals.gift_assessable = await giftAssessableAtFreeze(
+      req.organizationId, start, end, client)
 
     // New period → insert. Returned period → resubmit in place with
     // freshly-computed totals. Submitted/approved period → 409: the
     // frozen report is authoritative until the chancery returns it.
-    const { rows } = await pool.query(
+    const { rows } = await client.query(
       `INSERT INTO ochr_report_submissions
          (organization_id, diocese_org_id, period_start, period_end, totals_json, submitted_by)
        VALUES ($1, $2, $3, $4, $5, $6)
@@ -380,10 +415,29 @@ router.post('/submissions', async (req, res) => {
       [req.organizationId, dioceseId, start, end, JSON.stringify(totals), req.user?.id ?? null]
     )
     if (!rows.length) {
-      return res.status(409).json({ error: 'That period is already submitted or approved. The chancery must return it before you can resubmit.' })
+      return refuse(409, { error: 'That period is already submitted or approved. The chancery must return it before you can resubmit.' })
     }
+
+    // A resubmit replaces the frozen totals with ones computed NOW. The
+    // live ledger (104) keeps the gift and subtracts posted refund facts,
+    // so a refund that was an open adjustment against the RETURNED version
+    // is already in the new net. Keeping the adjustment would count that
+    // refund twice: once in the figures, once as an open item the chancery
+    // is asked to settle. The invariant the refund route keeps (an open
+    // adjustment iff the frozen totals include refunded money) says there is
+    // nothing left to record; the same transaction that writes the new
+    // totals removes it, so no reader sees fresh totals with a stale item.
+    // Resolved ones are history and stay. A brand-new period has none, so
+    // this is a no-op on the INSERT branch.
+    await client.query(
+      `DELETE FROM ochr_period_adjustments
+        WHERE submission_id = $1 AND organization_id = $2 AND resolved_at IS NULL`,
+      [rows[0].id, req.organizationId]
+    )
+    await client.query('COMMIT')
     res.status(201).json({ id: rows[0].id, status: rows[0].status, totals: totals.totals })
   } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
     // 23P01 — the 097 exclusion constraint caught an overlap the
     // check-then-write above raced past. Two concurrent requests both read
     // "no overlap" on separate pooled connections and both wrote; the
@@ -395,8 +449,21 @@ router.post('/submissions', async (req, res) => {
         code: 'period_overlap',
       })
     }
+    // 40001 — REPEATABLE READ refused to update a row (the resubmit's
+    // ON CONFLICT target) that another transaction changed after our
+    // snapshot: the chancery reviewed this period while the parish was
+    // resubmitting it. Nothing was written. Not a fault; a retry sees the
+    // new state and gets the right answer.
+    if (err?.code === '40001') {
+      return res.status(409).json({
+        error: 'This period changed while it was being submitted. Please try again.',
+        code: 'retry',
+      })
+    }
     monitor.error('finance.submissions.create', err, { orgId: req.organizationId })
     res.status(500).json({ error: 'Failed to submit the period' })
+  } finally {
+    client.release()
   }
 })
 

@@ -3,6 +3,27 @@ name: CI
 # Run the real smoke suite against a throwaway Postgres, and prove both
 # clients still build — the check that the code actually works before it
 # can merge. Needs no secrets, so it passes on a fork as-is.
+#
+# BILLED MINUTES. GitHub bills every job rounded UP to a whole minute.
+# Until 2026-10-18 this file ran three parallel test
+# jobs (server ~6.5 min, parish client ~8.3 min, chancery ~0.4 min = 17
+# billed minutes per PR run) whose work is mostly waiting on one process
+# each. They are now ONE job, `gate`, that runs the parish client suite in
+# the background while the server suite runs in the foreground. Every step
+# from the three old jobs is still here, by name, in the same relative
+# order within its old job. Nothing was dropped and no gate was loosened.
+#
+# The order is deliberate, because one job shares one filesystem:
+#   * the root `npm install` (needed only by the Tenant-FK audit) runs
+#     LAST. Node resolves bare imports upward to /node_modules, so a root
+#     install earlier would let the parish client tests, the parish build
+#     or the chancery checks pick up a package their own package.json does
+#     not declare — a gate that passes for the wrong reason.
+#   * the chancery steps run BEFORE the server install, so the source-stub
+#     check sees what it saw in its own job: no server/node_modules.
+#   * the server job's env (DATABASE_URL, JWT_SECRET, CHECKIN_CODE_PEPPER,
+#     NODE_ENV=test) is set on the server steps only, not job-wide. NODE_ENV
+#     in the environment changes what `vite build` produces.
 
 on:
   pull_request:
@@ -14,10 +35,25 @@ on:
 permissions:
   contents: read
 
+# A new push to a PR cancels that PR's run still in progress: its result
+# would be stale on arrival. Pushes to main (and manual runs) get a group of
+# their own run id, so a main run — and the production deploy inside it — is
+# never cancelled or held back by another run. That is exactly the
+# behaviour main had before this block existed.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  server-tests:
-    name: Server smoke tests (real Postgres)
+  gate:
+    name: Gate (server smoke on Postgres + parish client + chancery client)
     runs-on: ubuntu-latest
+    # Measured before consolidation: the slowest old job took ~8.3 min. A
+    # hang is now capped instead of burning GitHub's 6-hour default.
+    timeout-minutes: 30
+
+    outputs:
+      scope: ${{ steps.scope.outputs.scope }}
 
     services:
       postgres:
@@ -35,100 +71,52 @@ jobs:
           --health-timeout 5s
           --health-retries 5
 
-    env:
-      # localhost host → db.js turns SSL off automatically.
-      DATABASE_URL: postgres://postgres:postgres@localhost:5432/openchurch_test
-      # A real secret so the production-fail-closed guard is satisfied and
-      # tokens sign/verify. Not a real deployment secret.
-      JWT_SECRET: ci-test-secret-not-used-in-prod
-      # Pepper for the child pickup-code HMAC — deterministic in CI so the
-      # hash-at-rest assertions are stable. Not a real deployment secret.
-      CHECKIN_CODE_PEPPER: ci-test-pepper-not-used-in-prod
-      NODE_ENV: test
-
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          # The PR merge commit and its first parent (the base tip), so the
+          # scope step can list exactly what this PR changes.
+          fetch-depth: 2
+
+      # DOCS-ONLY SKIP, and why it is narrow. Docs are not inert here:
+      # client tests read docs/*.md and README.md, and the
+      # support route reads docs/SUPPORT-CONTEXT.md. So a PR skips the work
+      # below only when EVERY changed path is docs/** or a top-level *.md AND no changed
+      # file's name appears anywhere in code, tests, scripts or workflows.
+      # Anything else — including any failure to compute the list — runs
+      # everything. Pushes to main and manual runs always run everything.
+      #
+      # The job still runs and reports success when it skips, so a PR is
+      # never left waiting on a check that will not come.
+      - name: Scope (docs-only PRs skip; main always runs full)
+        id: scope
+        shell: bash
+        # The logic lives in scripts/ci-scope.sh so it can be tested under
+        # this exact shell (bash --noprofile --norc -eo pipefail). Its
+        # regressions run first, on the runner's preinstalled Node (~1 s):
+        # if the guard's own tests fail, the job fails rather than trusting
+        # it to choose a scope.
+        run: |
+          node --test scripts/ci-scope.test.mjs
+          bash scripts/ci-scope.sh
 
       - name: Set up Node
+        if: steps.scope.outputs.run == 'true'
         uses: actions/setup-node@v5
         with:
           node-version: '22'
+          # npm's download cache only. Every install below is still a full
+          # `npm install`; nothing is restored into node_modules.
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            server/package-lock.json
+            client/package-lock.json
+            client-diocese/package-lock.json
 
-      - name: Install server dependencies
-        working-directory: server
-        run: npm install --no-audit --no-fund
-
-      - name: Tenancy audit (static)
-        working-directory: server
-        run: node scripts/audit-tenancy.mjs
-
-      - name: Env documented (every process.env read is in .env.example)
-        working-directory: server
-        run: node scripts/env-documented.mjs
-
-      - name: Run smoke tests
-        working-directory: server
-        # runAllMigrations() builds the schema against the fresh service DB
-        # via the new migration ledger; the suite then runs against it.
-        run: npm test
-
-      # Tenant-FK ratchet (F2). Migration 071 closed the last 44 single-column
-      # cross-tenant references, so this now GATES rather than reports: a new
-      # FK that points at an org-scoped parent without carrying
-      # organization_id fails the build on the commit that introduces it.
-      #
-      # Runs AFTER the smoke tests on purpose — they leave the fully migrated
-      # schema behind in the service container, and this reads only
-      # pg_constraint/pg_class, so the rows the suite deleted are irrelevant.
-      # That makes this free: no second database, no second migration run.
-      #
-      # The script lives at the repo ROOT (it is meant to be pointed at any
-      # environment) and imports `pg`. Node resolves a bare specifier from the
-      # IMPORTING FILE's directory upward — so /scripts/*.mjs looks in
-      # /node_modules, never server/node_modules, which is the only install
-      # this job does. Hence a root install.
-      #
-      # `npm install pg --no-save` was the obvious cheaper move and does NOT
-      # work: npm reifies the whole declared tree regardless of the named
-      # package, so it installs all of root package.json anyway. Since root
-      # deliberately mirrors server's runtime deps (the Vercel lambda needs
-      # them there), this is roughly a second copy of the install above —
-      # ~20s, the price of the gate.
-      - name: Install root dependencies (for the audit script)
-        run: npm install --no-audit --no-fund
-
-      - name: Tenant-FK audit (composite cross-tenant FKs)
-        run: node scripts/tenant-fk-audit.mjs
-
-      - name: Money invariants — no donation aggregate counts refunded gifts
-        # A refunded gift is not a gift. This predicate was applied correctly
-        # in nine aggregates and missed in five, and the five included both
-        # documents that leave the building: the donor's year-end tax
-        # statement, and the ledger view that feeds the diocesan assessable
-        # base — so a parish was billed on money it had given back.
-        #
-        # A sweep finds instances; the class survives and reappears. This runs
-        # on every commit so a new aggregate over ochr_donations has to make a
-        # decision about refunds before it can land. Deliberate exceptions go
-        # in the script's EXPECTED list with a written reason.
-        #
-        # NOT working-directory: server — the script walks 'server/src' from
-        # the repository root. It needs no dependencies, so it is free here.
-        run: node scripts/money-invariants.mjs
-
-  client-build:
-    name: Client build
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Set up Node
-        uses: actions/setup-node@v5
-        with:
-          node-version: '22'
+      # ── Dependency-free parish lints (from the old "Client build" job) ──
+      # They need no install and fail in about a second, so they go first.
 
       # Machine enforcement for OPERATOR.md's hard bans. Runs before the
       # build because it needs no dependencies and fails in about a second.
@@ -138,6 +126,7 @@ jobs:
       # gets WORSE. New code is held to the standard from today; the backlog
       # is paid down deliberately and locked in by re-baselining.
       - name: OPERATOR lint (design-system bans)
+        if: steps.scope.outputs.run == 'true'
         run: npm run lint:operator
 
       # A screen may not invent a fact it did not receive.
@@ -156,9 +145,13 @@ jobs:
       #
       # A RATCHET, like the OPERATOR lint above:
       # scripts/honest-failure-baseline.json records the reviewed backlog and
-      # this fails only on a NEW site. Needs no dependencies.
+      # this fails on a NEW site, or on a STALE baseline entry (one that no
+      # longer matches code would let that exact code come back unflagged).
+      # The gate's own regressions run in the same step. Needs no
+      # dependencies.
       - name: Honest failure (no screen invents an answer)
-        run: npm run lint:honest
+        if: steps.scope.outputs.run == 'true'
+        run: npm run lint:honest && node --test scripts/honest-failure.test.mjs
 
       # A database row is not an API response. ochr_donations carries a
       # GENERATED tsvector — the stemmed tokens of donor_name, category and
@@ -171,11 +164,32 @@ jobs:
       # Blocking the build on a 13-site cleanup gets a gate switched off;
       # letting a NEW one appear silently is what created this.
       - name: API shape (no route returns * from a table with internal columns)
+        if: steps.scope.outputs.run == 'true'
         run: npm run lint:api-shape
 
+      # ── Parish client (from the old "Client build" job) ──
+
       - name: Install client dependencies
+        if: steps.scope.outputs.run == 'true'
         working-directory: client
         run: npm install --no-audit --no-fund
+
+      # The client suite is the longest step in the file (~8 min). It needs
+      # nothing but client/node_modules, so it starts here and runs while
+      # the chancery and server steps run. Its output and exit code land in
+      # $RUNNER_TEMP; the "Client tests" step below waits for them, prints
+      # the full log, and fails the job on any non-zero exit. A missing exit
+      # file means the suite never finished, and the job times out red.
+      - name: Client tests (start in background)
+        id: client_tests_bg
+        if: steps.scope.outputs.run == 'true'
+        working-directory: client
+        run: |
+          rm -f "$RUNNER_TEMP/client-tests.exit" "$RUNNER_TEMP/client-tests.exit.tmp"
+          # Single quotes on purpose: the inner shell expands $RUNNER_TEMP and $?.
+          # shellcheck disable=SC2016
+          nohup bash -c 'npm test > "$RUNNER_TEMP/client-tests.log" 2>&1; rc=$?; echo "$rc" > "$RUNNER_TEMP/client-tests.exit.tmp"; mv "$RUNNER_TEMP/client-tests.exit.tmp" "$RUNNER_TEMP/client-tests.exit"' > /dev/null 2>&1 &
+          echo "client tests started (pid $!)"
 
       # Two things `vite build` does not check, and both fail at runtime:
       #   1. a free identifier — Tasks.jsx shipped a green build on
@@ -196,43 +210,178 @@ jobs:
       # gate, because it is also a claim. If the parser is missing this step
       # FAILS rather than skipping.
       - name: Client scope (every identifier resolves, every key in both locales)
+        if: steps.scope.outputs.run == 'true'
         run: npm run lint:client-scope
 
-      # The client suite was added on 2026-08-26 and run by no job until an
-      # audit found it on 2026-08-27. It pins mutate(), which every converted
-      # write on every page now depends on.
-      - name: Client tests
-        working-directory: client
-        run: npm test
+      # I18N-L1-13. client-scope checks static t('key') everywhere. It does
+      # not see hard-coded English, and it does not see t(`nav.${label}`)
+      # or t(`cert.title.${record.type}`). This gate scans the critical
+      # journeys (shell, auth, schedule, intentions, members, certificate,
+      # PWA). New prose fails until it is classified by hand. A missing
+      # en/es key fails outright. Needs @babel/parser from the client
+      # install above. A missing parser fails the step.
+      - name: Critical-surface i18n (hard-coded English + missing EN/ES keys)
+        if: steps.scope.outputs.run == 'true'
+        run: npm run lint:i18n-critical && npm run test:i18n-critical
 
-      - name: Build client
-        working-directory: client
-        run: npm run build
-
-  client-diocese-build:
-    name: Chancery client build (client-diocese)
-    # client-diocese/ (the OpenDiocese chancery app, port 5204) shipped in
-    # DIO.2 with no CI coverage at all — it wasn't referenced in this
-    # workflow, vercel.json, or the root package.json, so a commit that broke
-    # it could merge and "pass". It builds from its own package.json, exactly
-    # like client/, and belongs to its own Vercel project per the blueprint
-    # (diocese.openchurch.app). Deployment is configured outside this repo.
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Set up Node
-        uses: actions/setup-node@v5
-        with:
-          node-version: '22'
+      # ── Chancery client (from the old "Chancery client build" job) ──
+      # client-diocese/ (the OpenDiocese chancery app, port 5204) shipped in
+      # DIO.2 with no CI coverage at all — it wasn't referenced in this
+      # workflow, vercel.json, or the root package.json, so a commit that broke
+      # it could merge and "pass". It builds from its own package.json, exactly
+      # like client/, and belongs to its own Vercel project per the blueprint
+      # (diocese.openchurch.app). Deployment is configured outside this repo.
 
       - name: Install client-diocese dependencies
+        if: steps.scope.outputs.run == 'true'
         working-directory: client-diocese
         run: npm install --no-audit --no-fund
 
+      # Synthetic source-tree check only. It does not read .vercel/output
+      # and a missing server dependency is not an artifact pass. The
+      # produced function is checked after build and materialize, before
+      # upload, in deploy-diocese.
+      - name: Chancery source stub resolves (not the function artifact)
+        if: steps.scope.outputs.run == 'true'
+        run: node scripts/chancery-entry-resolve.mjs
+
+      - name: Chancery artifact containment
+        if: steps.scope.outputs.run == 'true'
+        run: node --test scripts/chancery-artifact-containment.test.mjs
+
+      - name: Client-diocese tests
+        if: steps.scope.outputs.run == 'true'
+        working-directory: client-diocese
+        run: npm test
+
       - name: Build client-diocese
+        if: steps.scope.outputs.run == 'true'
         working-directory: client-diocese
         run: npm run build
+
+      # ── Server (from the old "Server smoke tests (real Postgres)" job) ──
+      # Each server step carries that job's env. localhost host → db.js turns
+      # SSL off automatically. JWT_SECRET is a real secret so the
+      # production-fail-closed guard is satisfied and tokens sign/verify;
+      # CHECKIN_CODE_PEPPER keeps the pickup-code HMAC deterministic so the
+      # hash-at-rest assertions are stable. Neither is a deployment secret.
+
+      - name: Install server dependencies
+        if: steps.scope.outputs.run == 'true'
+        working-directory: server
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/openchurch_test
+          JWT_SECRET: ci-test-secret-not-used-in-prod
+          CHECKIN_CODE_PEPPER: ci-test-pepper-not-used-in-prod
+          NODE_ENV: test
+        run: npm install --no-audit --no-fund
+
+      - name: Tenancy audit (static)
+        if: steps.scope.outputs.run == 'true'
+        working-directory: server
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/openchurch_test
+          JWT_SECRET: ci-test-secret-not-used-in-prod
+          CHECKIN_CODE_PEPPER: ci-test-pepper-not-used-in-prod
+          NODE_ENV: test
+        run: node scripts/audit-tenancy.mjs
+
+      - name: Env documented (every process.env read is in .env.example)
+        if: steps.scope.outputs.run == 'true'
+        working-directory: server
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/openchurch_test
+          JWT_SECRET: ci-test-secret-not-used-in-prod
+          CHECKIN_CODE_PEPPER: ci-test-pepper-not-used-in-prod
+          NODE_ENV: test
+        run: node scripts/env-documented.mjs
+
+      - name: Run smoke tests
+        if: steps.scope.outputs.run == 'true'
+        working-directory: server
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/openchurch_test
+          JWT_SECRET: ci-test-secret-not-used-in-prod
+          CHECKIN_CODE_PEPPER: ci-test-pepper-not-used-in-prod
+          NODE_ENV: test
+        # runAllMigrations() builds the schema against the fresh service DB
+        # via the new migration ledger; the suite then runs against it.
+        run: npm test
+
+      # ── Parish client, finished ──
+
+      # Collects the background suite started above. Runs even if a server
+      # or chancery step failed, so a client failure is never hidden behind
+      # one; it only skips if the suite was never started.
+      - name: Client tests
+        if: ${{ !cancelled() && steps.client_tests_bg.outcome == 'success' }}
+        timeout-minutes: 25
+        run: |
+          while [ ! -f "$RUNNER_TEMP/client-tests.exit" ]; do sleep 5; done
+          cat "$RUNNER_TEMP/client-tests.log"
+          rc=$(cat "$RUNNER_TEMP/client-tests.exit")
+          echo "client tests exit code: $rc"
+          test "$rc" = "0"
+
+      - name: Build client
+        if: steps.scope.outputs.run == 'true'
+        working-directory: client
+        run: npm run build
+
+      # ── Server, finished (root install is LAST on purpose; see header) ──
+
+      # Tenant-FK ratchet (F2). Migration 071 closed the last 44 single-column
+      # cross-tenant references, so this now GATES rather than reports: a new
+      # FK that points at an org-scoped parent without carrying
+      # organization_id fails the build on the commit that introduces it.
+      #
+      # Runs AFTER the smoke tests on purpose — they leave the fully migrated
+      # schema behind in the service container, and this reads only
+      # pg_constraint/pg_class, so the rows the suite deleted are irrelevant.
+      # That makes this free: no second database, no second migration run.
+      #
+      # The script lives at the repo ROOT (it is meant to be pointed at any
+      # environment) and imports `pg`. Node resolves a bare specifier from the
+      # IMPORTING FILE's directory upward — so /scripts/*.mjs looks in
+      # /node_modules, never server/node_modules. Hence a root install.
+      #
+      # `npm install pg --no-save` was the obvious cheaper move and does NOT
+      # work: npm reifies the whole declared tree regardless of the named
+      # package, so it installs all of root package.json anyway. Since root
+      # deliberately mirrors server's runtime deps (the Vercel lambda needs
+      # them there), this is roughly a second copy of the server install —
+      # ~5s, the price of the gate.
+      - name: Install root dependencies (for the audit script)
+        if: steps.scope.outputs.run == 'true'
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/openchurch_test
+          JWT_SECRET: ci-test-secret-not-used-in-prod
+          CHECKIN_CODE_PEPPER: ci-test-pepper-not-used-in-prod
+          NODE_ENV: test
+        run: npm install --no-audit --no-fund
+
+      - name: Tenant-FK audit (composite cross-tenant FKs)
+        if: steps.scope.outputs.run == 'true'
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/openchurch_test
+          JWT_SECRET: ci-test-secret-not-used-in-prod
+          CHECKIN_CODE_PEPPER: ci-test-pepper-not-used-in-prod
+          NODE_ENV: test
+        run: node scripts/tenant-fk-audit.mjs
+
+      - name: Money invariants — live giving is gift minus posted refunds
+        if: steps.scope.outputs.run == 'true'
+        # GIV-06 Option A. A refund is a linked financial fact, not an omit
+        # predicate. Live contribution is gift.amount − Σ(posted refunds);
+        # the gift stays in the books, including when that net is 0.
+        # Period adjustments stay out of live net (freeze sidecar only).
+        #
+        # NOT working-directory: server — the script walks 'server/src' from
+        # the repository root. It needs no dependencies, so it is free here.
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/openchurch_test
+          JWT_SECRET: ci-test-secret-not-used-in-prod
+          CHECKIN_CODE_PEPPER: ci-test-pepper-not-used-in-prod
+          NODE_ENV: test
+        run: node scripts/money-invariants.mjs
 

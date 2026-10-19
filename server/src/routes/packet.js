@@ -81,11 +81,16 @@ router.get('/', async (req, res) => {
         [orgId, date]
       ),
 
-      // Serving schedule: that day's calendar events with assignee names
-      // resolved from the assigned_to jsonb id array.
+      // Serving schedule: that day's calendar events with assignees
+      // resolved from the assigned_to jsonb id array. A name is only
+      // returned when the join produced a live ochr_clients row — id
+      // rides with it so the packet can open that person. A stale or
+      // garbled id does not invent a name, and a name never invents an id.
       pool.query(
         `SELECT ce.title, ce.start_time, ce.end_time, ce.type,
-                COALESCE(json_agg(cl.name ORDER BY cl.name)
+                COALESCE(json_agg(json_build_object(
+                  'id', cl.id, 'name', cl.name
+                ) ORDER BY cl.name)
                          FILTER (WHERE cl.id IS NOT NULL), '[]') AS assigned
            FROM ochr_calendar_events ce
            LEFT JOIN LATERAL jsonb_array_elements_text(
@@ -101,13 +106,16 @@ router.get('/', async (req, res) => {
       ),
 
       // The sacristy-manifest week beginning on the packet date.
+      // Filter on week_date so fulfilled-with-NULL-stamps still list.
       pool.query(
-        `SELECT to_char(mass_date, 'YYYY-MM-DD') AS mass_date, mass_title, mass_time,
-                formatted_intention, requested_by, requester_name, stipend, status, note
+        `SELECT to_char(mass_date, 'YYYY-MM-DD') AS mass_date, mass_title,
+                to_char(mass_time, 'HH24:MI') AS mass_time,
+                formatted_intention, requested_by, requester_name, stipend, status, note,
+                fulfilment_label
            FROM ochr_sacristy_weekly_manifest
           WHERE organization_id = $1
-            AND mass_date BETWEEN $2::date AND $2::date + 6
-          ORDER BY mass_date, mass_time NULLS LAST`,
+            AND week_date BETWEEN $2::date AND $2::date + 6
+          ORDER BY week_date, mass_date NULLS LAST, mass_time NULLS LAST`,
         [orgId, date]
       ),
 

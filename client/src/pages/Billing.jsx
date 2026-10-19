@@ -4,6 +4,7 @@ import { motion } from 'framer-motion'
 import { CreditCard, Check, Loader2, AlertTriangle, ExternalLink, Feather } from 'lucide-react'
 import PageWrapper from '../components/PageWrapper'
 import EmptyState from '../components/EmptyState'
+import { useLocale } from '../i18n'
 import { apiUrl } from '../api'
 
 // Billing & subscription page. Admin-only via the sidebar filter +
@@ -31,6 +32,7 @@ function fmtDate(d) {
 }
 
 export default function Billing() {
+  const { t }       = useLocale()
   const [params]    = useSearchParams()
   const navigate    = useNavigate()
   const [data,    setData]    = useState(null)
@@ -57,7 +59,7 @@ export default function Billing() {
       if (!res.ok) throw new Error(`Failed to load billing (${res.status})`)
       setData(await res.json())
     } catch (e) {
-      setErr("Couldn't load billing. Nothing was lost — please retry.")
+      setErr(t('load.failedBody'))
     } finally {
       setLoading(false)
     }
@@ -111,7 +113,7 @@ export default function Billing() {
         <div className="max-w-xl mx-auto py-12">
           <EmptyState
             icon={AlertTriangle}
-            title="Couldn't load billing"
+            title={t('load.failedTitle')}
             body={err}
             action={{ label: 'Try again', onClick: fetchStatus }}
           />

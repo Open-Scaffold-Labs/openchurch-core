@@ -19,6 +19,16 @@ const router = Router()
 
 const KINDS = new Set(['member', 'guest', 'child'])
 
+// CHK-04. Written only at INSERT from the org-scoped Mass. Read paths
+// project these — never COALESCE them to the live calendar row.
+const ATTENDED_COLS = `to_char(attended_date, 'YYYY-MM-DD') AS attended_date,
+              attended_title,
+              to_char(attended_time, 'HH24:MI') AS attended_time`
+
+function eventGoneHonesty(err) {
+  return err?.code === '23503' && /calendar_event/i.test(String(err.constraint || ''))
+}
+
 // Cap pickup-code guessing on checkout. The keyspace is small (~810k), so
 // even behind staff auth an insider shouldn't be able to brute a target
 // child's code — the limiter bounds attempts per device. Threshold is well
@@ -31,22 +41,31 @@ const checkoutLimiter = rateLimit({
   message: { error: 'Too many checkout attempts. Please wait a moment.' },
 })
 
-// GET /api/checkins/recent?days=N (CHK.4)
+// GET /api/checkins/recent?days=N (CHK.4 / CHK-04)
 // Recent services with their attendance count — the org-level
 // attendance report. Default 30 days, newest first. "Attendance" is people,
 // not rows: see DISTINCT_PEOPLE for why a checkout-and-return is one person.
+// Labels and the window are the stamps written at check-in. A NULL stamp
+// is unknown — this query does not join the live calendar for title/date.
 router.get('/recent', async (req, res) => {
   const days = parseDays(req.query.days, 30)
   try {
     const { rows } = await pool.query(
-      `SELECT e.id AS event_id, e.title, e.date,
+      `SELECT ck.calendar_event_id AS event_id,
+              ck.attended_title AS title,
+              to_char(ck.attended_date, 'YYYY-MM-DD') AS date,
+              to_char(ck.attended_time, 'HH24:MI') AS time,
               ${DISTINCT_PEOPLE}::int AS attendance
-         FROM ochr_calendar_events e
-         JOIN ochr_checkins ck ON ck.calendar_event_id = e.id AND ck.organization_id = $1
-        WHERE e.organization_id = $1
-          AND e.date >= CURRENT_DATE - ($2 || ' days')::interval
-        GROUP BY e.id, e.title, e.date
-        ORDER BY e.date DESC
+         FROM ochr_checkins ck
+        WHERE ck.organization_id = $1
+          AND (
+                (ck.attended_date IS NOT NULL
+                 AND ck.attended_date >= CURRENT_DATE - ($2 || ' days')::interval)
+             OR (ck.attended_date IS NULL
+                 AND ck.checked_in_at >= CURRENT_DATE - ($2 || ' days')::interval)
+              )
+        GROUP BY ck.calendar_event_id, ck.attended_title, ck.attended_date, ck.attended_time
+        ORDER BY ck.attended_date DESC NULLS LAST, ck.calendar_event_id DESC
         LIMIT 50`,
       [req.organizationId, days]
     )
@@ -67,7 +86,8 @@ router.get('/', async (req, res) => {
     const { rows } = await pool.query(
       `SELECT ci.id, ci.calendar_event_id, ci.client_id, ci.person_name, ci.kind,
               ci.guardian_name, ci.checked_in_at, ci.checked_out_at,
-              ci.room_id, r.name AS room_name
+              ci.room_id, r.name AS room_name,
+              ${ATTENDED_COLS}
          FROM ochr_checkins ci
          LEFT JOIN ochr_rooms r ON r.id = ci.room_id
         WHERE ci.organization_id = $1 AND ci.calendar_event_id = $2
@@ -99,12 +119,18 @@ router.post('/', async (req, res) => {
   }
 
   try {
-    // Event must belong to the org.
+    // Event must belong to the org. Title/date/time come from this row —
+    // never from the request body (client labels are not canonical).
     const ev = await pool.query(
-      'SELECT 1 FROM ochr_calendar_events WHERE id = $1 AND organization_id = $2',
+      `SELECT title, date, start_time
+         FROM ochr_calendar_events
+        WHERE id = $1 AND organization_id = $2`,
       [eventId, req.organizationId]
     )
     if (!ev.rows.length) return res.status(400).json({ error: 'Unknown event' })
+    const attendedTitle = ev.rows[0].title
+    const attendedDate = ev.rows[0].date
+    const attendedTime = ev.rows[0].start_time
 
     // Room (optional) must belong to the org; a stale/foreign id drops
     // to null rather than failing the check-in.
@@ -142,19 +168,23 @@ router.post('/', async (req, res) => {
     // are outside the guard and insert normally.
     const { rows, rowCount } = await pool.query(
       `INSERT INTO ochr_checkins
-         (organization_id, calendar_event_id, client_id, person_name, kind, guardian_name, security_code_hash, room_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         (organization_id, calendar_event_id, client_id, person_name, kind, guardian_name, security_code_hash, room_id,
+          attended_date, attended_title, attended_time)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        ON CONFLICT (calendar_event_id, client_id)
        WHERE client_id IS NOT NULL AND checked_out_at IS NULL
        DO NOTHING
        RETURNING id, calendar_event_id, client_id, person_name, kind, guardian_name,
-                 room_id, checked_in_at, checked_out_at`,
-      [req.organizationId, eventId, resolvedClientId, name, kind, guardian, securityHash, roomId]
+                 room_id, checked_in_at, checked_out_at,
+                 ${ATTENDED_COLS}`,
+      [req.organizationId, eventId, resolvedClientId, name, kind, guardian, securityHash, roomId,
+       attendedDate, attendedTitle, attendedTime]
     )
     if (rowCount === 0) {
       const { rows: existing } = await pool.query(
         `SELECT id, calendar_event_id, client_id, person_name, kind, guardian_name,
-                room_id, checked_in_at, checked_out_at
+                room_id, checked_in_at, checked_out_at,
+                ${ATTENDED_COLS}
            FROM ochr_checkins
           WHERE organization_id = $1 AND calendar_event_id = $2 AND client_id = $3
             AND checked_out_at IS NULL`,
@@ -165,6 +195,11 @@ router.post('/', async (req, res) => {
     // Surface the plaintext code once in the response (never from the DB).
     res.status(201).json({ ...rows[0], security_code: securityCode })
   } catch (err) {
+    if (eventGoneHonesty(err)) {
+      return res.status(409).json({
+        error: 'That service is no longer on the schedule. Nobody was checked in.',
+      })
+    }
     monitor.error('checkins.create', err, { orgId: req.organizationId })
     res.status(500).json({ error: 'Failed to check in' })
   }

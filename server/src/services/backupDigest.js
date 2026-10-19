@@ -1,7 +1,7 @@
-// Weekly off-site backup digest — the founder's copy of every parish's
-// canonical data, delivered by email every Saturday. Sacramental records
-// are permanent and canonically unfixable if lost; everything in this
-// file exists because of that sentence.
+// Weekly off-site backup — each parish's canonical data written to backup
+// storage every Saturday; the email is a zero-PII heartbeat. Sacramental
+// records are permanent and canonically unfixable if lost; everything in
+// this file exists because of that sentence.
 //
 // This is the LOGICAL layer of a two-layer backup story:
 //   Layer 1 (infra): Supabase PITR / daily snapshots — dashboard config,
@@ -18,14 +18,24 @@
 // stub, and discarded, weekly, while the run reported success.
 //
 // So the copy goes to storage, which is the thing that has to survive,
-// and the email becomes the notification that it happened. Either can be
-// configured without the other; the run refuses only when there is
-// genuinely nowhere for the artifact to go.
+// and the email becomes the notification that it happened.
 //
-// Explicitly configured or explicitly skipped: with nowhere to put the
-// artifact and no way to say so, the run reports itself skipped rather
-// than silently "succeeding". That guard is the whole reason this file
-// was rewritten — it used to return its success shape regardless.
+// STORAGE-FIRST, ZERO-PII NOTIFICATION (#214). The email used to attach
+// every parish's full export and send it through the email provider to
+// one inbox whenever RESEND_API_KEY and SUPER_ADMIN_EMAIL were both set,
+// with or without storage. Production has SUPER_ADMIN_EMAIL set, so one
+// env var (the same key password-reset mail needs) would have started
+// mailing every tenant's data weekly. Now:
+//   - no export is ever attached to, or quoted in, an email;
+//   - with no storage the run builds NO export at all: it is skipped, and
+//     the heartbeat (if mail is live) says the backup is NOT running;
+//   - the heartbeat carries counts, the date and numeric org ids for
+//     problems only: no parish names, slugs, rows or export content;
+//   - objects are tenant-separated: orgs/<orgId>/<date>.json.gz.
+//
+// Explicitly configured or explicitly skipped: with nowhere durable to put
+// the artifact the run reports itself skipped rather than silently
+// "succeeding".
 
 import { gzipSync } from 'node:zlib'
 import pool from '../db.js'
@@ -34,121 +44,150 @@ import { sendEmail, emailTransportIsLive } from '../email/send.js'
 import { putObject, verifyObject, describeStorage } from '../storage/index.js'
 import { monitor } from '../monitoring/index.js'
 
-// Resend caps total message size (~40MB); stay far under it per file.
-const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024
+// One prefix per tenant, keyed by the immutable org id — never the slug or
+// name, which are parish-chosen and would put a tenant's identity into
+// every listing. Restore finds a parish's copies with listObjects(orgPrefix).
+export function backupOrgPrefix(orgId) {
+  return `orgs/${Number(orgId)}/`
+}
+export function backupKeyFor(orgId, stamp) {
+  return `${backupOrgPrefix(orgId)}${stamp}.json.gz`
+}
+
+// The ONLY text a backup email may carry. Counts, the date, the storage
+// driver kind, and numeric org ids for problems. Built from numbers so a
+// parish name cannot reach it by accident.
+export function composeBackupHeartbeat({ stamp, orgs, stored, failedIds, storeFailedIds, storageLive, storageKind }) {
+  const n = x => Number(x) || 0
+  if (!storageLive) {
+    return {
+      subject: `⚠ OpenChurch weekly backup NOT RUNNING (${stamp})`,
+      text:
+`Weekly parish backup, ${stamp}: NOT RUN.
+
+No backup storage is configured, so no export was built and nothing was
+backed up. Backups are never sent by email.
+
+Configure BACKUP_STORAGE (see server/src/storage/index.js) to resume.
+`,
+    }
+  }
+  const problems = [...failedIds, ...storeFailedIds].map(n)
+  const subject = problems.length
+    ? `⚠ OpenChurch weekly backup — ${problems.length} problem(s), ${n(stored)}/${n(orgs)} stored (${stamp})`
+    : `OpenChurch weekly backup — ${n(stored)}/${n(orgs)} stored (${stamp})`
+  return {
+    subject,
+    text:
+`Weekly parish backup, ${stamp}.
+
+Stored: ${n(stored)} of ${n(orgs)} organizations (${storageKind} storage).
+${problems.length ? `Problems (organization ids): ${problems.join(', ')}\nDetails are in the monitor log.\n` : 'No problems.\n'}
+This message contains no parish data. Backups are never attached to email;
+they are in storage.
+`,
+  }
+}
+
+// A failed send is a failed notification. It is never recorded as sent.
+// When storage already succeeded, the caller still receives those counts.
+async function deliverHeartbeat(recipient, hb) {
+  try {
+    await sendEmail({ to: recipient, subject: hb.subject, text: hb.text })
+    return { notified: true, email: 'heartbeat sent' }
+  } catch (err) {
+    monitor.error('backup.digest.notify', err)
+    return {
+      notified: false,
+      email: 'heartbeat send failed',
+      notify_error: String(err?.message ?? err).slice(0, 200),
+    }
+  }
+}
 
 export async function runWeeklyBackupDigest({ now = new Date() } = {}) {
   const store = describeStorage()
   const recipient = process.env.SUPER_ADMIN_EMAIL
   const canMail = Boolean(recipient) && emailTransportIsLive()
+  const stamp = now.toISOString().slice(0, 10)
 
-  // Refuse only when there is nowhere for the artifact to go AND no way
-  // to say so. Storage alone is a working backup with no notification;
-  // email alone is the old behaviour, still useful for a small parish.
-  // Neither is the case this exists to catch: building an export of every
-  // parish and discarding it while returning success.
-  if (!store.live && !canMail) {
+  // Storage is the only destination for parish data. Without it, build
+  // nothing: an export that exists only in memory (or, before #214, in an
+  // email attachment) is not a backup.
+  if (!store.live) {
+    const mail = canMail
+      ? await deliverHeartbeat(recipient, composeBackupHeartbeat({
+          stamp, storageLive: false, orgs: 0, stored: 0, failedIds: [], storeFailedIds: [],
+        }))
+      : { notified: false, email: recipient ? 'transport not live' : 'SUPER_ADMIN_EMAIL not configured' }
     return {
-      skipped: 'nowhere to deliver — no backup storage and no live email transport',
+      skipped: 'no backup storage configured — no export built (backups are never emailed)',
       storage: store.detail,
-      email: recipient ? 'transport not live' : 'SUPER_ADMIN_EMAIL not configured',
+      email: mail.email,
+      notified: mail.notified,
+      ...(mail.notify_error ? { notify_error: mail.notify_error } : {}),
     }
   }
 
-
-  const stamp = now.toISOString().slice(0, 10)
   const { rows: orgs } = await pool.query(
-    'SELECT id, name, slug FROM ochr_organizations ORDER BY id'
+    'SELECT id FROM ochr_organizations WHERE held_at IS NULL ORDER BY id'
   )
 
-  const attachments = []
-  const lines = []
-  let attached = 0
-  let oversized = 0
-  let failed = 0
   let stored = 0
+  let failed = 0
+  const failedIds = []
   const storeFailures = []
+  const storeFailedIds = []
 
   for (const org of orgs) {
     try {
       const dump = await buildOrgExport(org.id)
       const gz = gzipSync(Buffer.from(JSON.stringify(dump), 'utf8'))
-      const totalRows = Object.values(dump.counts).reduce((a, b) => a + b, 0)
-
-      const name = `${org.slug || org.id}-${stamp}.json.gz`
-      const size = `${(gz.length / 1024).toFixed(0)} KB`
-      let note = ''
-
-      // The copy that matters. Written first, and VERIFIED — a PUT that
-      // returns 200 and leaves nothing behind is the exact failure this
-      // whole change exists to stop, so the digest reads the object back
-      // rather than trusting the write.
-      if (store.live) {
-        const key = `${stamp}/${name}`
-        try {
-          await putObject({ key, body: gz, contentType: 'application/gzip' })
-          const check = await verifyObject(key, gz.length)
-          if (check.ok) { stored++; note = ` — stored as ${key}` }
-          else { storeFailures.push(`${org.name}: ${check.why}`); note = ` — STORE UNVERIFIED (${check.why})` }
-        } catch (err) {
-          storeFailures.push(`${org.name}: ${String(err?.message ?? err).slice(0, 120)}`)
-          note = ` — STORE FAILED`
-          monitor.error('backup.digest.store', err, { orgId: org.id, key })
+      // The copy that matters. Written, then VERIFIED — a PUT that returns
+      // 200 and leaves nothing behind is exactly what this must catch.
+      const key = backupKeyFor(org.id, stamp)
+      try {
+        const { rows: activeOrg } = await pool.query(
+          'SELECT id FROM ochr_organizations WHERE id = $1 AND held_at IS NULL', [org.id],
+        )
+        if (!activeOrg.length) continue
+        await putObject({ key, body: gz, contentType: 'application/gzip' })
+        const check = await verifyObject(key, gz.length)
+        if (check.ok) stored++
+        else {
+          storeFailures.push(`org ${org.id}: ${check.why}`)
+          storeFailedIds.push(org.id)
+          // The heartbeat says problem details are in the monitor log.
+          // That sentence is true only if this branch writes one.
+          monitor.error('backup.digest.verify', new Error(check.why), { orgId: org.id, key })
         }
+      } catch (err) {
+        storeFailures.push(`org ${org.id}: ${String(err?.message ?? err).slice(0, 120)}`)
+        storeFailedIds.push(org.id)
+        monitor.error('backup.digest.store', err, { orgId: org.id, key })
       }
-
-      // The attachment is now a convenience, not the backup. Skipping an
-      // oversized one is no longer a downgrade when storage holds it.
-      if (canMail && gz.length <= MAX_ATTACHMENT_BYTES) {
-        attachments.push({ filename: name, content: gz.toString('base64') })
-        attached++
-        note += ' — attached'
-      } else if (canMail) {
-        oversized++
-        note += ` — too large to attach (${(gz.length / 1048576).toFixed(1)} MB)`
-      }
-
-      lines.push(`• ${org.name}: ${totalRows} rows, ${size}${note}`)
     } catch (err) {
       failed++
-      lines.push(`• ${org.name}: EXPORT FAILED — ${String(err?.message ?? err).slice(0, 120)}`)
+      failedIds.push(org.id)
       monitor.error('backup.digest.org', err, { orgId: org.id })
     }
   }
 
-  const trouble = failed + storeFailures.length
-  const subject = trouble
-    ? `⚠ OpenChurch weekly backup — ${trouble} problem(s), ${stored}/${orgs.length} stored`
-    : `OpenChurch weekly backup — ${stored}/${orgs.length} parishes stored (${stamp})`
-
-  if (canMail) {
-    await sendEmail({
-      to: recipient,
-      subject,
-      text:
-`Weekly parish data backup, ${stamp}.
-
-Storage: ${store.live ? store.detail : 'NOT CONFIGURED — the attachments below are the only copy'}
-
-${lines.join('\n')}
-${storeFailures.length ? `\nSTORE PROBLEMS:\n${storeFailures.map(f => `• ${f}`).join('\n')}\n` : ''}
-${store.live
-  ? `The durable copy is in storage; the attachments are a convenience. If
-this email stops arriving on Saturdays the cron is broken — but check
-storage before assuming the backup is gone.`
-  : `There is no backup storage configured, so these attachments are the
-only copy. Store them somewhere durable, and configure BACKUP_S3_* so
-this stops depending on a mailbox.`}
-`,
-      attachments,
-    })
-  }
+  // After every object is written and verified. No `attachments`, ever.
+  const mail = canMail
+    ? await deliverHeartbeat(recipient, composeBackupHeartbeat({
+        stamp, orgs: orgs.length, stored, failedIds, storeFailedIds,
+        storageLive: true, storageKind: store.driver,
+      }))
+    : { notified: false }
 
   return {
     orgs: orgs.length,
-    stored, attached, oversized, failed,
-    storage: store.live ? store.detail : null,
-    notified: canMail,
+    stored, failed,
+    attached: 0,
+    storage: store.detail,
+    notified: mail.notified,
     store_failures: storeFailures,
+    ...(mail.notify_error ? { notify_error: mail.notify_error } : {}),
   }
 }

@@ -51,9 +51,10 @@ function Pill({ active, onClick, icon: Icon, children }) {
 }
 
 function YesNo({ yes }) {
+  const { t } = useLocale()
   return yes
-    ? <Check size={15} className="text-brass-700 dark:text-brass-300 mx-auto" aria-label="Yes" />
-    : <Minus size={15} className="text-ink-300 dark:text-parchment-300/40 mx-auto" aria-label="No" />
+    ? <Check size={15} className="text-brass-700 dark:text-brass-300 mx-auto" aria-label={t('help.yes')} />
+    : <Minus size={15} className="text-ink-300 dark:text-parchment-300/40 mx-auto" aria-label={t('help.no')} />
 }
 
 function SectionBlock({ section }) {
@@ -81,6 +82,7 @@ function SectionBlock({ section }) {
 }
 
 function ModuleCard({ id, mod, openId, setOpenId }) {
+  const { t } = useLocale()
   const open = openId === id
   return (
     <div className="rounded-xl border border-parchment-300/70 dark:border-brass-900/30 bg-white/60 dark:bg-ink-800/60">
@@ -100,6 +102,15 @@ function ModuleCard({ id, mod, openId, setOpenId }) {
             </ul>
           )}
           {(mod.sections || []).map((s, i) => <SectionBlock key={i} section={s} />)}
+          {id === 'intentions' && (
+            <div data-testid="help-fulfill-howto">
+              <SectionBlock section={{
+                type: 'text',
+                title: t('help.miFulfillHowTitle'),
+                content: t('help.miFulfillHowBody'),
+              }} />
+            </div>
+          )}
           {mod.tips?.length > 0 && (
             <div className="mt-3 rounded-lg bg-parchment-100 dark:bg-ink-900/60 px-3 py-2">
               {mod.tips.map((tip, i) => (
@@ -133,13 +144,22 @@ function ReportTab() {
   const [done, setDone] = useState(null)
   const [error, setError] = useState('')
   const [mine, setMine] = useState(null)
+  const [mineFailed, setMineFailed] = useState(false)
 
   useEffect(() => {
     let cancelled = false
+    setMineFailed(false)
     fetch(apiUrl('/api/support-tickets/mine?limit=10'))
-      .then(r => r.ok ? r.json() : { tickets: [] })
-      .then(d => { if (!cancelled) setMine(d.tickets ?? []) })
-      .catch(() => { if (!cancelled) setMine([]) })
+      .then(r => {
+        if (!r.ok) throw new Error('unread')
+        return r.json()
+      })
+      .then(d => {
+        if (cancelled) return
+        if (!d || !Array.isArray(d.tickets)) throw new Error('shape')
+        setMine(d.tickets)
+      })
+      .catch(() => { if (!cancelled) { setMineFailed(true); setMine(null) } })
     return () => { cancelled = true }
   }, [done])
 
@@ -201,6 +221,12 @@ function ReportTab() {
         </>
       )}
 
+      {mineFailed && (
+        <p role="status" className="mt-6 text-sm text-amber-800 dark:text-amber-300">
+          {t('sup.reportsUnread')}
+        </p>
+      )}
+
       {/* The reporter's own reports — closes the "what happened to it?" loop. */}
       {mine?.length > 0 && (
         <div className="mt-6">
@@ -236,7 +262,16 @@ export default function HelpPanel({ open, onClose }) {
   const [tab, setTab] = useState('guide')
   const [query, setQuery] = useState('')
   const [openId, setOpenId] = useState(null)
-  const index = useMemo(buildSearchIndex, [])
+  const index = useMemo(() => {
+    const rows = buildSearchIndex()
+    rows.push({
+      kind: 'section',
+      id: 'intentions',
+      title: t('help.miFulfillHowTitle'),
+      text: t('help.miFulfillHowBody'),
+    })
+    return rows
+  }, [t])
 
   // Portaled to <body> (the FeedbackModal pattern), with the app shell
   // made inert while open: the page behind the scrim is genuinely
@@ -352,6 +387,7 @@ export default function HelpPanel({ open, onClose }) {
 
           {!results && tab === 'faq' && (
             <div className="space-y-2">
+              <FaqItem q={t('help.miFulfillHowTitle')} a={t('help.miFulfillHowBody')} />
               {FAQ.map((f, i) => <FaqItem key={i} q={f.q} a={f.a} />)}
             </div>
           )}

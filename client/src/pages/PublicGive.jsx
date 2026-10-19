@@ -5,10 +5,11 @@ import { Heart, Loader2, AlertTriangle, Check, ArrowLeft, RefreshCw } from 'luci
 import { apiUrl } from '../api'
 import { useLocale } from '../i18n'
 
-// Public give page (Online giving / GIV.2). Unauthenticated — a
-// parishioner gives to one of the church's funds. The charge runs
-// through the vendor-neutral payments stub server-side (GIV.1), so this
-// is a real end-to-end flow today; only the processor swaps in later.
+// Public give page (Online giving / GIV.2). Unauthenticated —
+// a parishioner gives to one of the church's funds. The charge
+// runs through the vendor-neutral payments stub server-side
+// (GIV.1), so this is a real end-to-end flow today; only the
+// processor swaps in later.
 //
 // URL: /p/:slug/give
 // Data:
@@ -16,18 +17,26 @@ import { useLocale } from '../i18n'
 //   POST /api/public/:slug/give   → charge (stub) + record donation
 //
 // Renders outside the app shell like the other /p/:slug surfaces.
+// User-visible chrome goes through t() (OC-READY-01-034). Frequency
+// *values*, POST body, checkout redirect, and stub honesty stay
+// the giving contract.
 
 const QUICK_AMOUNTS = [25, 50, 100, 250]
+const FREQUENCIES = ['once', 'monthly', 'weekly']
 
 function fmtMoney(n) {
   return n.toLocaleString(undefined, { style: 'currency', currency: 'USD' })
 }
 
+function frequencyLabel(frequency, t) {
+  if (frequency === 'monthly') return t('give.freqMonthly')
+  if (frequency === 'weekly') return t('give.freqWeekly')
+  if (frequency === 'once') return t('give.freqOnce')
+  return frequency
+}
+
 export default function PublicGive() {
-  // Not for t() — these pages are still English (the string pass is
-  // separate work). This is the switch that lets the parish's language
-  // reach a page nobody signs in to.
-  const { setPublicLocale } = useLocale()
+  const { t, setPublicLocale } = useLocale()
   const { slug } = useParams()
   const [church, setChurch] = useState(null)
   const [funds, setFunds]   = useState([])
@@ -106,7 +115,7 @@ export default function PublicGive() {
         }),
       })
       const d = await res.json().catch(() => ({}))
-      if (!res.ok) throw new Error(d.error || `Something went wrong (${res.status})`)
+      if (!res.ok) throw new Error(d.error || t('give.submitFail', { status: res.status }))
       // Live payments: the server hands back a hosted-checkout URL and
       // the browser finishes the gift on the processor's page.
       if (d.checkout_url) { window.location.assign(d.checkout_url); return }
@@ -148,11 +157,10 @@ export default function PublicGive() {
         <div className="text-center max-w-md">
           <AlertTriangle size={28} className="mx-auto text-amber-600 dark:text-amber-300 mb-3" aria-hidden="true" />
           <h1 className="font-display text-2xl font-semibold text-ink-900 dark:text-parchment-50">
-            We couldn&apos;t check this church&apos;s giving just now
+            {t('give.loadFailTitle')}
           </h1>
           <p role="status" className="mt-2 text-sm text-ink-600 dark:text-parchment-300/80 leading-relaxed">
-            That&apos;s a problem on our side, not a parish that can&apos;t receive your gift.
-            Please try again in a moment.
+            {t('give.loadFailBody')}
           </p>
           <button
             type="button"
@@ -163,10 +171,10 @@ export default function PublicGive() {
             {loading
               ? <Loader2 size={15} className="animate-spin" aria-hidden="true" />
               : <RefreshCw size={15} aria-hidden="true" />}
-            Try again
+            {t('give.tryAgain')}
           </button>
           <p className="mt-4 text-[11px] text-ink-500 dark:text-parchment-300/60">
-            If it keeps happening, the parish office can still take your gift directly.
+            {t('give.loadFailOffice')}
           </p>
         </div>
       </div>
@@ -178,9 +186,9 @@ export default function PublicGive() {
       <div className="min-h-screen flex items-center justify-center px-4 py-12 bg-parchment-50 dark:bg-ink-950">
         <div className="text-center max-w-md">
           <AlertTriangle size={28} className="mx-auto text-amber-600 dark:text-amber-300 mb-3" />
-          <h1 className="font-display text-2xl font-semibold text-ink-900 dark:text-parchment-50">Church not found</h1>
+          <h1 className="font-display text-2xl font-semibold text-ink-900 dark:text-parchment-50">{t('give.notFound')}</h1>
           <p className="mt-2 text-sm text-ink-500 dark:text-parchment-300/70">
-            We couldn't find a church at <span className="font-mono">/p/{slug}</span>.
+            {t('give.notFoundBefore')}<span className="font-mono">/p/{slug}</span>{t('give.notFoundAfter')}
           </p>
         </div>
       </div>
@@ -207,7 +215,7 @@ export default function PublicGive() {
 
         <header className="text-center mb-8">
           <h1 className="font-display text-3xl md:text-4xl font-semibold text-ink-900 dark:text-parchment-50 tracking-tight">
-            Give{church?.name ? ` to ${church.name}` : ''}
+            {church?.name ? t('give.titleTo', { name: church.name }) : t('give.title')}
           </h1>
         </header>
 
@@ -216,29 +224,29 @@ export default function PublicGive() {
             <span className="inline-flex w-12 h-12 rounded-full bg-brass-100 dark:bg-brass-900/40 items-center justify-center text-brass-700 dark:text-brass-300 mb-4">
               <Check size={22} />
             </span>
-            <h2 className="font-display text-2xl font-semibold text-ink-900 dark:text-parchment-50">Thank you!</h2>
+            <h2 className="font-display text-2xl font-semibold text-ink-900 dark:text-parchment-50">{t('give.thanks')}</h2>
             <p className="mt-2 text-sm text-ink-600 dark:text-parchment-300/80">
-              Your gift of <span className="font-semibold">{fmtMoney(receipt?.amount ?? amountNum)}</span>
-              {receipt?.fund ? <> to <span className="font-semibold">{receipt.fund}</span></> : null} was received.
-              {receipt?.recurring && <> It will repeat <span className="font-semibold">{receipt.recurring}</span>.</>}
+              {t('give.receivedBefore')}<span className="font-semibold">{fmtMoney(receipt?.amount ?? amountNum)}</span>
+              {receipt?.fund ? <>{t('give.receivedTo')}<span className="font-semibold">{receipt.fund}</span></> : null}{t('give.receivedAfter')}
+              {receipt?.recurring && <>{t('give.repeatsBefore')}<span className="font-semibold">{frequencyLabel(receipt.recurring, t)}</span>{t('give.repeatsAfter')}</>}
             </p>
             {receipt?.reference && (
               <p className="mt-1 text-[11px] text-ink-500 dark:text-parchment-300/60">
-                Reference: <span className="font-mono">{receipt.reference}</span>
+                {t('give.reference')} <span className="font-mono">{receipt.reference}</span>
               </p>
             )}
             <Link
               to={`/p/${slug}`}
               className="inline-flex items-center gap-1.5 mt-6 text-sm font-semibold text-church-800 dark:text-brass-300 hover:text-church-900 dark:hover:text-brass-200 transition-colors"
             >
-              <ArrowLeft size={14} /> Back to {church?.name ?? 'home'}
+              <ArrowLeft size={14} /> {church?.name ? t('give.back', { name: church.name }) : t('give.backHome')}
             </Link>
           </div>
         ) : (funds.length === 0 || !givingEnabled) ? (
           <div className="bg-parchment-100 dark:bg-ink-900/80 rounded-2xl border border-parchment-300/60 dark:border-brass-900/30 shadow-warm p-8 text-center">
             <Heart size={26} className="mx-auto text-brass-500 dark:text-brass-300 mb-3 opacity-70" />
             <p className="text-sm text-ink-600 dark:text-parchment-300/80">
-              Online giving isn't set up for this church yet. Please check back soon.
+              {t('give.notSetUp')}
             </p>
           </div>
         ) : (
@@ -253,8 +261,8 @@ export default function PublicGive() {
                 usually a phone, often someone who does not use software all
                 day. Real labels, kept visible. */}
             <div>
-              <label htmlFor="give-amount" className="block text-xs font-semibold uppercase tracking-wider text-ink-700 dark:text-parchment-200 mb-2">Amount</label>
-              <div role="group" aria-label="Suggested amounts" className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-2">
+              <label htmlFor="give-amount" className="block text-xs font-semibold uppercase tracking-wider text-ink-700 dark:text-parchment-200 mb-2">{t('give.amount')}</label>
+              <div role="group" aria-label={t('give.suggested')} className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-2">
                 {QUICK_AMOUNTS.map(a => (
                   <button
                     key={a}
@@ -282,22 +290,22 @@ export default function PublicGive() {
                   required
                   value={amount}
                   onChange={e => setAmount(e.target.value)}
-                  placeholder="Other amount"
+                  placeholder={t('give.amountPh')}
                   aria-describedby="give-amount-help"
                   className={`${inputCls} pl-7`}
                 />
               </div>
               <p id="give-amount-help" className="mt-1.5 text-[11px] text-ink-500 dark:text-parchment-300/70">
-                Choose a suggested amount above, or enter your own.
+                {t('give.amountHelp')}
               </p>
             </div>
 
             {/* Frequency — a button group, so it needs radio semantics rather
                 than a bare <label>, which has nothing to point at. */}
             <div role="radiogroup" aria-labelledby="give-frequency-label">
-              <span id="give-frequency-label" className="block text-xs font-semibold uppercase tracking-wider text-ink-700 dark:text-parchment-200 mb-2">Frequency</span>
+              <span id="give-frequency-label" className="block text-xs font-semibold uppercase tracking-wider text-ink-700 dark:text-parchment-200 mb-2">{t('give.frequency')}</span>
               <div className="grid grid-cols-3 gap-2">
-                {[['once', 'One-time'], ['monthly', 'Monthly'], ['weekly', 'Weekly']].map(([val, label]) => (
+                {FREQUENCIES.map(val => (
                   <button
                     key={val}
                     type="button"
@@ -310,7 +318,7 @@ export default function PublicGive() {
                         : 'border-parchment-300/70 dark:border-brass-900/40 text-ink-700 dark:text-parchment-200 hover:border-church-400/60'
                     }`}
                   >
-                    {label}
+                    {frequencyLabel(val, t)}
                   </button>
                 ))}
               </div>
@@ -318,9 +326,9 @@ export default function PublicGive() {
 
             {/* Fund */}
             <div>
-              <label htmlFor="give-fund" className="block text-xs font-semibold uppercase tracking-wider text-ink-700 dark:text-parchment-200 mb-2">Give to</label>
+              <label htmlFor="give-fund" className="block text-xs font-semibold uppercase tracking-wider text-ink-700 dark:text-parchment-200 mb-2">{t('give.fund')}</label>
               <select id="give-fund" value={fundId} onChange={e => setFundId(e.target.value)} className={inputCls}>
-                <option value="">Choose a fund…</option>
+                <option value="">{t('give.chooseFund')}</option>
                 {funds.map(f => (
                   <option key={f.id} value={f.id}>{f.name}</option>
                 ))}
@@ -337,8 +345,8 @@ export default function PublicGive() {
                 once, and the browser already knows their name and email. */}
             <div>
               <label htmlFor="give-name" className="block text-xs font-semibold uppercase tracking-wider text-ink-700 dark:text-parchment-200 mb-2">
-                Your name <span className="text-church-700 dark:text-brass-300" aria-hidden="true">*</span>
-                <span className="sr-only">(required)</span>
+                {t('give.name')} <span className="text-church-700 dark:text-brass-300" aria-hidden="true">*</span>
+                <span className="sr-only">{t('give.required')}</span>
               </label>
               <input
                 id="give-name"
@@ -347,38 +355,38 @@ export default function PublicGive() {
                 autoComplete="name"
                 value={name}
                 onChange={e => setName(e.target.value)}
-                placeholder="Consuelo Ibáñez"
+                placeholder={t('give.namePh')}
                 className={inputCls}
               />
             </div>
 
             <div>
-              <label htmlFor="give-email" className="block text-xs font-semibold uppercase tracking-wider text-ink-700 dark:text-parchment-200 mb-2">Email</label>
+              <label htmlFor="give-email" className="block text-xs font-semibold uppercase tracking-wider text-ink-700 dark:text-parchment-200 mb-2">{t('give.email')}</label>
               <input
                 id="give-email"
                 type="email"
                 autoComplete="email"
                 value={email}
                 onChange={e => setEmail(e.target.value)}
-                placeholder="you@example.com"
+                placeholder={t('give.emailPh')}
                 aria-describedby="give-email-help"
                 className={inputCls}
               />
               <p id="give-email-help" className="mt-1.5 text-[11px] text-ink-500 dark:text-parchment-300/70">
-                Optional — we'll send your receipt here.
+                {t('give.emailHelp')}
               </p>
             </div>
 
             <div>
               <label htmlFor="give-note" className="block text-xs font-semibold uppercase tracking-wider text-ink-700 dark:text-parchment-200 mb-2">
-                Note <span className="font-normal normal-case tracking-normal text-ink-500 dark:text-parchment-300/70">(optional)</span>
+                {t('give.note')} <span className="font-normal normal-case tracking-normal text-ink-500 dark:text-parchment-300/70">{t('give.optional')}</span>
               </label>
               <textarea
                 id="give-note"
                 value={message}
                 onChange={e => setMessage(e.target.value)}
                 rows={2}
-                placeholder="In memory of…"
+                placeholder={t('give.notePh')}
                 className={`${inputCls} resize-none`}
               />
             </div>
@@ -391,11 +399,11 @@ export default function PublicGive() {
               className="w-full inline-flex items-center justify-center gap-2 px-5 py-3 rounded-xl bg-church-900 dark:bg-church-700 text-parchment-50 text-sm font-semibold shadow-warm hover:bg-church-800 dark:hover:bg-church-600 transition-colors disabled:opacity-40"
             >
               {status === 'submitting'
-                ? <><Loader2 size={16} className="animate-spin" /> Processing…</>
-                : <><Heart size={16} /> Give{Number.isFinite(amountNum) && amountNum > 0 ? ` ${fmtMoney(amountNum)}` : ''}</>}
+                ? <><Loader2 size={16} className="animate-spin" /> {t('give.processing')}</>
+                : <><Heart size={16} /> {Number.isFinite(amountNum) && amountNum > 0 ? t('give.submitAmount', { amount: fmtMoney(amountNum) }) : t('give.submit')}</>}
             </button>
             <p className="text-center text-[11px] text-ink-500 dark:text-parchment-300/70">
-              Powered by OpenChurch
+              {t('give.powered')}
             </p>
           </form>
         )}

@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { useEffect, useId, useRef, useState } from 'react'
+import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import {
   ChevronLeft, Mail, Phone, Building2, Calendar, CalendarOff,
@@ -13,7 +13,7 @@ import EmptyState from '../components/EmptyState'
 import LoadFailure from '../components/LoadFailure'
 import CalendarSync from '../components/CalendarSync'
 import { apiUrl } from '../api'
-import { formatLocalDate } from '../utils/dates'
+import { formatStoredDate } from '../utils/dates'
 import { initials } from '../utils/format'
 import { LIT_COLOR_DOT, LIT_COLOR_TEXT } from '../utils/liturgicalColors'
 
@@ -45,6 +45,47 @@ const STATUS_COLORS = {
 function fmtCurrency(n) {
   return Number(n).toLocaleString(undefined, { style: 'currency', currency: 'USD' })
 }
+
+// Same read rules as the pledges book: a figure counts only as a finite
+// number or a plain decimal string (including zero). Booleans, arrays,
+// objects, and blanks are not zero.
+function knownNumber(v) {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null
+  if (typeof v === 'string' && /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(v)) {
+    const n = Number(v)
+    return Number.isFinite(n) ? n : null
+  }
+  return null
+}
+
+function positiveIntId(v) {
+  if (typeof v === 'number' && Number.isSafeInteger(v) && v > 0) return v
+  if (typeof v === 'string' && /^[1-9]\d*$/.test(v)) {
+    const n = Number(v)
+    if (Number.isSafeInteger(n)) return n
+  }
+  return null
+}
+
+function fmtKnownCurrency(n, unavailable) {
+  const v = knownNumber(n)
+  if (v == null) return unavailable
+  return v.toLocaleString(undefined, { style: 'currency', currency: 'USD' })
+}
+
+function isPledgeRow(row) {
+  return !!row && typeof row === 'object' && !Array.isArray(row)
+    && positiveIntId(row.id) != null && typeof row.frequency === 'string'
+}
+
+// `{ pledges: null }`, a bare array, or a row without a canonical id is
+// not an empty pledge list for this member.
+function asPledgeList(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return null
+  if (!Array.isArray(body.pledges)) return null
+  if (body.pledges.some(row => !isPledgeRow(row))) return null
+  return body.pledges
+}
 function fmtDateLong(iso) {
   if (!iso) return null
   const [y, m, d] = iso.split('T')[0].split('-').map(Number)
@@ -65,6 +106,7 @@ function fmtBirthMonthDay(iso) {
 // so it doesn't sit around in the UI on every reload. Rotating
 // invalidates the previous link.
 function SwapLinkSection({ clientId, clientName }) {
+  const { t } = useLocale()
   const [busy,   setBusy]   = useState(false)
   const [token,  setToken]  = useState(null)
   const [copied, setCopied] = useState(false)
@@ -80,14 +122,14 @@ function SwapLinkSection({ clientId, clientName }) {
         method: 'POST',
       })
     } catch (err) {
-      setError("That didn't save — nothing was lost. Please try again.")
+      setError(t('err.save'))
       setBusy(false)
       return
     }
     const data = await res.json().catch(() => ({}))
     setBusy(false)
     if (!res.ok) {
-      setError(data.error || `Failed (${res.status})`)
+      setError(data.error || t('member.failedStatus', { status: res.status }))
       return
     }
     setToken(data.swap_token)
@@ -100,7 +142,7 @@ function SwapLinkSection({ clientId, clientName }) {
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)
     } catch {
-      setError('Copy failed — select the link and copy manually.')
+      setError(t('member.copyFailed'))
     }
   }
 
@@ -108,7 +150,7 @@ function SwapLinkSection({ clientId, clientName }) {
     <section className="bg-parchment-50 dark:bg-ink-900 rounded-2xl border border-parchment-300/60 dark:border-brass-900/30 shadow-warm p-5 space-y-3">
       <div className="flex items-center justify-between gap-3">
         <h2 className="text-sm font-bold uppercase tracking-widest text-brass-700 dark:text-brass-300">
-          Swap link
+          {t('member.swapLink')}
         </h2>
         <button
           type="button"
@@ -116,7 +158,7 @@ function SwapLinkSection({ clientId, clientName }) {
           disabled={busy}
           className="px-3 py-1.5 text-xs font-semibold rounded-lg border border-church-900 dark:border-parchment-100 text-church-900 dark:text-parchment-100 hover:bg-church-900 hover:text-parchment-50 dark:hover:bg-parchment-100 dark:hover:text-church-900 transition-colors disabled:opacity-40"
         >
-          {busy ? 'Generating…' : (token ? 'Rotate' : 'Generate link')}
+          {busy ? t('member.generating') : (token ? t('member.rotateLink') : t('member.generateLink'))}
         </button>
       </div>
       <p className="text-[12px] text-ink-500 dark:text-parchment-300/70 leading-snug">
@@ -138,7 +180,7 @@ function SwapLinkSection({ clientId, clientName }) {
               onClick={onCopy}
               className="px-3 py-2 text-xs font-semibold rounded-lg bg-church-900 dark:bg-parchment-100 text-parchment-50 dark:text-church-900 hover:opacity-90 transition-opacity shrink-0"
             >
-              {copied ? 'Copied' : 'Copy'}
+              {copied ? t('member.copied') : t('member.copy')}
             </button>
           </div>
           <p className="text-[11px] text-amber-700 dark:text-amber-300">
@@ -168,16 +210,89 @@ function fmtServiceDate(v) {
   return new Date(y, m - 1, d).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
 }
 
+// Historical attendance on the profile. A missing stamp is unknown —
+// never a live Schedule title presented as what they attended.
+export function attendedHistoryLabel(row, t) {
+  const title = typeof row?.event_title === 'string' ? row.event_title.trim() : ''
+  return title || t('checkin.attendedUnknown')
+}
+
+export function attendedHistoryDateLabel(row, t) {
+  if (!row?.event_date) return t('checkin.attendedDateUnknown')
+  return fmtServiceDate(row.event_date)
+}
+
+// Positive integer IDs only — same contract as the check-in desk.
+export function parseMemberId(raw) {
+  if (raw == null) return null
+  const s = String(raw).trim()
+  if (s === '') return null
+  const n = Number(s)
+  if (!Number.isInteger(n) || n <= 0 || String(n) !== s) return null
+  return n
+}
+
+// Check-in opened this profile with the Mass already named. Return there.
+// A missing or garbled event stays on the Members roll — we do not invent a service.
+export function memberReturnHome(searchParams) {
+  const from = searchParams?.get?.('from')
+  const event = parseMemberId(searchParams?.get?.('event'))
+  if (from === 'checkin' && event) {
+    return { to: `/checkin?event=${event}`, labelKey: 'member.backCheckin' }
+  }
+  return { to: '/clients', labelKey: 'member.backMembers' }
+}
+
+// Attendance row → that Mass, carrying this person so the desk can return.
+export function attendanceServiceHref(eventId, clientId) {
+  const event = parseMemberId(eventId)
+  if (!event) return null
+  const person = parseMemberId(clientId)
+  return person
+    ? `/checkin?event=${event}&from=member&client=${person}`
+    : `/checkin?event=${event}`
+}
+
 function AttendanceSection({ clientId }) {
+  const { t } = useLocale()
   const [list, setList] = useState(null)
+  // A refused attendance read is not "never attended". It used to become
+  // [], and an empty list hides this section, so a 500 looked exactly like
+  // a parishioner with no attendance history. Hidden stays reserved for a
+  // real empty answer; a failed read says so and offers a retry.
+  const [failed, setFailed] = useState(false)
+  const [attempt, setAttempt] = useState(0)
   useEffect(() => {
     let cancelled = false
+    setFailed(false)
     fetch(apiUrl(`/api/clients/${clientId}/checkins`))
-      .then(r => (r.ok ? r.json() : { checkins: [] }))
-      .then(d => { if (!cancelled) setList(d.checkins ?? []) })
-      .catch(() => { if (!cancelled) setList([]) })
+      .then(async r => {
+        if (!r.ok) throw new Error('checkins')
+        const d = await r.json()
+        if (!Array.isArray(d?.checkins)) throw new Error('checkins')
+        return d.checkins
+      })
+      .then(rows => { if (!cancelled) setList(rows) })
+      .catch(() => { if (!cancelled) { setList(null); setFailed(true) } })
     return () => { cancelled = true }
-  }, [clientId])
+  }, [clientId, attempt])
+
+  if (failed) {
+    return (
+      <section className="bg-parchment-50 dark:bg-ink-900 rounded-2xl border border-parchment-300/60 dark:border-brass-900/30 shadow-warm p-5 space-y-3">
+        <div className="flex items-center gap-2">
+          <UserCheck size={14} className="text-brass-700 dark:text-brass-300" />
+          <h2 className="text-sm font-bold uppercase tracking-widest text-brass-700 dark:text-brass-300">{t('member.attendance')}</h2>
+        </div>
+        <LoadFailure
+          variant="strip"
+          title={t('load.failedTitle')}
+          body={t('load.failedBody')}
+          onRetry={() => setAttempt(a => a + 1)}
+        />
+      </section>
+    )
+  }
 
   if (!list || list.length === 0) return null
 
@@ -185,15 +300,35 @@ function AttendanceSection({ clientId }) {
     <section className="bg-parchment-50 dark:bg-ink-900 rounded-2xl border border-parchment-300/60 dark:border-brass-900/30 shadow-warm p-5 space-y-3">
       <div className="flex items-center gap-2">
         <UserCheck size={14} className="text-brass-700 dark:text-brass-300" />
-        <h2 className="text-sm font-bold uppercase tracking-widest text-brass-700 dark:text-brass-300">Attendance</h2>
+        <h2 className="text-sm font-bold uppercase tracking-widest text-brass-700 dark:text-brass-300">{t('member.attendance')}</h2>
       </div>
       <ul className="space-y-1.5">
-        {list.slice(0, 8).map(c => (
+        {list.slice(0, 8).map(c => {
+          const serviceHref = attendanceServiceHref(c.event_id, clientId)
+          return (
           <li key={c.id} className="flex items-center justify-between gap-3 text-sm">
-            <span className="text-ink-800 dark:text-parchment-100 truncate">{c.event_title}</span>
-            <span className="text-xs text-ink-500 dark:text-parchment-300/70 shrink-0">{fmtServiceDate(c.event_date)}</span>
+            {/* The row already knows which service this was — the API returns
+                event_id alongside the title. It used to be dead text, so
+                "who else was at that Mass" meant finding it again by hand.
+                The service opens where its attendance lives. The person
+                travels with the Mass so the desk can return here. */}
+            {serviceHref ? (
+              <Link
+                to={serviceHref}
+                className="text-ink-800 dark:text-parchment-100 truncate hover:text-church-800 dark:hover:text-brass-200 hover:underline"
+                title={c.event_title
+                  ? `Open check-in for ${c.event_title}`
+                  : t('checkin.attendedUnknown')}
+              >
+                {attendedHistoryLabel(c, t)}
+              </Link>
+            ) : (
+              <span className="text-ink-800 dark:text-parchment-100 truncate">{attendedHistoryLabel(c, t)}</span>
+            )}
+            <span className="text-xs text-ink-500 dark:text-parchment-300/70 shrink-0">{attendedHistoryDateLabel(c, t)}</span>
           </li>
-        ))}
+          )
+        })}
       </ul>
       <p className="text-[11px] text-ink-500 dark:text-parchment-300/70">
         {list.length} service{list.length === 1 ? '' : 's'} attended
@@ -217,21 +352,45 @@ function fmtRange(start, end) {
 // auto-fill (VS.4a) reads these to skip the member, and the EventModal
 // warns when they're assigned on a blacked-out date.
 function AvailabilitySection({ clientId, clientName }) {
+  const { t } = useLocale()
   const [list,    setList]    = useState([])
   const [loading, setLoading] = useState(true)
+  // A refused or dropped read is not "No blackout dates." It used to
+  // become [] (or leave the initial []), so a 500 told the secretary this
+  // person could serve any day, right above the form for adding the very
+  // dates the rotation auto-fill relies on. The list is only an answer
+  // when the server gave one.
+  const [readFailed, setReadFailed] = useState(false)
   const [form,    setForm]    = useState({ start_date: '', end_date: '', reason: '' })
   const [busy,    setBusy]    = useState(false)
   const [error,   setError]   = useState(null)
 
+  // R310-2: a retry and the post-add refresh can overlap. Only the latest
+  // read may commit rows / readFailed / loading; an older one (an empty
+  // retry, a failure, or its finally) that lands late is dropped. A change
+  // of member or unmount retires whatever is in flight.
+  const readGen = useRef(0)
   const load = async () => {
+    const gen = ++readGen.current
+    const live = () => gen === readGen.current
     try {
       const res = await fetch(apiUrl(`/api/availability?client_id=${clientId}`))
-      const d = res.ok ? await res.json() : { unavailability: [] }
-      setList(d.unavailability ?? [])
-    } catch { /* leave the list as-is on a transient error */ }
-    finally { setLoading(false) }
+      if (!live()) return
+      if (!res.ok) throw new Error('availability')
+      const d = await res.json()
+      if (!live()) return
+      if (!Array.isArray(d?.unavailability)) throw new Error('availability')
+      setList(d.unavailability)
+      setReadFailed(false)
+    } catch {
+      if (live()) setReadFailed(true)
+    } finally { if (live()) setLoading(false) }
   }
-  useEffect(() => { load() }, [clientId])
+  const retryLoad = () => { setLoading(true); load() }
+  useEffect(() => {
+    load()
+    return () => { readGen.current++ }
+  }, [clientId])
 
   const onAdd = async (e) => {
     e.preventDefault()
@@ -250,7 +409,7 @@ function AvailabilitySection({ clientId, clientName }) {
       })
       if (!res.ok) {
         const data = await res.json().catch(() => ({}))
-        throw new Error(data.error || `Failed (${res.status})`)
+        throw new Error(data.error || t('member.failedStatus', { status: res.status }))
       }
       setForm({ start_date: '', end_date: '', reason: '' })
       await load()
@@ -265,7 +424,7 @@ function AvailabilitySection({ clientId, clientName }) {
     setError(null)
     try {
       const res = await fetch(apiUrl(`/api/availability/${id}`), { method: 'DELETE' })
-      if (!res.ok && res.status !== 204) throw new Error(`Failed (${res.status})`)
+      if (!res.ok && res.status !== 204) throw new Error(t('member.failedStatus', { status: res.status }))
       setList(l => l.filter(u => u.id !== id))
     } catch (err) {
       setError(err.message)
@@ -279,7 +438,7 @@ function AvailabilitySection({ clientId, clientName }) {
       <div className="flex items-center gap-2">
         <CalendarOff size={14} className="text-brass-700 dark:text-brass-300" />
         <h2 className="text-sm font-bold uppercase tracking-widest text-brass-700 dark:text-brass-300">
-          Availability
+          {t('member.availability')}
         </h2>
       </div>
       <p className="text-[12px] text-ink-500 dark:text-parchment-300/70 leading-snug">
@@ -291,6 +450,13 @@ function AvailabilitySection({ clientId, clientName }) {
         <div className="flex justify-center py-3">
           <Loader2 size={16} className="animate-spin text-brass-600" />
         </div>
+      ) : readFailed ? (
+        <LoadFailure
+          variant="strip"
+          title={t('load.failedTitle')}
+          body={t('load.failedBody')}
+          onRetry={retryLoad}
+        />
       ) : list.length === 0 ? (
         <p className="text-[11px] text-ink-500 dark:text-parchment-300/70">
           No blackout dates.
@@ -359,7 +525,7 @@ function AvailabilitySection({ clientId, clientName }) {
           disabled={busy || !form.start_date}
           className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-lg bg-church-900 dark:bg-parchment-100 text-parchment-50 dark:text-church-900 hover:opacity-90 transition-opacity disabled:opacity-40"
         >
-          <Plus size={13} /> {busy ? 'Adding…' : 'Add blackout date'}
+          <Plus size={13} /> {busy ? t('member.adding') : t('member.addBlackout')}
         </button>
       </form>
 
@@ -373,20 +539,27 @@ function AvailabilitySection({ clientId, clientName }) {
 // Sacramental register (SAC.1) — a member's sacraments received. Reads for
 // everyone; add/remove is staff/admin (the server enforces the same via the
 // writeGate, this just hides the controls from viewers).
-const SACRAMENT_LABELS = {
-  baptism:         'Baptism',
-  reconciliation:  'First Reconciliation',
-  first_communion: 'First Communion',
-  confirmation:    'Confirmation',
-  marriage:        'Marriage',
-  holy_orders:     'Holy Orders',
-  anointing:       'Anointing of the Sick',
-  burial:          'Christian Burial',
+const SACRAMENT_ORDER = [
+  'baptism',
+  'reconciliation',
+  'first_communion',
+  'confirmation',
+  'marriage',
+  'holy_orders',
+  'anointing',
+  'burial',
+]
+const SACRAMENT_TYPES = new Set(SACRAMENT_ORDER)
+
+function sacramentLabel(t, type) {
+  const key = `sac.${type}`
+  const label = t(key)
+  return label === key ? type : label
 }
-const SACRAMENT_ORDER = Object.keys(SACRAMENT_LABELS)
 
 function SacramentsSection({ clientId, clientName }) {
   const { user } = useAuth()
+  const { t } = useLocale()
   const canWrite = user?.role === 'admin' || user?.role === 'staff'
 
   const [adding,  setAdding]  = useState(false)
@@ -400,6 +573,7 @@ function SacramentsSection({ clientId, clientName }) {
   // from a member profile came back "A reason is required to change the
   // register" and no correction was possible from here at all.
   const [reason, setReason] = useState('')
+  const formId = useId().replace(/:/g, '')
 
   // Pass 6 wrote this load by hand: keep the last known list on failure,
   // report a failed post-write refresh, and never let a failed read reach
@@ -411,8 +585,12 @@ function SacramentsSection({ clientId, clientName }) {
   // `reload()` returns true/false, which is what the save path branches on.
   const sacraments = useLoad(async () => {
     const res = await fetch(apiUrl(`/api/sacraments?client_id=${clientId}`))
-    if (!res.ok) throw new Error(`Failed (${res.status})`)
-    return (await res.json()).records ?? []
+    if (!res.ok) throw new Error(t('member.failedStatus', { status: res.status }))
+    const data = await res.json()
+    // `{ records: null }` and a non-array are unread. `?? []` said
+    // "No sacraments recorded yet."
+    if (!data || !Array.isArray(data.records)) throw new Error(t('member.entriesUnread'))
+    return data.records
   }, [clientId])
 
   const list      = sacraments.data ?? []
@@ -441,7 +619,7 @@ function SacramentsSection({ clientId, clientName }) {
 
   const onSubmit = async (e) => {
     e.preventDefault()
-    if (!SACRAMENT_LABELS[form.type]) return
+    if (!SACRAMENT_TYPES.has(form.type)) return
     setBusy(true); setError(null)
     // Editing PATCHes the record; adding POSTs a new one linked to this member.
     // Send explicit nulls on edit so cleared fields are actually cleared.
@@ -473,16 +651,16 @@ function SacramentsSection({ clientId, clientName }) {
       })
       if (!res.ok) {
         const data = await res.json().catch(() => ({}))
-        throw new Error(data.error || `Failed (${res.status})`)
+        throw new Error(data.error || t('member.failedStatus', { status: res.status }))
       }
-      const saved = editing ? 'correction' : 'record'
+      const saved = editing ? t('member.savedWhatCorrection') : t('member.savedWhatRecord')
       closeForm()
       // The write landed. If the reload does not, say so — the list on
       // screen is now older than the truth, and silence here is what made a
       // saved baptism look like it was never entered.
       const refreshed = await load()
       if (!refreshed) {
-        setError(`The ${saved} was saved, but this list could not be refreshed — it may not show it yet.`)
+        setError(t('member.savedListStale', { what: saved }))
       }
     } catch (err) {
       setError(err.message)
@@ -503,7 +681,7 @@ function SacramentsSection({ clientId, clientName }) {
       const res = await fetch(apiUrl(`/api/sacraments/${recId}`), { method: 'DELETE' })
       if (!res.ok && res.status !== 204) {
         const data = await res.json().catch(() => ({}))
-        throw new Error(data.error || `Failed (${res.status})`)
+        throw new Error(data.error || t('member.failedStatus', { status: res.status }))
       }
       // The list is the hook's now, so a successful removal re-reads rather
       // than editing a local copy. This path is unreachable today — the
@@ -522,11 +700,11 @@ function SacramentsSection({ clientId, clientName }) {
       <div className="flex items-center gap-2">
         <Church size={14} className="text-brass-700 dark:text-brass-300" />
         <h2 className="text-sm font-bold uppercase tracking-widest text-brass-700 dark:text-brass-300">
-          Sacraments
+          {t('member.sacraments')}
         </h2>
       </div>
       <p className="text-[12px] text-ink-500 dark:text-parchment-300/70 leading-snug">
-        {clientName}&apos;s sacramental register — the record of sacraments received.
+        {t('member.sacramentsSub', { name: clientName })}
       </p>
 
       {loading ? (
@@ -536,13 +714,13 @@ function SacramentsSection({ clientId, clientName }) {
       ) : sacraments.state === 'failed' ? (
         /* UNREAD, not empty. */
         <p className="text-[11px] text-amber-700 dark:text-amber-400">
-          This member&apos;s sacramental record could not be read
+          {t('member.sacramentsUnread')}
           <span className="text-ink-500 dark:text-parchment-300/70"> ({loadError})</span>.
-          This is a connection problem, not a member without sacraments — nothing has been removed.
+          {' '}{t('member.sacramentsUnreadHint')}
         </p>
       ) : list.length === 0 ? (
         <p className="text-[11px] text-ink-500 dark:text-parchment-300/70">
-          No sacraments recorded yet.
+          {t('register.emptyTitle')}
         </p>
       ) : (
         <ul className="space-y-2">
@@ -553,10 +731,10 @@ function SacramentsSection({ clientId, clientName }) {
             >
               <div className="min-w-0">
                 <p className="text-sm font-medium text-ink-800 dark:text-parchment-100">
-                  {SACRAMENT_LABELS[r.type] ?? r.type}
+                  {sacramentLabel(t, r.type)}
                   {r.date && (
                     <span className="text-ink-500 dark:text-parchment-300/70 font-normal">
-                      {' · '}{formatLocalDate(r.date)}
+                      {' · '}{formatStoredDate(r.date)}
                     </span>
                   )}
                 </p>
@@ -566,7 +744,7 @@ function SacramentsSection({ clientId, clientName }) {
                   </p>
                 )}
                 {r.certificate_no && (
-                  <p className="text-[11px] text-ink-400 dark:text-parchment-300/60">Cert. {r.certificate_no}</p>
+                  <p className="text-[11px] text-ink-400 dark:text-parchment-300/60">{t('register.certLine', { n: r.certificate_no })}</p>
                 )}
                 {r.notes && (
                   <p className="text-[11px] text-ink-500 dark:text-parchment-300/70">{r.notes}</p>
@@ -574,17 +752,17 @@ function SacramentsSection({ clientId, clientName }) {
               </div>
               <div className="shrink-0 flex items-center gap-2">
                 <Link
-                  to={`/register/${r.id}/certificate`}
+                  to={`/register/${r.id}/certificate?from=member`}
                   className="text-[11px] font-semibold text-church-700 dark:text-brass-300 hover:underline"
                 >
-                  Certificate
+                  {t('register.certificate')}
                 </Link>
                 {canWrite && (
                   <>
                     <button
                       type="button"
                       onClick={() => startEdit(r)}
-                      aria-label={`Edit ${SACRAMENT_LABELS[r.type] ?? r.type} record`}
+                      aria-label={t('register.editRecord', { sacrament: t(`sac.${r.type}`) })}
                       className="-m-1 p-1 text-ink-400 hover:text-church-700 dark:hover:text-brass-300 transition-colors"
                     >
                       <Pencil size={13} />
@@ -592,7 +770,7 @@ function SacramentsSection({ clientId, clientName }) {
                     <button
                       type="button"
                       onClick={() => onRemove(r.id)}
-                      aria-label={`Remove ${SACRAMENT_LABELS[r.type] ?? r.type} record`}
+                      aria-label={t('register.removeRecord', { sacrament: t(`sac.${r.type}`) })}
                       className="-m-1 p-1 text-ink-400 hover:text-rose-700 dark:hover:text-rose-300 transition-colors"
                     >
                       <X size={14} />
@@ -607,7 +785,7 @@ function SacramentsSection({ clientId, clientName }) {
 
       {sacraments.isStale && (
         <p role="status" className="text-[11px] text-amber-700 dark:text-amber-400">
-          This list could not be refreshed ({loadError}) — it may be out of date.
+          {t('member.listStale', { detail: loadError })}
         </p>
       )}
 
@@ -621,51 +799,52 @@ function SacramentsSection({ clientId, clientName }) {
           onClick={startAdd}
           className="inline-flex items-center gap-1.5 text-[12px] font-semibold text-church-700 dark:text-brass-300 hover:underline"
         >
-          <Plus size={13} /> Record a sacrament
+          <Plus size={13} /> {t('member.recordSacrament')}
         </button>
       )}
 
       {canWrite && adding && (
         <form onSubmit={onSubmit} className="space-y-2 pt-1 border-t border-parchment-300/50 dark:border-brass-900/25">
           <p className="pt-2 text-[11px] font-semibold uppercase tracking-widest text-brass-700 dark:text-brass-300">
-            {editingId ? 'Edit record' : 'New record'}
+            {editingId ? t('member.editSacramentRecord') : t('member.newSacramentRecord')}
           </p>
           <div className="grid grid-cols-2 gap-2">
             <div className="col-span-2">
-              <label className="block text-[11px] font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">Sacrament</label>
+              <label htmlFor={`${formId}-type`} className="block text-[11px] font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">{t('register.sacrament')}</label>
               <select
+                id={`${formId}-type`}
                 value={form.type}
                 onChange={e => setForm(f => ({ ...f, type: e.target.value }))}
                 className={inputCls}
               >
-                {SACRAMENT_ORDER.map(t => (
-                  <option key={t} value={t}>{SACRAMENT_LABELS[t]}</option>
+                {SACRAMENT_ORDER.map(type => (
+                  <option key={type} value={type}>{sacramentLabel(t, type)}</option>
                 ))}
               </select>
             </div>
             <div>
-              <label className="block text-[11px] font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">Date</label>
-              <input type="date" value={form.date}
+              <label htmlFor={`${formId}-date`} className="block text-[11px] font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">{t('register.date')}</label>
+              <input id={`${formId}-date`} type="date" value={form.date}
                 onChange={e => setForm(f => ({ ...f, date: e.target.value }))} className={inputCls} />
             </div>
             <div>
-              <label className="block text-[11px] font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">Minister</label>
-              <input type="text" value={form.minister} placeholder="Fr. …"
+              <label htmlFor={`${formId}-minister`} className="block text-[11px] font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">{t('register.minister')}</label>
+              <input id={`${formId}-minister`} type="text" value={form.minister} placeholder="Fr. …"
                 onChange={e => setForm(f => ({ ...f, minister: e.target.value }))} className={inputCls} />
             </div>
             <div>
-              <label className="block text-[11px] font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">Place</label>
-              <input type="text" value={form.place} placeholder="Parish / church"
+              <label htmlFor={`${formId}-place`} className="block text-[11px] font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">{t('register.place')}</label>
+              <input id={`${formId}-place`} type="text" value={form.place} placeholder="Parish / church"
                 onChange={e => setForm(f => ({ ...f, place: e.target.value }))} className={inputCls} />
             </div>
             <div>
-              <label className="block text-[11px] font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">Certificate #</label>
-              <input type="text" value={form.certificate_no}
+              <label htmlFor={`${formId}-cert`} className="block text-[11px] font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">{t('member.certificateNo')}</label>
+              <input id={`${formId}-cert`} type="text" value={form.certificate_no}
                 onChange={e => setForm(f => ({ ...f, certificate_no: e.target.value }))} className={inputCls} />
             </div>
             <div className="col-span-2">
-              <label className="block text-[11px] font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">Notes</label>
-              <input type="text" value={form.notes} placeholder="Sponsor, godparents, etc."
+              <label htmlFor={`${formId}-notes`} className="block text-[11px] font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">{t('record.f.notes')}</label>
+              <input id={`${formId}-notes`} type="text" value={form.notes} placeholder="Sponsor, godparents, etc."
                 onChange={e => setForm(f => ({ ...f, notes: e.target.value }))} className={inputCls} />
             </div>
 
@@ -677,13 +856,14 @@ function SacramentsSection({ clientId, clientName }) {
                 Only on edit: a first entry is not a correction of anything. */}
             {editingId != null && (
               <div className="col-span-2">
-                <label className="block text-[11px] font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">
+                <label htmlFor={`${formId}-reason`} className="block text-[11px] font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">
                   Reason for this correction
                 </label>
-                <input type="text" value={reason} required minLength={3}
+                <input id={`${formId}-reason`} type="text" value={reason} required minLength={3}
+                  aria-describedby={`${formId}-reason-hint`}
                   placeholder="e.g. minister's name was misspelled in the original entry"
                   onChange={e => setReason(e.target.value)} className={inputCls} />
-                <p className="mt-1 text-[10px] text-ink-500 dark:text-parchment-300/70">
+                <p id={`${formId}-reason-hint`} className="mt-1 text-[10px] text-ink-500 dark:text-parchment-300/70">
                   Kept with the entry, dated and attributed, so the register shows what changed and why.
                 </p>
               </div>
@@ -692,11 +872,11 @@ function SacramentsSection({ clientId, clientName }) {
           <div className="flex items-center gap-2">
             <button type="submit" disabled={busy || (editingId != null && reason.trim().length < 3)}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[12px] font-semibold rounded-lg bg-church-800 text-parchment-50 hover:bg-church-900 disabled:opacity-60">
-              {busy ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />} {editingId ? 'Save changes' : 'Save'}
+              {busy ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />} {editingId ? t('member.saveChanges') : t('member.save')}
             </button>
             <button type="button" onClick={closeForm}
               className="text-[12px] text-ink-500 dark:text-parchment-300/70 hover:underline">
-              Cancel
+              {t('mem.cancel')}
             </button>
           </div>
         </form>
@@ -709,55 +889,149 @@ function SacramentsSection({ clientId, clientName }) {
 // resolves to a marked value rather than an empty one: `{ lines: [] }` is
 // the shape of a parishioner who has never given, and a dropped connection
 // must not be allowed to wear it. (C5)
-async function readDonations(id) {
+async function readDonations(id, t) {
   try {
     const r = await fetch(apiUrl(`/api/clients/${id}/donations`))
-    if (!r.ok) return { failed: true, error: `Failed (${r.status})` }
-    return await r.json()
+    if (!r.ok) return { failed: true, error: t('member.failedStatus', { status: r.status }) }
+    const body = await r.json()
+    // A 200 of {} (or any body whose lines are not a list) is not an empty
+    // history. Rendering it used to throw on lines.slice and unmount the
+    // profile. No amount is invented and none is rewritten.
+    if (!body || typeof body !== 'object' || Array.isArray(body) || !Array.isArray(body.lines)) {
+      return { failed: true }
+    }
+    return body
   } catch (e) {
-    return { failed: true, error: e?.message || 'Failed to load' }
+    return { failed: true, error: e?.message || t('member.failedToLoad') }
+  }
+}
+
+// Active pledges for this member. A refused or shapeless book is not
+// "no pledges" — the section says the read failed and can be retried.
+// Non-admins never call this; the endpoint is admin-only.
+async function readMemberPledges(memberId) {
+  const want = positiveIntId(memberId)
+  if (want == null) return { failed: true }
+  try {
+    const res = await fetch(apiUrl('/api/pledges?status=active'))
+    if (!res.ok) return { failed: true }
+    const body = await res.json()
+    const list = asPledgeList(body)
+    if (!list) return { failed: true }
+    return {
+      failed: false,
+      pledges: list.filter(p => positiveIntId(p.member_id) === want),
+    }
+  } catch {
+    return { failed: true }
   }
 }
 
 export default function MemberDetail() {
   const { id } = useParams()
+  const [searchParams] = useSearchParams()
   const { user } = useAuth()
   const { t } = useLocale()
   const isAdmin = user?.role === 'admin'
+  const isViewer = user?.role === 'viewer'
+  const home = memberReturnHome(searchParams)
   const [member, setMember] = useState(null)
   const [donations, setDonations] = useState(null)
   const [birthFeast, setBirthFeast] = useState(null)
   const [pledges, setPledges] = useState(null) // null until fetched (admin-only)
+  // A refused or shapeless read is not an empty list. The section stays
+  // visible and offers retry; it never hides as "no pledges".
+  const [pledgesFailed, setPledgesFailed] = useState(false)
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState('')
+  // Which member the last error is an answer about. A 404 or 500 for Alpha
+  // is not an answer about Omega: ⌘K and in-app links change :id without
+  // unmounting this page, and the previous err used to keep saying
+  // "Member not found" after Omega had already loaded.
+  const [errForId, setErrForId] = useState(null)
   // Bumped by "Try again" so the effect below re-runs for the same id.
   const [attempt, setAttempt] = useState(0)
-  const retry = () => { setErr(''); setAttempt(a => a + 1) }
+  const retry = () => { setErr(''); setErrForId(null); setAttempt(a => a + 1) }
   const [giftsRetrying, setGiftsRetrying] = useState(false)
+  // The member this page is showing NOW, readable from inside an async
+  // handler that started under a previous one. The main effect guards its
+  // own reads with `cancelled`. A retry pressed on Alpha and resolving
+  // after the secretary had moved on to Omega filed Alpha's gifts under
+  // Omega's name. Data belongs to the member it was fetched for, or it
+  // is not filed at all. The same rule applies to `err` and to the
+  // profile header: a render-time id check, not an effect reset, is what
+  // stops Alpha's answer from wearing Omega's URL for even one frame.
+  const idRef = useRef(id)
+  idRef.current = id
+  // Latest pledge read for the member on screen. A retry and the load
+  // started for the previous member can be in flight together; only the
+  // newest one may write.
+  const pledgeGen = useRef(0)
+  const retryPledges = async () => {
+    const forId = id
+    const gen = ++pledgeGen.current
+    const pl = await readMemberPledges(forId)
+    if (gen !== pledgeGen.current || String(idRef.current) !== String(forId)) return
+    setPledges(pl.failed ? null : pl.pledges)
+    setPledgesFailed(pl.failed)
+  }
   const retryGifts = async () => {
+    const forId = id
     setGiftsRetrying(true)
-    try { setDonations(await readDonations(id)) } finally { setGiftsRetrying(false) }
+    try {
+      const d = await readDonations(forId, t)
+      if (idRef.current === forId) setDonations(d)
+    } finally {
+      if (idRef.current === forId) setGiftsRetrying(false)
+    }
   }
 
   useEffect(() => {
     if (!id) return
     let cancelled = false
+    const pledgeRead = ++pledgeGen.current
     setLoading(true)
+    setErr('')
+    setErrForId(null)
+    setDonations(null)
+    setBirthFeast(null)
+    setPledges(null)
+    setPledgesFailed(false)
 
     fetch(apiUrl(`/api/clients/${id}`))
       .then(async r => {
         if (r.status === 404) throw new Error('not-found')
-        if (!r.ok) throw new Error(`Failed (${r.status})`)
+        if (!r.ok) throw new Error(t('member.failedStatus', { status: r.status }))
         return r.json()
       })
       .then(async m => {
         if (cancelled) return
+        // A 200 `{}` (or any body without a matching id) never set errHere
+        // and never yielded memberHere, so the profile spun forever. That is
+        // not "Member not found" and not a successful load — refuse it as a
+        // failed read so LoadFailure can speak.
+        if (
+          !m
+          || typeof m !== 'object'
+          || Array.isArray(m)
+          || String(m.id) !== String(id)
+          // A matching id is not a profile. The book returns a flat row
+          // with the name on the record (NOT NULL). A wrapper
+          // `{ id, client: { name } }` used to paint an empty header.
+          // A blank stored name is still a real row: it renders, so the
+          // record can be opened and corrected (PATCH refuses new blanks).
+          || typeof m.name !== 'string'
+        ) {
+          throw new Error(t('member.failedToLoad'))
+        }
+        setErr('')
+        setErrForId(null)
         setMember(m)
 
         // Fan out — donations + feast lookup. Neither may cost the reader
         // the profile itself; the donations panel says so for itself when
         // its read fails, the feast simply goes unshown.
-        const dPromise = readDonations(id)
+        const dPromise = isViewer ? Promise.resolve(null) : readDonations(id, t)
 
         const fPromise = m.birth_date
           ? fetch(apiUrl(`/api/liturgical?date=${m.birth_date}`))
@@ -769,26 +1043,35 @@ export default function MemberDetail() {
         // Pledges (Sprint D / D.3) — admin-only endpoint, so non-
         // admins get a no-op resolve. Filter client-side to this
         // member's pledges to avoid a per-member server endpoint.
-        const plPromise = isAdmin
-          ? fetch(apiUrl('/api/pledges?status=active'))
-              .then(r => r.ok ? r.json() : { pledges: [] })
-              .then(d => (d.pledges ?? []).filter(p => p.member_id === Number(id)))
-              .catch(() => [])
-          : Promise.resolve(null)
+        const plPromise = isAdmin ? readMemberPledges(id) : Promise.resolve(null)
 
         const [d, f, pl] = await Promise.all([dPromise, fPromise, plPromise])
-        if (cancelled) return
+        if (cancelled || pledgeRead !== pledgeGen.current) return
         setDonations(d)
         setBirthFeast(f)
-        setPledges(pl)
+        if (pl == null) {
+          setPledges(null)
+          setPledgesFailed(false)
+        } else {
+          setPledges(pl.failed ? null : pl.pledges)
+          setPledgesFailed(pl.failed)
+        }
       })
-      .catch(e => { if (!cancelled) setErr(e.message) })
+      .catch(e => { if (!cancelled) { setErr(e.message); setErrForId(id) } })
       .finally(() => { if (!cancelled) setLoading(false) })
 
-    return () => { cancelled = true }
-  }, [id, attempt])
+    return () => { cancelled = true; pledgeGen.current += 1 }
+  }, [id, attempt, isViewer])
 
-  if (loading) {
+  // RENDER-TIME identity. An effect that only resets `err`/`member` still
+  // paints one frame of Alpha under Omega's URL — enough to be read and
+  // enough, after a 404, to leave "Member not found" parked on a member
+  // who loaded. Same rule as useLoad: data is surfaced only while it
+  // belongs to the key being asked for now.
+  const errHere = err && errForId != null && String(errForId) === String(id) ? err : ''
+  const memberHere = member && String(member.id) === String(id) ? member : null
+
+  if (loading || (!memberHere && !errHere)) {
     return (
       <PageWrapper>
         <div className="flex items-center justify-center py-24">
@@ -803,27 +1086,32 @@ export default function MemberDetail() {
   // is the ABSENCE of an answer, and used to be shown as this same screen:
   // "This member doesn't exist or belongs to another organization," said of
   // a member who was there the whole time. (C5)
-  if (err === 'not-found') {
+  if (errHere === 'not-found') {
     return (
       <PageWrapper>
-        <div className="max-w-2xl mx-auto py-16">
+        <div className="max-w-2xl mx-auto py-16 space-y-4">
           <EmptyState
             icon={AlertTriangle}
-            title="Member not found"
-            body="This member doesn't exist or belongs to another organization."
-            action={{ label: 'Back to Members', onClick: () => window.history.back() }}
+            title={t('member.notFound')}
+            body={t('member.notFoundBody')}
           />
+          <Link
+            to={home.to}
+            className="tap inline-flex items-center gap-1.5 text-sm font-semibold text-church-700 dark:text-brass-300 hover:underline"
+          >
+            <ChevronLeft size={16} /> {t(home.labelKey)}
+          </Link>
         </div>
       </PageWrapper>
     )
   }
-  if (err || !member) {
+  if (errHere || !memberHere) {
     return (
       <PageWrapper>
         <div className="max-w-2xl mx-auto py-10 space-y-4">
-          <LoadFailure body={t('member.loadFailedBody')} cause={err || undefined} onRetry={retry} />
-          <Link to="/clients" className="tap inline-flex items-center gap-1 text-sm text-church-700 dark:text-brass-300 hover:underline">
-            <ChevronLeft size={16} /> Back to Members
+          <LoadFailure body={t('member.loadFailedBody')} cause={errHere || undefined} onRetry={retry} />
+          <Link to={home.to} className="tap inline-flex items-center gap-1 text-sm text-church-700 dark:text-brass-300 hover:underline">
+            <ChevronLeft size={16} /> {t(home.labelKey)}
           </Link>
         </div>
       </PageWrapper>
@@ -838,18 +1126,18 @@ export default function MemberDetail() {
         {/* Back link + (admin) this member's audit trail (AUD.3) */}
         <div className="flex items-center justify-between gap-3">
           <Link
-            to="/clients"
+            to={home.to}
             className="inline-flex items-center gap-1.5 text-sm font-semibold text-church-700 dark:text-brass-300 hover:underline"
           >
-            <ChevronLeft size={15} /> Back to Members
+            <ChevronLeft size={15} /> {t(home.labelKey)}
           </Link>
           {isAdmin && (
             <Link
               to={`/audit?entity_type=client&entity_id=${id}`}
               className="inline-flex items-center gap-1.5 text-xs font-semibold text-ink-500 dark:text-parchment-300/70 hover:text-ink-900 dark:hover:text-parchment-50 transition-colors"
-              title="See every change made to this member's record"
+              title={t('member.viewHistoryTitle')}
             >
-              <History size={14} /> View change history
+              <History size={14} /> {t('member.viewHistory')}
             </Link>
           )}
         </div>
@@ -880,10 +1168,10 @@ export default function MemberDetail() {
             )}
             <div className="flex items-center gap-2 mt-3 flex-wrap">
               <span className={`text-xs font-semibold px-2.5 py-1 rounded-full capitalize ${STATUS_COLORS[member.status] || STATUS_COLORS.active}`}>
-                {member.status}
+                {t(`mem.status.${member.status}`) === `mem.status.${member.status}` ? member.status : t(`mem.status.${member.status}`)}
               </span>
               <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-parchment-200 dark:bg-ink-800 text-ink-600 dark:text-parchment-200">
-                {member.role}
+                {t(`mem.role.${member.role}`) === `mem.role.${member.role}` ? member.role : t(`mem.role.${member.role}`)}
               </span>
             </div>
           </div>
@@ -901,11 +1189,11 @@ export default function MemberDetail() {
           >
             {/* Contact */}
             <section className="bg-parchment-50 dark:bg-ink-900 rounded-2xl border border-parchment-300/60 dark:border-brass-900/30 shadow-warm p-5 space-y-3">
-              <p className="text-xs font-bold uppercase tracking-widest text-brass-700 dark:text-brass-300">Contact</p>
+              <p className="text-xs font-bold uppercase tracking-widest text-brass-700 dark:text-brass-300">{t('mem.contact')}</p>
               {[
-                { icon: Mail,      val: member.email,   label: 'Email' },
-                { icon: Phone,     val: member.phone,   label: 'Phone' },
-                { icon: Building2, val: member.company, label: 'Ministry' },
+                { icon: Mail,      val: member.email,   label: 'email' },
+                { icon: Phone,     val: member.phone,   label: 'phone' },
+                { icon: Building2, val: member.company, label: 'ministry' },
               ].map(({ icon: Icon, val, label }) => val ? (
                 <div key={label} className="flex items-center gap-3 text-sm">
                   <Icon size={14} className="text-ink-400 shrink-0" />
@@ -913,14 +1201,14 @@ export default function MemberDetail() {
                 </div>
               ) : null)}
               {!member.email && !member.phone && !member.company && (
-                <p className="text-xs text-ink-500 dark:text-parchment-300/70 italic">No contact info on file.</p>
+                <p className="text-xs text-ink-500 dark:text-parchment-300/70 italic">{t('member.noContact')}</p>
               )}
             </section>
 
             {/* Birthday + feast overlap (mirrors slide-over from L.2) */}
             {member.birth_date && (
               <section className="bg-parchment-50 dark:bg-ink-900 rounded-2xl border border-parchment-300/60 dark:border-brass-900/30 shadow-warm p-5 space-y-2">
-                <p className="text-xs font-bold uppercase tracking-widest text-brass-700 dark:text-brass-300">Birthday</p>
+                <p className="text-xs font-bold uppercase tracking-widest text-brass-700 dark:text-brass-300">{t('mem.birthday')}</p>
                 <div className="flex items-center gap-2 text-sm text-ink-700 dark:text-parchment-200">
                   <Calendar size={13} className="text-ink-400 shrink-0" />
                   <span>{fmtBirthMonthDay(member.birth_date)}</span>
@@ -928,7 +1216,7 @@ export default function MemberDetail() {
                 {birthFeast?.feast_name && (
                   <div className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-md border text-[11px] font-medium ${LIT_COLOR_TEXT[birthFeast.color] ?? LIT_COLOR_TEXT.White}`}>
                     <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${LIT_COLOR_DOT[birthFeast.color] ?? 'bg-parchment-300'}`} />
-                    <span>Born on {birthFeast.feast_name}</span>
+                    <span>{t('mem.bornOn', { feast: birthFeast.feast_name })}</span>
                   </div>
                 )}
               </section>
@@ -937,7 +1225,7 @@ export default function MemberDetail() {
             {/* Tags */}
             {tags.length > 0 && (
               <section className="bg-parchment-50 dark:bg-ink-900 rounded-2xl border border-parchment-300/60 dark:border-brass-900/30 shadow-warm p-5 space-y-2">
-                <p className="text-xs font-bold uppercase tracking-widest text-brass-700 dark:text-brass-300">Tags</p>
+                <p className="text-xs font-bold uppercase tracking-widest text-brass-700 dark:text-brass-300">{t('mem.tags')}</p>
                 <div className="flex flex-wrap gap-2">
                   {tags.map(t => (
                     <span key={t} className="text-xs font-semibold px-2.5 py-1 rounded-full bg-parchment-200 text-ink-600 dark:bg-ink-800 dark:text-parchment-200">
@@ -950,14 +1238,14 @@ export default function MemberDetail() {
 
             {/* Activity meta */}
             <section className="bg-parchment-50 dark:bg-ink-900 rounded-2xl border border-parchment-300/60 dark:border-brass-900/30 shadow-warm p-5 space-y-2">
-              <p className="text-xs font-bold uppercase tracking-widest text-brass-700 dark:text-brass-300">Activity</p>
+              <p className="text-xs font-bold uppercase tracking-widest text-brass-700 dark:text-brass-300">{t('mem.activity')}</p>
               <div className="flex items-center gap-2 text-sm text-ink-500 dark:text-parchment-300/70">
                 <Calendar size={13} />
-                <span>Joined {fmtDateLong(member.created_at)}</span>
+                <span>{t('mem.joined', { date: fmtDateLong(member.created_at) })}</span>
               </div>
               <div className="flex items-center gap-2 text-sm text-ink-500 dark:text-parchment-300/70">
                 <Activity size={13} />
-                <span>Updated {fmtDateLong(member.updated_at)}</span>
+                <span>{t('member.updatedOn', { date: fmtDateLong(member.updated_at) })}</span>
               </div>
             </section>
           </motion.div>
@@ -969,13 +1257,14 @@ export default function MemberDetail() {
             transition={{ delay: 0.1 }}
             className="md:col-span-2 space-y-6"
           >
-            {/* Donation history */}
+            {/* Donation history — SP-021: not shown to Viewers (the API refuses them). */}
+            {!isViewer && (
             <section className="bg-parchment-50 dark:bg-ink-900 rounded-2xl border border-parchment-300/60 dark:border-brass-900/30 shadow-warm p-5">
               <div className="flex items-baseline justify-between mb-4">
                 <div className="flex items-center gap-2">
                   <Heart size={14} className="text-brass-700 dark:text-brass-300" />
                   <h2 className="text-sm font-bold uppercase tracking-widest text-brass-700 dark:text-brass-300">
-                    Donation history
+                    {t('member.donationHistory')}
                   </h2>
                 </div>
                 {donations?.gift_count > 0 && (
@@ -1024,21 +1313,35 @@ export default function MemberDetail() {
                 </ul>
               )}
             </section>
+            )}
 
-            {/* Active pledges — admin-only block. Hidden when no
-                pledges OR when viewer is non-admin (pledges array is
-                null for non-admins). */}
-            {isAdmin && pledges?.length > 0 && (
+            {/* Active pledges — admin-only. A real empty list stays
+                hidden. A failed read stays on screen with retry; it is
+                not "no pledges". */}
+            {isAdmin && pledgesFailed && (
               <section className="bg-parchment-50 dark:bg-ink-900 rounded-2xl border border-parchment-300/60 dark:border-brass-900/30 shadow-warm p-5">
                 <div className="flex items-center gap-2 mb-3">
                   <Target size={14} className="text-brass-700 dark:text-brass-300" />
                   <h2 className="text-sm font-bold uppercase tracking-widest text-brass-700 dark:text-brass-300">
-                    Active pledges
+                    {t('member.activePledges')}
+                  </h2>
+                </div>
+                <LoadFailure variant="strip" body={t('member.pledgesUnread')} onRetry={retryPledges} />
+              </section>
+            )}
+            {isAdmin && !pledgesFailed && pledges?.length > 0 && (
+              <section className="bg-parchment-50 dark:bg-ink-900 rounded-2xl border border-parchment-300/60 dark:border-brass-900/30 shadow-warm p-5">
+                <div className="flex items-center gap-2 mb-3">
+                  <Target size={14} className="text-brass-700 dark:text-brass-300" />
+                  <h2 className="text-sm font-bold uppercase tracking-widest text-brass-700 dark:text-brass-300">
+                    {t('member.activePledges')}
                   </h2>
                 </div>
                 <ul className="space-y-3">
                   {pledges.map(p => {
-                    const pct = Math.round(p.fulfillment * 100)
+                    const ratio = knownNumber(p.fulfillment)
+                    const pct = ratio == null ? null : Math.round(ratio * 100)
+                    const unavailable = t('money.unavailable')
                     // One brass fill — a pledge is a promise being kept,
                     // not a KPI to grade with traffic lights.
                     const barCls = 'bg-brass-500 dark:bg-brass-400'
@@ -1046,21 +1349,23 @@ export default function MemberDetail() {
                       <li key={p.id} className="rounded-lg bg-parchment-100 dark:bg-ink-800/60 px-4 py-3">
                         <div className="flex items-baseline justify-between gap-3 mb-2">
                           <p className="text-sm font-semibold text-ink-900 dark:text-parchment-50">
-                            {fmtCurrency(p.amount)}
+                            {fmtKnownCurrency(p.amount, unavailable)}
                             <span className="text-ink-500 text-xs font-normal"> / {p.frequency.replace('_', ' ')}</span>
                           </p>
                           <p className="text-xs font-semibold text-ink-700 dark:text-parchment-200 tabular-nums">
-                            {pct}%
+                            {pct == null ? unavailable : `${pct}%`}
                           </p>
                         </div>
-                        <div className="h-1.5 rounded-full bg-parchment-200/80 dark:bg-ink-700 overflow-hidden">
-                          <div
-                            className={`h-full ${barCls} transition-all duration-300`}
-                            style={{ width: `${Math.min(100, pct)}%` }}
-                          />
-                        </div>
+                        {pct != null && (
+                          <div className="h-1.5 rounded-full bg-parchment-200/80 dark:bg-ink-700 overflow-hidden">
+                            <div
+                              className={`h-full ${barCls} transition-all duration-300`}
+                              style={{ width: `${Math.min(100, Math.max(0, pct))}%` }}
+                            />
+                          </div>
+                        )}
                         <p className="text-[11px] text-ink-500 dark:text-parchment-300/70 mt-1.5 tabular-nums">
-                          {fmtCurrency(p.matched_total)} of {fmtCurrency(p.period_total)} expected
+                          {fmtKnownCurrency(p.matched_total, unavailable)} of {fmtKnownCurrency(p.period_total, unavailable)} expected
                         </p>
                       </li>
                     )
@@ -1072,7 +1377,7 @@ export default function MemberDetail() {
             {/* Notes */}
             {member.notes && (
               <section className="bg-parchment-50 dark:bg-ink-900 rounded-2xl border border-parchment-300/60 dark:border-brass-900/30 shadow-warm p-5 space-y-2">
-                <p className="text-xs font-bold uppercase tracking-widest text-brass-700 dark:text-brass-300">Notes</p>
+                <p className="text-xs font-bold uppercase tracking-widest text-brass-700 dark:text-brass-300">{t('mem.notes')}</p>
                 <p className="text-sm text-ink-700 dark:text-parchment-200 leading-relaxed whitespace-pre-wrap">
                   {member.notes}
                 </p>
@@ -1080,17 +1385,21 @@ export default function MemberDetail() {
             )}
 
             {/* Calendar feed token — same component the slide-over uses */}
-            <section className="bg-parchment-50 dark:bg-ink-900 rounded-2xl border border-parchment-300/60 dark:border-brass-900/30 shadow-warm p-5">
+            {!isViewer && <section className="bg-parchment-50 dark:bg-ink-900 rounded-2xl border border-parchment-300/60 dark:border-brass-900/30 shadow-warm p-5">
               <CalendarSync clientId={member.id} clientName={member.name} />
-            </section>
+            </section>}
 
-            <SwapLinkSection clientId={member.id} clientName={member.name} />
+            {/* SP-021: swap link, availability and register entries are not in
+                the Viewer's role table; their reads would be refused. */}
+            {!isViewer && <SwapLinkSection clientId={member.id} clientName={member.name} />}
 
-            <AvailabilitySection clientId={member.id} clientName={member.name} />
+            {!isViewer && <AvailabilitySection clientId={member.id} clientName={member.name} />}
 
-            <SacramentsSection clientId={member.id} clientName={member.name} />
+            {!isViewer && <SacramentsSection clientId={member.id} clientName={member.name} />}
 
-            <AttendanceSection clientId={member.id} />
+            {/* R288-2: attendance (event titles, times) is outside Viewer
+                scope; the server refuses /checkins for Viewers too. */}
+            {!isViewer && <AttendanceSection clientId={member.id} />}
           </motion.div>
         </div>
       </div>

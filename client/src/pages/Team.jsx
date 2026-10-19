@@ -1,14 +1,16 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Users, Plus, Trash2, X, Loader2, Mail, Lock, User as UserIcon, Shield, Eye, AlertTriangle } from 'lucide-react'
+import { Users, Plus, X, Loader2, Mail, Lock, User as UserIcon, Shield, Eye, AlertTriangle } from 'lucide-react'
 import PageWrapper from '../components/PageWrapper'
 import EmptyState from '../components/EmptyState'
 import { SkeletonRowList } from '../components/Skeleton'
 import { sheetOverlayCls, sheetPanelCls, MobileSheetGrip } from '../components/MobileSheet'
 import { apiUrl } from '../api'
 import { useAuth } from '../context/AuthContext'
+import { useLocale } from '../i18n'
 import CalendarSync from '../components/CalendarSync'
 import { useConfirm } from '../components/ConfirmProvider'
+import ClosureReceipt from '../components/ClosureReceipt'
 
 // Team-management page. Admin-only — the server enforces it on every
 // /api/users request; this page just hides itself from non-admins via
@@ -33,24 +35,59 @@ function fmtDate(d) {
 
 export default function Team() {
   const { user: me } = useAuth()
+  const { t } = useLocale()
   const ask = useConfirm()
   const [users,    setUsers]    = useState([])
   const [loading,  setLoading]  = useState(true)
   const [err,      setErr]      = useState('')
   const [showAdd,  setShowAdd]  = useState(false)
+  const [turningOn, setTurningOn] = useState(null)
+  const [closureNote, setClosureNote] = useState(null)
+  const [closureBusy, setClosureBusy] = useState(null)
+  // Each person whose restore response did not prove the new state keeps
+  // their own unknown mark. Another person's attempt must not clear it,
+  // and a retry must not clear it before that retry's own response.
+  const [outcomeUnknown, setOutcomeUnknown] = useState(() => new Set())
+  // Overlapping role-change and remove refetches each GET /api/users.
+  // Only the latest claim may paint. An older [] must not win and say
+  // "No team yet" after a newer list has already arrived.
+  const usersLoadGen = useRef(0)
 
   async function fetchUsers() {
+    const gen = ++usersLoadGen.current
     setLoading(true)
     setErr('')
     try {
       const res = await fetch(apiUrl('/api/users'))
+      if (gen !== usersLoadGen.current) return
       if (res.status === 403) { setErr('You need admin access to view this page.'); setUsers([]); return }
       if (!res.ok) throw new Error(`Failed to load team (${res.status})`)
-      setUsers(await res.json())
+      const body = await res.json()
+      if (gen !== usersLoadGen.current) return
+      // A 200 that is not a list is not an empty team, and it must not
+      // reach `.map`. Leave the people already on screen.
+      if (!Array.isArray(body)) {
+        setErr("Couldn't load the team. Nothing was lost — please retry.")
+        return
+      }
+      // A null or id-less row is not a person. Mapping it throws on
+      // u.id. Drop those rows. If nothing usable remains, this is a
+      // failed read, not an empty team.
+      const people = body.filter(row => row && row.id != null)
+      if (people.length === 0 && body.length > 0) {
+        setErr("Couldn't load the team. Nothing was lost — please retry.")
+        return
+      }
+      // A current list establishes who is on the screen. It does not
+      // establish the activation state of a person whose own restore
+      // response was lost, so those unknown marks stay.
+      setUsers(people)
     } catch (e) {
+      if (gen !== usersLoadGen.current) return
+      // A failed refetch is an error, not an empty team. Keep the rows.
       setErr("Couldn't load the team. Nothing was lost — please retry.")
     } finally {
-      setLoading(false)
+      if (gen === usersLoadGen.current) setLoading(false)
     }
   }
   useEffect(() => { fetchUsers() }, [])
@@ -71,21 +108,93 @@ export default function Team() {
     }
   }
 
-  async function removeUser(u) {
+  async function reactivateUser(u) {
     if (!(await ask({
-      title: `Remove ${u.name} from the team?`,
-      body: 'They lose access to this parish immediately.',
-      confirmLabel: 'Remove from team',
+      title: t('team.turnOnTitle', { name: u.name }),
+      body: t('team.turnOnBody'),
+      confirmLabel: t('team.turnOnConfirm'),
     }))) return
     setErr('')
+    setTurningOn(u.id)
     try {
-      const res = await fetch(apiUrl(`/api/users/${u.id}`), { method: 'DELETE' })
-      if (res.status === 204) { fetchUsers(); return }
-      const data = await res.json().catch(() => ({}))
-      throw new Error(data.error || "That didn't delete — nothing was changed. Please try again.")
-    } catch (e) {
-      setErr(e.message)
+      const res = await fetch(apiUrl(`/api/users/${u.id}/reactivate`), { method: 'POST' })
+      let body = null
+      try { body = await res.json() } catch { body = null }
+      const provenOn = res.status === 200 && body &&
+        (body.reactivated === true || (body.reactivated === false && body.already === true))
+      if (!provenOn) {
+        setOutcomeUnknown(current => {
+          const next = new Set(current)
+          next.add(u.id)
+          return next
+        })
+        setErr(t('team.turnOnFailed'))
+        return
+      }
+      setOutcomeUnknown(current => {
+        if (!current.has(u.id)) return current
+        const next = new Set(current)
+        next.delete(u.id)
+        return next
+      })
+      setUsers(list => list.map(row => row.id === u.id ? { ...row, deactivated: false } : row))
+      fetchUsers()
+    } catch {
+      setOutcomeUnknown(current => {
+        const next = new Set(current)
+        next.add(u.id)
+        return next
+      })
+      setErr(t('team.turnOnFailed'))
+    } finally {
+      setTurningOn(null)
     }
+  }
+
+  async function closeUser(u) {
+    if (!(await ask({
+      title: t('team.closeTitle', { name: u.name }),
+      body: t('team.closeBody'),
+      confirmLabel: t('team.closeConfirm'),
+      tone: 'destructive',
+    }))) return
+    setErr('')
+    setClosureBusy(u.id)
+    setClosureNote(null)
+    try {
+      const res = await fetch(apiUrl(`/api/users/${u.id}/close`), { method: 'POST' })
+      if (res.status === 409) {
+        setErr(t('team.closeLastAdmin'))
+        return
+      }
+      let body = null
+      try { body = await res.json() } catch { body = null }
+      if (res.status === 200 && body?.closed === true) {
+        setClosureNote(body)
+        fetchUsers()
+        if (!Array.isArray(body.reviews)) await showClosure(u, true)
+        return
+      }
+      setErr(t('team.closeFailed'))
+    } catch {
+      setErr(t('team.closeFailed'))
+    } finally { setClosureBusy(null) }
+  }
+
+  async function showClosure(u, knownClosed = u.closed === true) {
+    setErr('')
+    setClosureBusy(u.id)
+    try {
+      const res = await fetch(apiUrl(`/api/users/${u.id}/closure`))
+      const body = await res.json().catch(() => null)
+      if (res.status === 200 && body?.closed === true) {
+        setClosureNote(body)
+        return
+      }
+      setErr(t(knownClosed ? 'team.receiptFailed' : 'team.closeFailed'))
+    } catch {
+      setErr(t(knownClosed ? 'team.receiptFailed' : 'team.closeFailed'))
+    } finally { setClosureBusy(null) }
   }
 
   // Forbidden state — non-admins shouldn't see this page, but if they
@@ -129,9 +238,11 @@ export default function Team() {
             members not on the church's member roster. */}
         <CalendarSync selfServe />
 
+        <ClosureReceipt receipt={closureNote} t={t} />
+
         {err && (
-          <div className="text-xs text-rose-700 dark:text-rose-300 bg-rose-50 dark:bg-rose-900/20 border border-rose-100 dark:border-rose-800/30 rounded-lg px-3 py-2 flex items-start gap-2">
-            <AlertTriangle size={14} className="shrink-0 mt-0.5" />
+          <div role="alert" className="text-xs text-rose-700 dark:text-rose-300 bg-rose-50 dark:bg-rose-900/20 border border-rose-100 dark:border-rose-800/30 rounded-lg px-3 py-2 flex items-start gap-2">
+            <AlertTriangle size={14} className="shrink-0 mt-0.5" aria-hidden="true" />
             <span>{err}</span>
           </div>
         )}
@@ -139,12 +250,14 @@ export default function Team() {
         {loading ? (
           <SkeletonRowList count={4} />
         ) : users.length === 0 ? (
+          err ? null : (
           <EmptyState
             icon={Users}
             title="No team yet"
             body="Add your first teammate to share the workload — pastors, staff, or volunteer coordinators."
             action={{ label: 'Add team member', onClick: () => setShowAdd(true) }}
           />
+          )
         ) : (
           <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.1 }} className="bg-parchment-50 dark:bg-ink-900/90 rounded-2xl border border-parchment-300/50 dark:border-brass-900/30 shadow-warm-md overflow-hidden">
             <div className="overflow-x-auto">
@@ -162,10 +275,23 @@ export default function Team() {
                   return (
                     <tr key={u.id} className="hover:bg-parchment-100/40 dark:hover:bg-ink-800/40 transition-colors">
                       <td className="px-4 py-3 font-medium text-ink-900 dark:text-parchment-50">
-                        {u.name}
+                        {u.closed ? t('team.formerOperator') : u.name}
                         {isMe && <span className="ml-2 text-[10px] font-semibold text-brass-600 dark:text-brass-300 uppercase tracking-wider">You</span>}
+                        {outcomeUnknown.has(u.id) ? (
+                          <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-semibold uppercase tracking-wider bg-rose-50 text-rose-800 dark:bg-rose-900/30 dark:text-rose-200">
+                            {t('team.turnOnUnknownStatus')}
+                          </span>
+                        ) : u.closed ? (
+                          <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-semibold uppercase tracking-wider bg-rose-50 text-rose-800 dark:bg-rose-900/30 dark:text-rose-200">
+                            {t('team.loginClosed')}
+                          </span>
+                        ) : u.deactivated && (
+                          <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-semibold uppercase tracking-wider bg-rose-50 text-rose-800 dark:bg-rose-900/30 dark:text-rose-200">
+                            {t('team.loginOff')}
+                          </span>
+                        )}
                       </td>
-                      <td className="px-4 py-3 text-ink-600 dark:text-parchment-300">{u.email}</td>
+                      <td className="px-4 py-3 text-ink-600 dark:text-parchment-300">{u.closed ? '—' : u.email}</td>
                       <td className="px-4 py-3">
                         <select
                           value={u.role}
@@ -175,7 +301,8 @@ export default function Team() {
                              no way to hear WHOSE role is about to change. The
                              visible pill carries the value, not the subject,
                              so the name has to say the person. */
-                          aria-label={`Role for ${u.name || u.email}`}
+                          aria-label={`Role for ${u.closed ? t('team.formerOperator') : (u.name || u.email)}`}
+                          disabled={u.closed || undefined}
                           className={`appearance-none px-3 py-1.5 rounded-lg text-xs font-semibold border-0 cursor-pointer focus:outline-none focus:ring-2 focus:ring-brass-400 ${ROLE_PILL[u.role] ?? ROLE_PILL.viewer}`}
                         >
                           {ROLES.map(r => (
@@ -185,14 +312,40 @@ export default function Team() {
                       </td>
                       <td className="px-4 py-3 text-ink-500 dark:text-parchment-300/70">{fmtDate(u.created_at)}</td>
                       <td className="px-4 py-3 text-right">
-                        <button
-                          type="button"
-                          onClick={() => removeUser(u)}
-                          className="text-ink-400 hover:text-rose-700 dark:text-parchment-400/60 dark:hover:text-rose-300 transition-colors"
-                          aria-label={`Remove ${u.name}`}
-                        >
-                          <Trash2 size={15} />
-                        </button>
+                        <div className="inline-flex items-center justify-end gap-3">
+                          {u.deactivated && !u.closed && (
+                            <button
+                              type="button"
+                              onClick={() => reactivateUser(u)}
+                              disabled={turningOn === u.id}
+                              aria-busy={turningOn === u.id || undefined}
+                              className="min-h-[44px] px-3 text-sm font-semibold text-church-800 dark:text-brass-200 underline-offset-2 hover:underline disabled:opacity-50 disabled:cursor-not-allowed"
+                              aria-label={t('team.turnOnName', { name: u.name })}
+                            >
+                              {turningOn === u.id ? t('team.turnOnSaving') : t('team.turnOn')}
+                            </button>
+                          )}
+                          {u.closed ? (
+                            <button
+                              type="button"
+                              onClick={() => showClosure(u)}
+                              disabled={closureBusy !== null}
+                              className="min-h-[44px] px-3 text-sm font-semibold text-church-800 dark:text-brass-200 underline-offset-2 hover:underline"
+                            >
+                              {t(closureBusy === u.id ? 'team.receiptLoading' : 'team.closureStatus')}
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => closeUser(u)}
+                              disabled={closureBusy !== null}
+                              className="min-h-[44px] px-3 text-sm font-semibold text-rose-800 dark:text-rose-200 underline-offset-2 hover:underline"
+                              aria-label={t('team.closeName', { name: u.name })}
+                            >
+                              {t(closureBusy === u.id ? 'team.closeSaving' : 'team.closeConfirm')}
+                            </button>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   )
@@ -350,3 +503,4 @@ function AddTeamMemberModal({ onClose, onCreated }) {
     </motion.div>
   )
 }
+

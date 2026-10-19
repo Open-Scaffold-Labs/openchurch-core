@@ -126,16 +126,52 @@ describe('staff invitations (PILOT.2)', () => {
   })
 
   it('accepting it sets a password only the invitee knows, and signs them in', async () => {
+    const { rows: orgRows } = await pool.query(
+      'SELECT organization_id FROM ochr_users WHERE email = $1',
+      [chancery.email]
+    )
+    await pool.query(
+      `UPDATE ochr_organizations SET timezone = 'America/Chicago' WHERE id = $1`,
+      [orgRows[0].organization_id]
+    )
     const res = await request(server).post('/api/auth/accept-invite')
       .send({ token: tokenFrom(inviteUrl), password: CHOSEN })
     expect(res.status).toBe(200)
     expect(res.body.token).toBeTruthy()
     expect(res.body.user.organization.name).toBe(chancery.organizationName)
+    expect(res.body.user.organization.timezone).toBe('America/Chicago')
 
     const login = await request(server).post('/api/auth/login')
       .set('X-Forwarded-For', '10.99.12.44')
       .send({ email: inviteeEmail, password: CHOSEN })
     expect(login.status).toBe(200)
+  })
+
+  it('accepting an invite echoes an invalid stored zone as UTC', async () => {
+    const { rows: orgRows } = await pool.query(
+      'SELECT organization_id FROM ochr_users WHERE email = $1',
+      [chancery.email]
+    )
+    const orgId = orgRows[0].organization_id
+    await pool.query(
+      `UPDATE ochr_organizations SET timezone = 'Not/AZone' WHERE id = $1`,
+      [orgId]
+    )
+    try {
+      const fresh = await request(server).post('/api/users/invite')
+        .set('Authorization', `Bearer ${admin}`)
+        .send({ name: 'Zone Invitee', email: `zone_${RUN_ID}@example.com`, role: 'staff' })
+      expect(fresh.status).toBe(201)
+      const accepted = await request(server).post('/api/auth/accept-invite')
+        .send({ token: tokenFrom(fresh.body.invite.url), password: 'zone-invitee-password' })
+      expect(accepted.status).toBe(200)
+      expect(accepted.body.user.organization.timezone).toBe('UTC')
+    } finally {
+      await pool.query(
+        `UPDATE ochr_organizations SET timezone = 'America/Chicago' WHERE id = $1`,
+        [orgId]
+      )
+    }
   })
 
   it('the token it returns actually works — accepting does not sign you out', async () => {
@@ -504,13 +540,13 @@ describe('Getting settled — a calm first week', () => {
   })
 
   it('THE LEDGER DOES NOT READ A NOT-NULL DEFAULT AS A CHOICE', async () => {
-    // `timezone` is NOT NULL DEFAULT 'UTC' (migration 040) and signup
-    // never sets it, so `o.address && o.timezone` silently collapsed to
-    // `o.address` — and the same expression suppressed the "confirm the
-    // parish details" suggestion, so a parish that entered only a street
-    // address was told its details were on file and never asked again.
+    // `timezone` is NOT NULL DEFAULT 'UTC' (migration 040). This signup
+    // does not submit a zone, so the column stays the default. Treating
+    // that default as a chosen clock made `o.address && o.timezone`
+    // collapse to `o.address`, and the same expression suppressed the
+    // "confirm the parish details" suggestion.
     const tz = await pool.query('SELECT address, timezone FROM ochr_organizations WHERE id = $1', [orgId])
-    expect(tz.rows[0].timezone).toBe('UTC')      // never chosen, always set
+    expect(tz.rows[0].timezone).toBe('UTC')
     expect(tz.rows[0].address).toBeNull()
 
     const before = await request(server).get('/api/setup').set('Authorization', `Bearer ${tok}`)

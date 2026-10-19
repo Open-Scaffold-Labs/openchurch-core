@@ -5,7 +5,7 @@ import { apiUrl } from '../api'
 // (Dashboard mounts both LiturgicalWidget and LiturgicalDayDetail) used
 // to fire two identical GETs on mount and keep two independent copies of
 // the same answer. One cache, one fetch in flight, single source of truth.
-const cache = new Map()       // date -> resolved data (or null on error)
+const cache = new Map()       // date -> resolved data (successful reads only)
 const inflight = new Map()    // date -> Promise<data|null>
 
 function todayLocalISO() {
@@ -23,7 +23,14 @@ function fetchOnce(date) {
   const p = fetch(apiUrl(`/api/liturgical?date=${date}`))
     .then(r => r.ok ? r.json() : null)
     .catch(() => null)
-    .then(d => { cache.set(date, d); inflight.delete(date); return d })
+    .then(d => {
+      // Only a real answer is remembered. A failed read is not the day's
+      // answer: caching it would hide the card for the rest of the session
+      // after one network blip, so the next mount asks again.
+      if (d) cache.set(date, d)
+      inflight.delete(date)
+      return d
+    })
   inflight.set(date, p)
   return p
 }

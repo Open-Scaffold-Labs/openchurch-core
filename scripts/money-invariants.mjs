@@ -1,16 +1,16 @@
 #!/usr/bin/env node
-// Every SQL statement that AGGREGATES ochr_donations must exclude refunded
-// gifts, or say in one line why it doesn't.
+// GIV-06 Atlas OPTION A — live money invariants.
 //
-// This exists because of how the refund bug actually happened. Nobody was
-// careless. The predicate was added each time somebody noticed it missing, in
-// the query they happened to be looking at — nine times correctly. It was
-// missing from five, and the five included both documents that leave the
-// building: the donor's year-end tax statement and the diocesan assessable
-// base. A parish was assessed on money it had given back.
+// CLAIM. A refund is a new linked financial fact. $100 gift + $30 refund ≠
+// $70 gift. Live contribution is gift.amount − Σ(posted refunds). The gift
+// stays in the books, including when that net is 0. gift.amount is never
+// rewritten. ochr_period_adjustments kind=refund is the freeze sidecar only
+// — it must never be added into live net.
 //
-// A sweep finds instances. This finds the CLASS: any new aggregate over
-// donations has to make a decision about refunds before it can be committed.
+// This used to require every aggregate to omit payment_status='refunded'.
+// That predicate is now the defect: it hides the gift and cannot represent
+// a partial. A new aggregate over donations has to make an Option A
+// decision before it can be committed.
 //
 // Deliberate exceptions go in EXPECTED below WITH A REASON. That is the
 // point — an exception is a sentence somebody had to write, not a silent gap.
@@ -21,59 +21,40 @@ import { readdirSync, statSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 const ROOTS = ['server/src']
-// Migrations are excluded from the AGGREGATE scan (they create tables and
-// backfill; they do not report money) — with one exception handled separately
-// below, because excluding them wholesale left the scanner blind to the exact
-// number its own header calls out.
 const SKIP_DIRS = new Set(['migrations'])
 
-// The assessable base does not read ochr_donations at all. It sums
-// ochr_parish_ledger (finance/periodTotals.js), and that view's donation
-// branch lives in a migration — so BOTH ends of that path fell outside the
-// scan: the reader has no `ochr_donations` to match on, and the view has no
-// SUM. A parish being assessed on money it gave back was one of the two
-// findings that caused this file to exist, and the first version of it could
-// not have caught that finding. This check closes it: whatever migration
-// currently defines the view must carry the predicate.
+// The assessable base sums ochr_parish_ledger (finance/periodTotals.js).
+// The view's donation + refund branches live in a migration, so BOTH ends
+// of that path would otherwise fall outside the scan. Whatever migration
+// currently defines the view must keep the gift and subtract posted refunds.
 const LEDGER_VIEW_SOURCES = [
-  'server/src/migrations/090-ledger-excludes-refunds.js',
+  'server/src/migrations/104-donation-refund-facts.js',
 ]
-const PREDICATE = /payment_status\s+IS\s+DISTINCT\s+FROM\s+'refunded'/i
+
+const OMIT = /payment_status\s+IS\s+DISTINCT\s+FROM\s+'refunded'/i
 const AGGREGATE = /\b(SUM|COUNT|AVG|MAX|MIN)\s*\(/i
-
-// Selecting `amount` and adding it up in JavaScript is the same money
-// question asked without a SQL aggregate — and until 27 Aug this scanner
-// could not see it.
-//
-// An auditor removed the refund predicate from GET /api/giving-statements/
-// donor — the route that prints the year-end letter a donor files with a tax
-// return — and BOTH guards stayed green: this scanner found no SUM/COUNT to
-// match, and the behavioural test asserted /preview rather than /donor. A
-// refunded gift would have printed at full value. That is the exact defect
-// migration 090 exists to prevent, in the one document where it matters most.
-//
-// So: any statement that pulls `amount` off ochr_donations is a money
-// statement, aggregate or not.
 const AMOUNT_SELECT = /\bSELECT\b[\s\S]*?\bamount\b[\s\S]*?\bFROM\s+ochr_donations\b/i
+const LIVE_NET = /\blive_amount\b|ochr_donation_live|ochr_donation_refunds|ochr_posted_refunds/i
+const PERIOD_ADJUSTMENTS_IN_LIVE = /ochr_period_adjustments/i
 
-// Queries that legitimately count refunded gifts, each with the reason.
-// A new entry here is a claim somebody is making on the record.
-// Each exception is matched against the SQL ITSELF, not against nearby
-// comments — an exception that depends on a comment staying put next to a
-// query is an exception that silently widens when somebody reorders a file.
+// Queries that legitimately read ochr_donations without computing live net,
+// each with the reason. Matched against the SQL itself.
 const EXPECTED = [
   {
     file: 'server/src/routes/donations.js',
-    // Surfaced 27 Aug by the widened matcher.
     match: /SELECT\s+id,\s*source,\s*amount,\s*payment_ref,\s*payment_status[\s\S]*?FROM\s+ochr_donations\b/i,
-    why: 'This is the refund handler reading the gift it is about to refund. '
-       + 'It MUST see refunded rows — that read is how "already refunded" is '
-       + 'detected and turned into a 409. Excluding them would make a double '
-       + 'refund look like a missing gift.',
+    why: 'Refund handler peeking the gift it is about to refund. It MUST see '
+       + 'refunded rows — that read is how a missing gift becomes 404 and how '
+       + 'the remaining balance is computed. It is not a live total.',
+  },
+  {
+    file: 'server/src/finance/donationRefunds.js',
+    match: /SELECT\s+id,\s*source,\s*amount[\s\S]*?FROM\s+ochr_donations[\s\S]*?FOR UPDATE/i,
+    why: 'Write-path lock of the gift being refunded. Reads gift.amount as the '
+       + 'cap, not as a contribution total.',
   },
   {
     file: 'server/src/routes/imports.js',
-    // Surfaced 27 Aug by the widened matcher.
     match: /SELECT\s+d\.donor_name[\s\S]*?FROM\s+ochr_donations\s+d[\s\S]*?unnest/i,
     why: 'Import duplicate detection: "does a gift with this donor, date and '
        + 'amount already exist?" A refunded gift still EXISTS as a record, so '
@@ -82,47 +63,32 @@ const EXPECTED = [
   },
   {
     file: 'server/src/routes/search.js',
-    // Surfaced 27 Aug when the scanner learned to see JS-side amount reads.
     match: /SELECT\s+id,\s*donor_name,\s*amount[\s\S]*?FROM\s+ochr_donations\b[\s\S]*?search_vec/i,
-    why: 'Global search is a LOOKUP, not a total. Nothing sums these rows — '
-       + 'GlobalSearchPalette groups them by type for display. Excluding '
-       + 'refunded gifts here would make a refunded gift unfindable, which is '
-       + 'worse than showing it: the person searching is usually looking for '
-       + 'the refund. If this ever feeds a total, the exception must go.',
+    why: 'Global search is a LOOKUP, not a total. Nothing sums these rows. '
+       + 'Excluding refunded gifts here would make a refunded gift unfindable.',
   },
   {
     file: 'server/src/routes/onboarding.js',
-    // Anchored: COUNT(*) must be the ONLY aggregate in the statement. The
-    // first version used [\s\S]* between the tokens, so adding SUM(amount)
-    // to this very query would still have matched — a money aggregate riding
-    // an exception whose written reason is "it asks whether rows EXIST".
     match: /^\s*SELECT\s+COUNT\(\*\)::int\s+AS\s+n\s+FROM\s+ochr_donations\b[^()]*notes\s+LIKE/i,
     why: 'Counts rows carrying the sample-data prefix to answer "does this org '
        + 'still have demo data on it". It asks whether rows EXIST, not how much '
-       + 'was given. A refunded sample gift is still sample data — excluding it '
-       + 'would hide the cleanup banner while the demo rows are still there.',
+       + 'was given.',
   },
   {
     file: 'server/src/routes/funds.js',
-    // Surfaced 1 Sep by the fund-delete guard. Anchored the same way as the
-    // onboarding entry: COUNT(*) must be the only aggregate, and the WHERE
-    // must be the fund reference and nothing else.
     match: /^\s*SELECT\s+COUNT\(\*\)::int\s+AS\s+n\s+FROM\s+ochr_donations\s+WHERE\s+fund_id\s*=\s*\$1\s+AND\s+organization_id\s*=\s*\$2\s*$/i,
     why: 'The guard that refuses DELETE /api/funds/:id while gifts still point '
-       + 'at the fund (ON DELETE SET NULL would re-bucket them into the '
-       + 'assessable default account). It asks whether rows REFERENCE the '
-       + 'fund, not how much was given, and a refunded gift still references '
-       + 'it — its row is the trace of the refund and carries the designation. '
-       + 'Excluding refunds would let a fund with only refunded gifts be '
-       + 'deleted and strip the designation from those traces.',
+       + 'at the fund. It asks whether rows REFERENCE the fund, not how much '
+       + 'was given, and a refunded gift still references it.',
+  },
+  {
+    file: 'server/src/routes/donations.js',
+    match: /SELECT\s+payment_ref,\s*payment_status\s+FROM\s+ochr_donations/i,
+    why: 'Charged-gift delete guard. Reads whether a provider charge exists, '
+       + 'not a contribution total.',
   },
 ]
 
-// A floor, not the count. This exists
-// so a matcher that stops working reports loudly instead of reporting green.
-// Set below the true count on purpose — pinned exactly to it, deleting a
-// single legitimate aggregate fires "the matcher is broken", which trains
-// people to ignore it.
 const MIN_EXPECTED_AGGREGATES = 6
 
 function walk(dir, out = []) {
@@ -134,12 +100,6 @@ function walk(dir, out = []) {
   return out
 }
 
-// Pull SQL out of a source file. Every query in this codebase is a template
-// literal today; the quoted-string matchers are here for the day one is not,
-// and they currently match nothing. That is worth stating rather than
-// implying: an earlier version of this comment claimed they had recovered
-// twenty-two missed aggregates, which was wrong — I had assumed a gap rather
-// than measuring one. The count below is measured.
 function sqlBlocks(src) {
   const out = []
   const push = (body, index) => {
@@ -152,53 +112,81 @@ function sqlBlocks(src) {
   return out
 }
 
+function isExpected(file, body) {
+  return EXPECTED.some(e => e.file === file && e.match.test(body))
+}
+
 const findings = []
 let scanned = 0
 
 for (const root of ROOTS) {
   for (const file of walk(root)) {
     const src = readFileSync(file, 'utf8')
-    if (!src.includes('ochr_donations')) continue
+    if (!src.includes('ochr_donations') && !src.includes('ochr_donation_live')) continue
     for (const { body, line } of sqlBlocks(src)) {
-      if (!/ochr_donations/i.test(body)) continue
+      const touchesDonations = /ochr_donations|ochr_donation_live/i.test(body)
+      if (!touchesDonations) continue
       const isAggregate = AGGREGATE.test(body)
       const isAmountRead = AMOUNT_SELECT.test(body)
       if (!isAggregate && !isAmountRead) continue
       scanned++
-      if (PREDICATE.test(body)) continue
-      // An exception covers one query shape in one file. A NEW aggregate in
-      // the same file is not covered by an old exception.
-      if (EXPECTED.some(e => e.file === file && e.match.test(body))) continue
-      findings.push({ file, line, sql: body.replace(/\s+/g, ' ').trim().slice(0, 110) })
+      if (isExpected(file, body)) continue
+
+      if (PERIOD_ADJUSTMENTS_IN_LIVE.test(body) && /ochr_donation/i.test(body) && isAggregate) {
+        findings.push({
+          file, line,
+          sql: body.replace(/\s+/g, ' ').trim().slice(0, 110),
+          why: 'period adjustments folded into a live donation aggregate — they are the freeze sidecar only',
+        })
+        continue
+      }
+
+      if (OMIT.test(body)) {
+        findings.push({
+          file, line,
+          sql: body.replace(/\s+/g, ' ').trim().slice(0, 110),
+          why: "omits payment_status='refunded' — Option A keeps the gift and subtracts posted refunds",
+        })
+        continue
+      }
+
+      // Live money must use the dual-read view / live_amount, or explicitly
+      // subtract posted refunds. A raw SUM(amount) FROM ochr_donations is
+      // the $100+$30=$70 collapse.
+      const readsGrossFromDonations = /ochr_donations/i.test(body) && !LIVE_NET.test(body)
+      if (readsGrossFromDonations && isAggregate && /\bSUM\s*\(\s*(?:d\.)?amount\s*\)/i.test(body)) {
+        findings.push({
+          file, line,
+          sql: body.replace(/\s+/g, ' ').trim().slice(0, 110),
+          why: 'SUM(amount) over ochr_donations without subtracting posted refunds',
+        })
+      }
     }
   }
 }
 
-// A scan that finds nothing to check is not a passing scan.
 if (scanned < MIN_EXPECTED_AGGREGATES) {
   console.error(`money-invariants: only ${scanned} donation aggregates found, expected at least ${MIN_EXPECTED_AGGREGATES} — the matcher is broken, or aggregates were removed.`)
   process.exit(2)
 }
 
-// The ledger view, checked by name rather than by aggregate shape.
 for (const file of LEDGER_VIEW_SOURCES) {
   let src
   try { src = readFileSync(file, 'utf8') }
-  catch { findings.push({ file, line: 0, sql: 'MISSING — the ledger view source named here does not exist' }); continue }
-  // Test the VIEW BODY, not the file. The first version of this check tested
-  // the whole source and always passed, because 090 mentions the predicate in
-  // its own header comment and again in its self-assertion — so deleting the
-  // predicate from the actual SQL left the scanner green. A check that its
-  // own subject can satisfy by talking about itself is not a check.
+  catch { findings.push({ file, line: 0, sql: 'MISSING — the ledger view source named here does not exist', why: 'view source missing' }); continue }
   const view = src.match(/CREATE\s+OR\s+REPLACE\s+VIEW\s+ochr_parish_ledger\b[\s\S]*?`/i)
   if (!view) {
-    findings.push({ file, line: 0, sql: 'does not define ochr_parish_ledger — has the view moved to a later migration?' })
+    findings.push({ file, line: 0, sql: 'does not define ochr_parish_ledger — has the view moved to a later migration?', why: 'view missing' })
     continue
   }
-  // The donation branch specifically: from ochr_donations to the next UNION.
-  const branch = view[0].match(/FROM\s+ochr_donations\b[\s\S]*?(?=UNION\s+ALL|$)/i)
-  if (!branch || !PREDICATE.test(branch[0])) {
-    findings.push({ file, line: 0, sql: "ochr_parish_ledger's donation branch counts refunded gifts — this feeds the diocesan assessable base" })
+  if (/payment_status\s+IS\s+DISTINCT\s+FROM\s+'refunded'/i.test(view[0])) {
+    findings.push({ file, line: 0, sql: "ochr_parish_ledger still omits stamped refunds", why: 'omit predicate in live ledger' })
+  }
+  if (!/donation_refund/.test(view[0]) || !/ochr_donation_refunds/.test(view[0])) {
+    findings.push({ file, line: 0, sql: "ochr_parish_ledger is missing the posted-refund fact branch", why: 'refund facts absent from ledger' })
+  }
+  if (/ochr_period_adjustments/.test(view[0])) {
+    findings.push({ file, line: 0, sql: 'ochr_parish_ledger folds period adjustments into live net', why: 'sidecar in live books' })
   }
 }
 
@@ -207,15 +195,15 @@ if (process.argv.includes('--list')) {
 }
 
 if (findings.length) {
-  console.error(`\nmoney-invariants: ${findings.length} donation aggregate(s) count refunded gifts.\n`)
+  console.error(`\nmoney-invariants: ${findings.length} Option A violation(s).\n`)
   for (const f of findings) {
     console.error(`  ${f.file}:${f.line}`)
-    console.error(`    ${f.sql}\n`)
+    console.error(`    ${f.sql}`)
+    console.error(`    ${f.why}\n`)
   }
-  console.error(`Add   AND payment_status IS DISTINCT FROM 'refunded'`)
-  console.error(`or, if it genuinely should count refunds, add it to EXPECTED in`)
-  console.error(`scripts/money-invariants.mjs with the reason.\n`)
+  console.error(`Live contribution is gift.amount − Σ(posted refunds).`)
+  console.error(`Use ochr_donation_live.live_amount, or add the query to EXPECTED with the reason.\n`)
   process.exit(1)
 }
 
-console.log(`money-invariants: ${scanned} donation aggregates, all exclude refunded gifts.`)
+console.log(`money-invariants: ${scanned} donation aggregates, Option A (gift − Σ posted refunds).`)

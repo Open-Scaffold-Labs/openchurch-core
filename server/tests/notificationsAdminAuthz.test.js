@@ -16,6 +16,7 @@ import 'dotenv/config'
 import pool from '../src/db.js'
 import { signToken } from '../src/middleware/auth.js'
 import { RUN_ID, bindServer, closeServer, migrateOnce } from './support/harness.js'
+import { clearPlatformIds } from './support/platform.js'
 
 let server
 const createdOrgIds = []
@@ -54,9 +55,12 @@ const drain = t => {
   return t ? r.set(auth(t)) : r
 }
 
-const setSuperAdmin = email => {
-  if (email === null) delete process.env.SUPER_ADMIN_EMAIL
-  else process.env.SUPER_ADMIN_EMAIL = email
+// F-01: founder privilege is by user id only. The email var is set too, to
+// prove it is inert on its own (it is only the notification address).
+const setSuperAdmin = user => {
+  if (user === null) { delete process.env.SUPER_ADMIN_EMAIL; clearPlatformIds(); return }
+  process.env.SUPER_ADMIN_EMAIL = user.email
+  process.env.SUPER_ADMIN_USER_IDS = String(user.id)
 }
 
 let orgA, adminA, staffA, viewerA
@@ -101,7 +105,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   // Restore env exactly as found — never leak SUPER_ADMIN_EMAIL / CRON_SECRET.
-  setSuperAdmin(savedEnv.SUPER_ADMIN_EMAIL ?? null)
+  setSuperAdmin(null)
   if (savedEnv.CRON_SECRET === undefined) delete process.env.CRON_SECRET
   else process.env.CRON_SECRET = savedEnv.CRON_SECRET
 
@@ -122,7 +126,7 @@ it('anonymous callers cannot reach either global POST (401)', async () => {
 // 2
 it('staff and viewer roles cannot reach either global POST (403)', async () => {
   // Even with a configured super-admin, the role gate stops non-admins first.
-  setSuperAdmin(adminA.email)
+  setSuperAdmin(adminA)
   for (const tok of [staffA.token, viewerA.token]) {
     expect((await enqueue(tok)).status).toBe(403)
     expect((await drain(tok)).status).toBe(403)
@@ -132,26 +136,26 @@ it('staff and viewer roles cannot reach either global POST (403)', async () => {
 // 3
 it('an ordinary parish admin cannot enqueue birthdays globally (404)', async () => {
   // A real super-admin exists (orgB's admin) — orgA's admin still is not it.
-  setSuperAdmin(adminB.email)
+  setSuperAdmin(adminB)
   expect((await enqueue(adminA.token)).status).toBe(404)
 })
 
 // 4
 it('an ordinary parish admin cannot drain the global queue (404)', async () => {
-  setSuperAdmin(adminB.email)
+  setSuperAdmin(adminB)
   expect((await drain(adminA.token)).status).toBe(404)
 })
 
 // 5
 it('a diocesan admin has no additional operator authority (404)', async () => {
-  setSuperAdmin(adminB.email)
+  setSuperAdmin(adminB)
   expect((await enqueue(adminD.token)).status).toBe(404)
   expect((await drain(adminD.token)).status).toBe(404)
 })
 
 // 6
 it('a correctly configured super-admin can invoke both actions (200)', async () => {
-  setSuperAdmin(adminA.email)
+  setSuperAdmin(adminA)
   expect((await enqueue(adminA.token)).status).toBe(200)
   expect((await drain(adminA.token)).status).toBe(200)
 })
@@ -202,7 +206,7 @@ it('CRON_SECRET-protected birthday enqueue and drain paths still function (200)'
 
 // 10
 it('a denied admin drain leaves another organization\'s pending notification untouched', async () => {
-  setSuperAdmin(adminB.email) // orgA's admin is denied
+  setSuperAdmin(adminB) // orgA's admin is denied
   const recipient = `untouched_${RUN_ID}@example.com`
   const pendingId = await insertPending(orgB, recipient)
 
@@ -216,7 +220,7 @@ it('a denied admin drain leaves another organization\'s pending notification unt
 
 // 11
 it('a denied admin enqueue creates no notification rows for another organization', async () => {
-  setSuperAdmin(adminB.email) // orgA's admin is denied
+  setSuperAdmin(adminB) // orgA's admin is denied
   const countB = async () => {
     const { rows } = await pool.query(
       `SELECT count(*)::int AS n FROM ochr_scheduled_notifications

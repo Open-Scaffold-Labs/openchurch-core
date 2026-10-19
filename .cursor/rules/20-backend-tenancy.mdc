@@ -18,9 +18,12 @@ also apply; this rule adds the request-time discipline.
 - **Keep writes closed and accountable.** Preserve closed update allowlists (never spread
   arbitrary request fields into a write), authorization gates, last-admin protection, and audit
   logging on every mutation. Never `catch {}` a user-facing failure.
-- **Money is exact.** Handle amounts in integer minor units, keep refunds excluded from
-  aggregates (see `scripts/money-invariants.mjs`), and keep multi-step writes inside one
-  transaction with clear boundaries.
+- **Money is exact.** Handle amounts in integer minor units. A refund is a linked
+  financial fact: live contribution is `gift.amount − Σ(posted refunds)`, never a
+  rewrite of `gift.amount`, never an omit-by-`payment_status='refunded'`, never a
+  silent clamp, and never by folding `ochr_period_adjustments` into live net (see
+  `scripts/money-invariants.mjs`). Keep multi-step writes inside one transaction
+  with clear boundaries.
 - **Sacramental writes stay ceremonial.** Nothing writes `ochr_sacramental_records` except a
   human commit through the drafts sandbox. Never add a bypass.
 - **Exposed surfaces need review.** Public, kiosk, token, webhook, cron, import, and export

@@ -294,8 +294,10 @@ async function seedParishLife(anne) {
     mass_date: isoOffset(sun), status: 'scheduled', stipend: 10,
     note: 'First anniversary of death. Announce at the 9:00 AM Mass — Carmen and the family will be in the front pews.',
   })
+  // INT-01: fulfill is a ceremony that needs the linked Mass. This seed
+  // does not invent as-of stamps from today's calendar.
   await intention({ intention: '† Alma Reyes', requested_by: 'The Reyes family',
-    mass_date: isoOffset(0), status: 'fulfilled', stipend: 10 })
+    mass_date: isoOffset(0), status: 'scheduled', stipend: 10 })
   await intention({ intention: '† Souls in Purgatory', requested_by: 'The Rosary Guild',
     mass_date: isoOffset(1), status: 'scheduled' })
   await intention({ intention: 'Healing of Robert Keller',

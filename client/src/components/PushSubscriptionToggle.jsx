@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { BellRing, Loader2 } from 'lucide-react'
 import { apiUrl } from '../api'
+import { useLocale } from '../i18n'
 import { useToast } from './ToastProvider'
 
 // Web Push device-subscription toggle (Sprint PWA / PWA.4b).
@@ -15,16 +16,31 @@ import { useToast } from './ToastProvider'
 //   1. Not supported           — browser lacks serviceWorker / PushManager.
 //                                Render an info card explaining iOS needs
 //                                home-screen install first.
-//   2. No VAPID configured     — server returned publicKey: null. Toggle
-//                                disabled with a soft "push isn't set up
-//                                on this server yet" hint. (Lets the
-//                                feature ship before keys are generated.)
-//   3. Permission denied       — explicit deny from the OS. Toggle
+//   2. Key unread              — the vapid-key read was refused, threw,
+//                                or came back unreadable, including an
+//                                OK body with no own publicKey. Say so
+//                                with the shared load-failure copy. Do
+//                                not claim the server has no VAPID keys,
+//                                and do not enable the subscribe toggle.
+//   3. No VAPID configured     — an OK response whose own publicKey is
+//                                null or empty. Toggle disabled with a
+//                                soft "push isn't set up on this server
+//                                yet" hint. (Lets the feature ship before
+//                                keys are generated.) The server sends
+//                                null from getVapidPublicKey() when the
+//                                env is unset.
+//   4. Device unread           — the key is configured, but this
+//                                device's subscription has never been
+//                                read. Say that it is unknown, not off.
+//                                Do not claim the server was unreachable.
+//   5. Permission denied       — explicit deny from the OS. Toggle
 //                                disabled with a "you blocked it; reset
 //                                in browser settings" line.
-//   4. Configured + permission default / granted — interactive toggle.
-//                                Subscribing requests permission via
-//                                the browser, registers with the push
+//   6. Configured + permission default / granted — interactive toggle.
+//                                on/off only after a successful device
+//                                read. A later failed read keeps that
+//                                answer. Subscribing requests permission
+//                                via the browser, registers with the push
 //                                service, and POSTs to /api/push/subscribe.
 //
 // Permission model: we never auto-prompt. The user explicitly opts in
@@ -49,44 +65,117 @@ function browserSupportsPush() {
       && 'Notification' in window
 }
 
-export default function PushSubscriptionToggle() {
+// An OK body is a fact about the server. Anything else is "we could
+// not read it", which must not be stored as an empty key — that is
+// the shape the unset card already uses.
+function classifyVapidBody(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return { status: 'unread' }
+  // `key == null` is true for a missing property too. An empty object
+  // is then the same screen as a server that sent publicKey: null.
+  if (!Object.hasOwn(body, 'publicKey')) return { status: 'unread' }
+  const key = body.publicKey
+  if (typeof key === 'string') {
+    if (key.trim() === '') return { status: 'unset' }
+    return { status: 'configured', publicKey: key }
+  }
+  if (key === null) return { status: 'unset' }
+  return { status: 'unread' }
+}
+
+// probeNonce asks the same card to read again. Preferences does not
+// pass it. Remounting would forget a subscription already read.
+export default function PushSubscriptionToggle({ probeNonce = 0 }) {
+  const { t } = useLocale()
   const toast = useToast()
   const [loading, setLoading]       = useState(true)
   const [busy, setBusy]             = useState(false)
-  const [subscribed, setSubscribed] = useState(false)
+  // null: this device has never been read. false is a successful read
+  // of "no subscription", which is a different fact.
+  const [subscribed, setSubscribed] = useState(null)
+  const subscribedRef = useRef(null)
+  subscribedRef.current = subscribed
   const [publicKey, setPublicKey]   = useState(null)
+  const [probe, setProbe]           = useState('pending')
+  const [attempt, setAttempt]       = useState(0)
   const [permission, setPermission] = useState(
     typeof Notification !== 'undefined' ? Notification.permission : 'default'
   )
 
   const supported = browserSupportsPush()
 
-  // Initial probe: fetch vapid-key + ask the current SW for an
-  // existing subscription. Don't request permission — we only check.
+  // Probe: read the vapid key, then (only when it is a real key) ask
+  // the current service worker for an existing subscription. Don't
+  // request permission — we only check. A refused or unreadable key
+  // stays unread; it is not rewritten into the unset shape. A failed
+  // device lookup does not rewrite a known subscription into "off",
+  // and it does not invent "off" when nothing has been read yet.
   useEffect(() => {
     let cancelled = false
-    async function probe() {
+    async function probeKey() {
       if (!supported) { setLoading(false); return }
+      // A refresh of a device we already read leaves that answer on
+      // screen. The first read is the one that has nothing to show.
+      if (subscribedRef.current === null) setLoading(true)
       try {
         const keyRes = await fetch(apiUrl('/api/push/vapid-key'))
-        const keyData = keyRes.ok ? await keyRes.json() : { publicKey: null }
         if (cancelled) return
-        setPublicKey(keyData.publicKey || null)
-
-        const reg = await navigator.serviceWorker.ready
-        const existing = await reg.pushManager.getSubscription()
-        if (!cancelled) setSubscribed(Boolean(existing))
+        if (!keyRes.ok) {
+          setPublicKey(null)
+          setProbe('unread')
+          return
+        }
+        let keyData
+        try {
+          keyData = await keyRes.json()
+        } catch {
+          if (cancelled) return
+          setPublicKey(null)
+          setProbe('unread')
+          return
+        }
+        if (cancelled) return
+        const outcome = classifyVapidBody(keyData)
+        if (outcome.status === 'configured') {
+          setPublicKey(outcome.publicKey)
+          try {
+            const reg = await navigator.serviceWorker.ready
+            const existing = await reg.pushManager.getSubscription()
+            if (cancelled) return
+            setSubscribed(Boolean(existing))
+            setProbe('configured')
+          } catch {
+            if (cancelled) return
+            // Unknown stays unknown. A subscription we already read
+            // stays that subscription — this failure is not a new fact.
+            if (subscribedRef.current === null) setProbe('device-unread')
+            else setProbe('configured')
+          }
+        } else if (outcome.status === 'unset') {
+          setPublicKey(null)
+          setProbe('unset')
+        } else {
+          setPublicKey(null)
+          setProbe('unread')
+        }
       } catch {
-        // Probe failures shouldn't surface a toast — the worst case
-        // is the toggle renders as "off" and the user can flip it on,
-        // which will surface a real error if there is one.
+        // The read did not finish. Say the card could not be read.
+        // Do not leave it looking like push was never configured.
+        if (!cancelled) {
+          setPublicKey(null)
+          setProbe('unread')
+        }
       } finally {
         if (!cancelled) setLoading(false)
       }
     }
-    probe()
+    probeKey()
     return () => { cancelled = true }
-  }, [supported])
+  }, [supported, attempt, probeNonce])
+
+  function retryProbe() {
+    setLoading(true)
+    setAttempt(n => n + 1)
+  }
 
   async function subscribe() {
     if (!publicKey) return
@@ -187,8 +276,34 @@ export default function PushSubscriptionToggle() {
     )
   }
 
-  // 2. No VAPID configured server-side. Disable the toggle with a soft hint.
-  if (!publicKey) {
+  // 2. The key could not be read, or this device has never been read.
+  //    No subscribe toggle — an off switch would pretend we know.
+  //    Unset is excluded: a null subscribed there is "we have not
+  //    asked the device", and the unset card is the server's answer.
+  //    A device miss is not "the server could not be reached": the key
+  //    read already succeeded.
+  const deviceUnread = probe === 'device-unread' || (probe === 'configured' && subscribed === null)
+  if (probe !== 'unset' && (probe !== 'configured' || subscribed === null)) {
+    return (
+      <div className={containerCls}>
+        <Header />
+        <div className="px-5 py-4" role="status">
+          <p className="text-sm font-semibold text-ink-900 dark:text-parchment-50">{deviceUnread ? t('push.deviceUnknownTitle') : t('load.failedTitle')}</p>
+          <p className="text-xs text-ink-500 dark:text-parchment-300/70 mt-0.5">{deviceUnread ? t('push.deviceUnknownBody') : t('load.failedBody')}</p>
+          <button
+            type="button"
+            onClick={retryProbe}
+            className="tap mt-3 inline-flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-lg border border-amber-300 dark:border-amber-700/50 text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/30 transition-colors"
+          >
+            {t('load.retry')}
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  // 3. No VAPID configured server-side. Disable the toggle with a soft hint.
+  if (probe === 'unset' || !publicKey) {
     return (
       <div className={containerCls}>
         <Header />
@@ -202,7 +317,7 @@ export default function PushSubscriptionToggle() {
     )
   }
 
-  // 3. Permission explicitly denied by the OS.
+  // 4. Permission explicitly denied by the OS.
   if (permission === 'denied') {
     return (
       <div className={containerCls}>
@@ -217,7 +332,7 @@ export default function PushSubscriptionToggle() {
     )
   }
 
-  // 4. Interactive — default / granted.
+  // 5. Interactive — default / granted.
   return (
     <div className={containerCls}>
       <Header />

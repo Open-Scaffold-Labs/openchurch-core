@@ -6,6 +6,7 @@
 //
 // Runs across all orgs (cron context).
 
+import { isHoldRefusal } from '../auth/organizationHold.js'
 import pool from '../db.js'
 import { notify } from '../notifications/transport.js'
 import { monitor } from '../monitoring/index.js'
@@ -28,6 +29,7 @@ export async function nudgePendingSwaps() {
        JOIN ochr_clients rc        ON rc.id = r.requester_client_id
        JOIN ochr_clients tc        ON tc.id = r.target_client_id
       WHERE r.status = 'pending'
+        AND EXISTS (SELECT 1 FROM ochr_organizations o WHERE o.id = r.organization_id AND o.held_at IS NULL)
         AND r.reminded_at IS NULL
         AND r.created_at < NOW() - ($1 || ' days')::interval
       LIMIT 500`,
@@ -36,10 +38,17 @@ export async function nudgePendingSwaps() {
 
   for (const r of rows) {
     // Stamp first so a notify failure doesn't cause a re-nudge loop.
-    await pool.query('UPDATE ochr_swap_requests SET reminded_at = NOW() WHERE id = $1', [r.id])
+    try {
+      await pool.query('UPDATE ochr_swap_requests SET reminded_at = NOW() WHERE id = $1', [r.id])
+    } catch (err) {
+      // The organization was held after the select: its writes are refused
+      // (migration 114). Skip it; the rest of the batch is other parishes.
+      if (isHoldRefusal(err)) continue
+      throw err
+    }
     if (!r.target_email) continue
     try {
-      await notify({
+      const delivery = await notify({
         organizationId:    r.organization_id,
         recipient:         r.target_email,
         notification_type: 'swap_pending_reminder',
@@ -51,6 +60,12 @@ export async function nudgePendingSwaps() {
           event_time:     r.event_time,
         },
       })
+      if (delivery?.reason === 'organization_held') {
+        await pool.query('UPDATE ochr_swap_requests SET reminded_at = NULL WHERE id = $1', [r.id])
+          .catch(err => { if (!isHoldRefusal(err)) throw err })
+        continue
+      }
+      if (delivery?.reason === 'recipient_inactive') continue // R286-3: not a send
       nudged++
     } catch (err) {
       monitor.error('swap.nudge', err, { swapRequestId: r.id })

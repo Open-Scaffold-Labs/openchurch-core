@@ -6,6 +6,9 @@
 // operator-poked; once Vercel cron lands, the cron config flips it
 // from manual to scheduled (1 line in vercel.json).
 
+import { requireIntParam } from '../utils/params.js'
+import { revokeHeldAccess } from '../auth/organizationHold.js'
+import { applyStoredEvent } from '../billing/webhookReceipts.js'
 import { Router } from 'express'
 import bcrypt from 'bcryptjs'
 import pool from '../db.js'
@@ -33,8 +36,9 @@ router.post('/retention-prune', async (req, res) => {
 // relationship with an organisation rather than a customer who arrives with
 // a credit card, and an open door let a stranger stamp a diocese and start
 // inviting parishes. This is the door instead: mounted behind requireAuth +
-// requireSuperAdmin in app.js, so the caller must hold a signed JWT whose
-// email equals SUPER_ADMIN_EMAIL. No env var configured means nobody
+// requireSuperAdmin in app.js, so the caller must be the founder: a live
+// login whose user id is listed in SUPER_ADMIN_USER_IDS (F-01,
+// middleware/superAdmin.js). An email grants nothing. Nothing configured means nobody
 // qualifies and the whole surface 404s — fail-closed, and the 404 keeps its
 // existence unadvertised.
 //
@@ -50,6 +54,75 @@ router.post('/retention-prune', async (req, res) => {
 const ORG_TYPES = new Set(['parish', 'diocese'])
 const TRADITIONS = new Set(['catholic', 'episcopal', 'lutheran', 'anglican', 'general'])
 const MIN_PASSWORD = 8
+
+// POST /api/admin/maintenance/organizations/:id/hold-revocation (Stage 6)
+// Re-runs a held organization's access cleanup (logins off, reset/invite and
+// push capabilities dropped, calendar/swap links cleared). Needed only if the
+// hold's own cleanup reported revocation_complete: false — every user of a
+// held organization is refused at sign-in, so nobody inside it can repeat
+// the hold. Refuses an organization that is not held. Idempotent.
+router.post('/organizations/:id/hold-revocation', async (req, res) => {
+  const id = requireIntParam(req, res); if (id === null) return
+  try {
+    const { rows: [org] } = await pool.query('SELECT held_at FROM ochr_organizations WHERE id = $1', [id])
+    if (!org) return res.status(404).json({ error: 'Organization not found' })
+    if (!org.held_at) return res.status(409).json({ error: 'Organization is not on hold. Nothing was changed.' })
+    await revokeHeldAccess(id)
+    // The hold's own audit row said the cleanup was incomplete; record that
+    // it has now completed, as a new row (history is not rewritten). The
+    // operator belongs to no parish, so no actor id is attached here.
+    await pool.query(
+      `INSERT INTO ochr_audit_log (organization_id, action, entity_type, entity_id, summary, metadata, request_method, request_path, status_code)
+       VALUES ($1, 'hold', 'organization', $2, $3, $4::jsonb, $5, $6, 200)`,
+      [id, String(id), `Placed organization on hold #${id} (already on hold) (access cleanup completed by operator)`,
+       JSON.stringify({ already: true, cleanup_complete: true, via: 'operator' }), req.method, req.originalUrl]
+    ).catch(err => monitor.error('maintenance.holdRevocation.audit', err, { orgId: id }))
+    res.json({ held: true, revocation_complete: true })
+  } catch (err) {
+    monitor.error('maintenance.holdRevocation', err, { orgId: id })
+    res.status(500).json({ error: 'Cleanup did not complete. Access stays refused while the organization is held.' })
+  }
+})
+
+// Billing/giving webhook receipts (Stage 6). Every verified provider event
+// is stored before it is applied (billing/webhookReceipts.js). These two
+// routes are the reconciliation path for the ones that were not applied:
+// 'held' (the organization is on hold), 'failed', or 'received' (stored, not
+// yet attempted). Listing never returns the payload. Re-processing applies
+// the stored event exactly as a delivery would; it contacts no provider and
+// moves no money. A held organization stays held, so its events stay 'held'.
+const RECEIPT_STATUSES = new Set(['received', 'applying', 'applied', 'deferred', 'held', 'failed'])
+router.get('/billing-events', async (req, res) => {
+  const status = typeof req.query.status === 'string' ? req.query.status : null
+  if (status !== null && !RECEIPT_STATUSES.has(status)) return res.status(400).json({ error: 'Unknown status' })
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, provider, event_id, event_type, organization_id, status, attempts, last_error,
+              received_at, last_attempt_at, applied_at
+         FROM ochr_billing_event_receipts
+        WHERE ${status ? 'status = $1' : "status <> 'applied'"}
+        ORDER BY received_at ASC, id ASC
+        LIMIT 500`,
+      status ? [status] : [])
+    res.json({ events: rows })
+  } catch (err) {
+    monitor.error('maintenance.billingEvents', err)
+    res.status(500).json({ error: 'Failed to list billing events' })
+  }
+})
+
+router.post('/billing-events/:id/reprocess', async (req, res) => {
+  const id = requireIntParam(req, res); if (id === null) return
+  try {
+    const outcome = await applyStoredEvent(id)
+    if (outcome.status === 'missing') return res.status(404).json({ error: 'Billing event not found' })
+    if (outcome.inProgress) return res.status(409).json({ id, status: outcome.status, error: 'Another worker is applying this event now.' })
+    res.json({ id, status: outcome.status, ...(outcome.duplicate ? { already_applied: true } : {}), ...(outcome.error ? { error: outcome.error } : {}) })
+  } catch (err) {
+    monitor.error('maintenance.billingEvents.reprocess', err, { receiptId: id })
+    res.status(500).json({ error: 'Re-processing did not complete; the stored event is unchanged.' })
+  }
+})
 
 router.post('/organizations', async (req, res) => {
   const { organizationName, name, email, password } = req.body ?? {}

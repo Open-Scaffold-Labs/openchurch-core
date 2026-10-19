@@ -38,7 +38,6 @@ export default function AcceptInvite({ onAccepted, onArrive }) {
       })
       const d = await res.json().catch(() => ({}))
       if (!res.ok) { setError(d.error || 'Could not accept that invitation'); return }
-      localStorage.setItem('ochr_token', d.token)
       onAccepted?.(d.user)
     } catch {
       setError('Could not reach the server. Try again in a moment.')

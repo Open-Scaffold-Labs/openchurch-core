@@ -32,7 +32,7 @@ async function ensureOperator(server) {
   if (res.status !== 201) {
     throw new Error(`provision: could not create the operator account (${res.status}): ${JSON.stringify(res.body)}`)
   }
-  operator = { email, token: res.body.token, orgId: res.body.user.organization.id }
+  operator = { email, id: res.body.user.id, token: res.body.token, orgId: res.body.user.organization.id }
   return operator
 }
 
@@ -43,8 +43,9 @@ export async function createOrg(server, payload, ip = '10.251.0.1') {
   }
 
   const op = await ensureOperator(server)
-  const previous = process.env.SUPER_ADMIN_EMAIL
-  process.env.SUPER_ADMIN_EMAIL = op.email
+  // F-01: founder privilege is by user id only. Restored afterwards.
+  const previous = process.env.SUPER_ADMIN_USER_IDS
+  process.env.SUPER_ADMIN_USER_IDS = String(op.id)
   let made
   try {
     made = await request(server).post('/api/admin/maintenance/organizations')
@@ -53,8 +54,8 @@ export async function createOrg(server, payload, ip = '10.251.0.1') {
   } finally {
     // Restored, not cleared: smoke.test.js sets this var around its own
     // super-admin tests and must not find it changed underneath them.
-    if (previous === undefined) delete process.env.SUPER_ADMIN_EMAIL
-    else process.env.SUPER_ADMIN_EMAIL = previous
+    if (previous === undefined) delete process.env.SUPER_ADMIN_USER_IDS
+    else process.env.SUPER_ADMIN_USER_IDS = previous
   }
   if (made.status !== 201) return made
 

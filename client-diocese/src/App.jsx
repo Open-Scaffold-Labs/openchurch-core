@@ -1,7 +1,9 @@
-import { useEffect, useState, createContext, useContext, useCallback } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { BrowserRouter, Routes, Route, NavLink, Navigate } from 'react-router-dom'
-import { Landmark, LayoutDashboard, Church, Inbox, Scale, LogOut, Loader2, AlertTriangle, HeartHandshake, ListChecks, Users } from 'lucide-react'
+import { Landmark, LayoutDashboard, Church, Inbox, Scale, LogOut, Loader2, AlertTriangle, HeartHandshake, ListChecks, Users, User } from 'lucide-react'
 import { apiUrl } from './api'
+import { AuthCtx, useAuth } from './authContext'
+import { STRINGS } from './i18n/strings'
 import Dashboard from './pages/Dashboard'
 import Parishes from './pages/Parishes'
 import Submissions from './pages/Submissions'
@@ -13,6 +15,7 @@ import CareBrief from './pages/CareBrief'
 import FollowUps from './pages/FollowUps'
 import ReportReview from './pages/ReportReview'
 import Team from './pages/Team'
+import Account from './pages/Account'
 import AcceptInvite from './pages/AcceptInvite'
 import FirstUse from './pages/FirstUse'
 
@@ -20,10 +23,27 @@ import FirstUse from './pages/FirstUse'
 // Parchment & Brass — tuned for a finance back office: denser tables,
 // more whitespace, nothing that blinks.
 
-const AuthCtx = createContext(null)
-export const useAuth = () => useContext(AuthCtx)
+export { useAuth }
 
-function Login({ onLogin, onWantSignup }) {
+// Device override only. Do not import parish useLocale / LocaleProvider.
+function t(key) {
+  let locale = 'en'
+  try {
+    const stored = localStorage.getItem('ochr_locale')
+    if (stored && STRINGS[stored]) locale = stored
+  } catch { /* private mode — stay on English */ }
+  return STRINGS[locale]?.[key] ?? STRINGS.en[key] ?? key
+}
+
+// Server refusals that arrive as English sentences (only after the
+// password matched), mapped to this app's locale keys.
+const SIGN_IN_SENTENCES = {
+  'This login is deactivated. An admin can turn it back on.': 'auth.loginOff',
+  'This login is closed. It cannot be turned back on.': 'auth.loginClosed',
+  'This organization is on hold. Access is stopped; parish history remains.': 'auth.organizationHeld',
+}
+
+export function Login({ onLogin, onWantSignup }) {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
@@ -39,10 +59,13 @@ function Login({ onLogin, onWantSignup }) {
         body: JSON.stringify({ email, password }),
       })
       const d = await res.json().catch(() => ({}))
-      if (!res.ok) throw new Error(d.error || 'Sign-in failed')
-      localStorage.setItem('ochr_token', d.token)
+      if (!res.ok) throw new Error(d.error || t('auth.signInFailed'))
       onLogin(d.user)
-    } catch (err) { setError(err.message) } finally { setBusy(false) }
+    } catch (err) {
+      // Server refusals arrive as English sentences; show them in the
+      // office's language.
+      setError(SIGN_IN_SENTENCES[err.message] ? t(SIGN_IN_SENTENCES[err.message]) : err.message)
+    } finally { setBusy(false) }
   }
 
   const inputCls = 'w-full px-3 py-2.5 text-sm rounded-lg border border-parchment-300 bg-parchment-50 text-ink-900 focus:outline-none focus:ring-2 focus:ring-brass-400'
@@ -53,30 +76,30 @@ function Login({ onLogin, onWantSignup }) {
           <Landmark size={22} className="text-church-600" />
           <h1 className="font-serif text-3xl font-bold text-church-600">Open<span className="text-brass-500">Diocese</span></h1>
         </div>
-        <p className="text-center text-sm text-ink-500 mb-8">The chancery, kept well.</p>
+        <p className="text-center text-sm text-ink-500 mb-8">{t('auth.tagline')}</p>
         <form onSubmit={submit} className="bg-parchment-50 rounded-2xl border border-parchment-300/70 shadow-sm p-6 space-y-4">
           <div>
-            <label className="block text-xs font-semibold text-ink-500 mb-1.5">Email</label>
-            <input type="email" required value={email} onChange={e => setEmail(e.target.value)} className={inputCls} />
+            <label htmlFor="dio-login-email" className="block text-xs font-semibold text-ink-500 mb-1.5">{t('auth.email')}</label>
+            <input id="dio-login-email" type="email" required value={email} onChange={e => setEmail(e.target.value)} className={inputCls} />
           </div>
           <div>
-            <label className="block text-xs font-semibold text-ink-500 mb-1.5">Password</label>
-            <input type="password" required value={password} onChange={e => setPassword(e.target.value)} className={inputCls} />
+            <label htmlFor="dio-login-pw" className="block text-xs font-semibold text-ink-500 mb-1.5">{t('auth.password')}</label>
+            <input id="dio-login-pw" type="password" required value={password} onChange={e => setPassword(e.target.value)} className={inputCls} />
           </div>
           {error && <p className="text-sm text-rose-700">{error}</p>}
           <button type="submit" disabled={busy}
             className="w-full py-2.5 rounded-lg bg-church-600 text-parchment-50 text-sm font-semibold hover:bg-church-700 disabled:opacity-60">
-            {busy ? 'Signing in…' : 'Sign in'}
+            {busy ? t('auth.signingIn') : t('auth.signIn')}
           </button>
           <p className="text-[11px] text-ink-400 text-center">
-            Sign in with a diocese account. Parish accounts use the parish app.
+            {t('auth.loginBlurb')}
           </p>
         </form>
         <p className="mt-5 text-center text-sm text-ink-500">
-          No chancery account yet?{' '}
+          {t('auth.noAccount')}{' '}
           <button type="button" onClick={onWantSignup}
             className="font-semibold text-church-600 underline underline-offset-2 hover:text-church-700">
-            Set one up
+            {t('auth.setUp')}
           </button>
         </p>
       </div>
@@ -91,7 +114,7 @@ function Login({ onLogin, onWantSignup }) {
 // knew the API shape doing it by hand. That is a person between the
 // chancery and the product, which is exactly what this app exists to
 // remove.
-function Signup({ onLogin, onCancel }) {
+export function Signup({ onLogin, onCancel }) {
   const [form, setForm] = useState({ organizationName: '', name: '', email: '', password: '' })
   const [confirm, setConfirm] = useState('')
   const [busy, setBusy] = useState(false)
@@ -115,8 +138,7 @@ function Signup({ onLogin, onCancel }) {
         body: JSON.stringify({ ...form, organizationType: 'diocese' }),
       })
       const d = await res.json().catch(() => ({}))
-      if (!res.ok) throw new Error(d.error || 'Could not create the account')
-      localStorage.setItem('ochr_token', d.token)
+      if (!res.ok) throw new Error(d.error || t('auth.signupFailed'))
       onLogin(d.user)
     } catch (err) { setError(err.message) } finally { setBusy(false) }
   }
@@ -130,48 +152,47 @@ function Signup({ onLogin, onCancel }) {
           <Landmark size={22} className="text-church-600" />
           <h1 className="font-serif text-3xl font-bold text-church-600">Open<span className="text-brass-500">Diocese</span></h1>
         </div>
-        <p className="text-center text-sm text-ink-500 mb-8">Set up the chancery.</p>
+        <p className="text-center text-sm text-ink-500 mb-8">{t('auth.signupTagline')}</p>
         <form onSubmit={submit} className="bg-parchment-50 rounded-2xl border border-parchment-300/70 shadow-sm p-6 space-y-4">
           <div>
-            <label htmlFor="dio-name" className={labelCls}>Diocese</label>
+            <label htmlFor="dio-name" className={labelCls}>{t('auth.diocese')}</label>
             <input id="dio-name" required value={form.organizationName} onChange={set('organizationName')}
-              placeholder="Diocese of Oakland" className={inputCls} />
+              placeholder={t('auth.diocesePlaceholder')} className={inputCls} />
           </div>
           <div>
-            <label htmlFor="dio-you" className={labelCls}>Your name</label>
+            <label htmlFor="dio-you" className={labelCls}>{t('auth.yourName')}</label>
             <input id="dio-you" required value={form.name} onChange={set('name')} className={inputCls} />
           </div>
           <div>
-            <label htmlFor="dio-email" className={labelCls}>Email</label>
+            <label htmlFor="dio-email" className={labelCls}>{t('auth.email')}</label>
             <input id="dio-email" type="email" required value={form.email} onChange={set('email')} className={inputCls} />
           </div>
           <div>
-            <label htmlFor="dio-pw" className={labelCls}>Password</label>
+            <label htmlFor="dio-pw" className={labelCls}>{t('auth.password')}</label>
             <input id="dio-pw" type="password" required value={form.password} onChange={set('password')} className={inputCls} />
             <p className={`mt-1 text-[11px] ${tooShort ? 'text-rose-700' : 'text-ink-400'}`}>
-              At least 8 characters.
+              {t('auth.passwordHint')}
             </p>
           </div>
           <div>
-            <label htmlFor="dio-pw2" className={labelCls}>Confirm password</label>
+            <label htmlFor="dio-pw2" className={labelCls}>{t('auth.confirmPassword')}</label>
             <input id="dio-pw2" type="password" required value={confirm} onChange={e => setConfirm(e.target.value)} className={inputCls} />
-            {mismatch && <p className="mt-1 text-[11px] text-rose-700">These do not match.</p>}
+            {mismatch && <p className="mt-1 text-[11px] text-rose-700">{t('auth.mismatch')}</p>}
           </div>
           {error && <p className="text-sm text-rose-700">{error}</p>}
           <button type="submit" disabled={busy || !ready}
             className="w-full py-2.5 rounded-lg bg-church-600 text-parchment-50 text-sm font-semibold hover:bg-church-700 disabled:opacity-60">
-            {busy ? 'Setting up…' : 'Create the chancery account'}
+            {busy ? t('auth.settingUp') : t('auth.createAccount')}
           </button>
           <p className="text-[11px] text-ink-400 text-center">
-            This creates a <strong>diocese</strong> account. Parishes sign up in the parish app,
-            then accept your invitation — you never create accounts on their behalf.
+            {t('auth.signupBlurb')}
           </p>
         </form>
         <p className="mt-5 text-center text-sm text-ink-500">
-          Already set up?{' '}
+          {t('auth.alreadySetUp')}{' '}
           <button type="button" onClick={onCancel}
             className="font-semibold text-church-600 underline underline-offset-2 hover:text-church-700">
-            Sign in
+            {t('auth.signIn')}
           </button>
         </p>
       </div>
@@ -179,17 +200,16 @@ function Signup({ onLogin, onCancel }) {
   )
 }
 
-function NotADiocese({ onLogout }) {
+export function NotADiocese({ onLogout }) {
   return (
     <div className="min-h-screen bg-parchment-100 flex items-center justify-center p-6">
       <div className="max-w-md text-center space-y-4">
         <AlertTriangle size={28} className="mx-auto text-brass-500" />
-        <h1 className="font-serif text-2xl font-bold text-church-600">This is the chancery door</h1>
+        <h1 className="font-serif text-2xl font-bold text-church-600">{t('auth.wrongDoorTitle')}</h1>
         <p className="text-sm text-ink-600">
-          Your account belongs to a parish, so OpenDiocese has nothing to show it.
-          The parish app is where your work lives — including the Diocese panel in Settings.
+          {t('auth.wrongDoorBody')}
         </p>
-        <button onClick={onLogout} className="text-sm font-semibold text-church-600 hover:underline">Sign out</button>
+        <button onClick={onLogout} className="text-sm font-semibold text-church-600 hover:underline">{t('auth.signOut')}</button>
       </div>
     </div>
   )
@@ -254,10 +274,19 @@ function Shell({ children }) {
             </NavLink>
           ))}
         </nav>
-        <button onClick={logout}
-          className="m-3 flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-medium text-ink-500 hover:bg-parchment-200">
-          <LogOut size={15} /> Sign out
-        </button>
+        <div className="m-3 space-y-1">
+          <NavLink to="/account"
+            className={({ isActive }) =>
+              `flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+                isActive ? 'bg-church-600 text-parchment-50' : 'text-ink-500 hover:bg-parchment-200'
+              }`}>
+            <User size={15} aria-hidden="true" /> {t('account.link')}
+          </NavLink>
+          <button onClick={logout}
+            className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-medium text-ink-500 hover:bg-parchment-200">
+            <LogOut size={15} /> {t('auth.signOut')}
+          </button>
+        </div>
       </aside>
       {/* overflow-y-auto must not survive printing: a scroll container clips
           at the viewport and silently drops the tail of a long brief. */}
@@ -279,20 +308,20 @@ export default function App() {
   const [booting, setBooting] = useState(true)
 
   const logout = useCallback(() => {
-    localStorage.removeItem('ochr_token')
+    fetch(apiUrl('/api/auth/logout'), { method: 'POST' }).catch(() => {})
+    try { localStorage.removeItem('ochr_token') } catch { /* leftover JWT purge */ }
     setUser(null); setOrgType(null)
   }, [])
 
-  // Rehydrate + verify this token opens the chancery door: /me for the
-  // user, then a diocese-gated read — 403 means a parish token.
+  // Rehydrate + verify the cookie session opens the chancery door: /me
+  // for the user, then a diocese-gated read — 403 means a parish session.
   const boot = useCallback(async (knownUser) => {
     setBooting(true)
     try {
       let u = knownUser
       if (!u) {
-        if (!localStorage.getItem('ochr_token')) { setBooting(false); return }
         const me = await fetch(apiUrl('/api/auth/me'))
-        if (!me.ok) { logout(); setBooting(false); return }
+        if (!me.ok) { setBooting(false); return }
         u = (await me.json()).user
       }
       const gate = await fetch(apiUrl('/api/diocese/parishes'))
@@ -329,7 +358,7 @@ export default function App() {
     return (
       <AcceptInvite
         onAccepted={(u) => { window.history.replaceState({}, '', '/'); boot(u) }}
-        onArrive={() => { if (user) { localStorage.removeItem('ochr_token'); setUser(null) } }}
+        onArrive={() => { if (user) { fetch(apiUrl('/api/auth/logout'), { method: 'POST' }).catch(() => {}); setUser(null) } }}
       />
     )
   }
@@ -355,6 +384,7 @@ export default function App() {
             <Route path="/care/:parishId/brief" element={<CareBrief />} />
             <Route path="/follow-ups" element={<FollowUps />} />
             <Route path="/team" element={<Team />} />
+            <Route path="/account" element={<Account />} />
             {/* CARE.3 — reached from a parish's page or the submissions queue. */}
             <Route path="/review/:submissionId" element={<ReportReview />} />
             <Route path="*" element={<Navigate to="/" replace />} />

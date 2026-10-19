@@ -11,12 +11,31 @@
 // admin from accidentally writing to `slug` or `created_at`.
 
 import { Router } from 'express'
+import { acceptedParishTimeZone, canonicalParishTimeZone } from '../utils/timezone.js'
 import pool from '../db.js'
 import { buildOrgExport } from '../services/orgExport.js'
 import { monitor } from '../monitoring/index.js'
 import { invalidateTradition } from '../traditions/context.js'
+import { holdOrganization } from '../auth/organizationHold.js'
+import { markStewardship } from '../middleware/auditLog.js'
+import { clearSessionCookie } from '../auth/sessionCookie.js'
+import { requireRole } from '../middleware/auth.js'
 
 const router = Router()
+
+router.post('/hold', requireRole('admin'), async (req, res) => {
+  try {
+    const result = await holdOrganization({ organizationId: req.organizationId, actorId: req.user.id, confirm: req.body?.confirm, acknowledgeExportWarning: req.body?.acknowledge_export_warning })
+    if (result.status === 200) {
+      clearSessionCookie(res)
+      markStewardship(res, { action: 'hold', targetId: Number(req.organizationId), already: result.body.already, incomplete: result.body.revocation_complete === false })
+    }
+    res.status(result.status).json(result.body)
+  } catch (err) {
+    monitor.error('organization.hold', err, { orgId: req.organizationId })
+    res.status(500).json({ error: 'Failed to hold organization' })
+  }
+})
 
 // Only these keys may be PATCHed. Anything else in the body is
 // silently dropped — same defense-in-depth pattern as
@@ -54,18 +73,6 @@ const PATCHABLE = new Set([
   // "today" filters. Validated against the host's tz database.
   'timezone',
 ])
-
-// Timezone is validated against the runtime's IANA database rather than
-// a length cap — an unknown zone would silently break the kiosk's date
-// math, so it's rejected at write time.
-function isValidTimeZone(tz) {
-  try {
-    new Intl.DateTimeFormat('en-US', { timeZone: tz })
-    return true
-  } catch {
-    return false
-  }
-}
 
 // Keys that are booleans, not strings — handled separately in the
 // PATCH loop (the string trim/length path would reject them).
@@ -147,15 +154,25 @@ router.patch('/', async (req, res) => {
       continue
     }
 
-    // Timezone must be a real IANA zone; empty/blank resets to UTC
-    // rather than NULL (the column is NOT NULL DEFAULT 'UTC').
+    // Empty/blank resets to UTC (the column is NOT NULL). Anything else
+    // must be a zone this database can use in AT TIME ZONE. Legacy
+    // aliases are stored under the modern name. An offset, a POSIX
+    // string, or a name Postgres does not list is a 400 and writes
+    // nothing — signup is the path that falls back quietly.
     if (k === 'timezone') {
-      let v = typeof req.body[k] === 'string' ? req.body[k].trim() : req.body[k]
-      if (v === '' || v == null) { updates[k] = 'UTC'; continue }
-      if (typeof v !== 'string' || !isValidTimeZone(v)) {
+      const raw = req.body[k]
+      if (raw == null || (typeof raw === 'string' && raw.trim() === '')) {
+        updates[k] = 'UTC'
+        continue
+      }
+      if (typeof raw !== 'string' || !canonicalParishTimeZone(raw)) {
         return res.status(400).json({ error: 'timezone must be a valid IANA timezone' })
       }
-      updates[k] = v
+      const accepted = await acceptedParishTimeZone(pool, raw)
+      if (!accepted.ok) {
+        return res.status(400).json({ error: 'timezone must be a valid IANA timezone' })
+      }
+      updates[k] = accepted.zone
       continue
     }
 
@@ -227,7 +244,7 @@ router.patch('/', async (req, res) => {
     const { rows } = await pool.query(
       `UPDATE ochr_organizations
           SET ${sets}
-        WHERE id = $${params.length}
+        WHERE id = $${params.length} AND held_at IS NULL
         RETURNING id, name, slug, address, tax_id,
                   signatory_name, signatory_title, statement_letterhead,
                   tagline, about, service_times, page_published,
@@ -239,7 +256,10 @@ router.patch('/', async (req, res) => {
     // of truth — drop it so an admin who just switched sees the new
     // vocabulary on the next page load rather than up to a minute later.
     if ('tradition' in updates) invalidateTradition(req.organizationId)
-    if (!rows.length) return res.status(404).json({ error: 'Organization not found' })
+    if (!rows.length) {
+      const { rows: held } = await pool.query('SELECT id FROM ochr_organizations WHERE id = $1 AND held_at IS NOT NULL', [req.organizationId])
+      return held.length ? res.status(409).json({ error: 'This organization is on hold. Nothing was changed.' }) : res.status(404).json({ error: 'Organization not found' })
+    }
     res.json(rows[0])
   } catch (err) {
     console.error('organization.patch failed:', err)
@@ -254,7 +274,9 @@ router.get('/export', async (req, res) => {
   try {
     const dump = await buildOrgExport(req.organizationId)
     const slug = dump.organization.slug || dump.organization.id
-    res.setHeader('Content-Type', 'application/json')
+    // charset=utf-8 is load-bearing for parish names with accents — without
+    // it, some clients mis-decode the JSON attachment as Latin-1.
+    res.setHeader('Content-Type', 'application/json; charset=utf-8')
     res.setHeader(
       'Content-Disposition',
       `attachment; filename="openchurch-export-${slug}-${dump.exported_at.slice(0, 10)}.json"`

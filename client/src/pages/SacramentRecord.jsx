@@ -9,7 +9,7 @@ import { useLoad } from '../hooks/useLoad'
 import { usePrompt } from '../components/ConfirmProvider'
 import { useToast } from '../components/ToastProvider'
 import { apiUrl } from '../api'
-import { formatLocalDate } from '../utils/dates'
+import { formatLocalDate, formatStoredDate } from '../utils/dates'
 
 // One register entry, its state, and everything that has been done to it.
 // (REG.1, built in Pass 8 — the server has supported all of this since
@@ -259,7 +259,7 @@ export default function SacramentRecord() {
 
         <dl className="rounded-2xl border border-parchment-300/60 dark:border-brass-900/30 bg-parchment-50 dark:bg-ink-900 shadow-warm px-5 py-4">
           <Row label={t('record.f.subject')} value={fmt(r.member_name)} />
-          <Row label={t('record.f.date')} value={r.date ? formatLocalDate(r.date, { year: 'numeric', month: 'long', day: 'numeric' }, dateLocale) : '—'} />
+          <Row label={t('record.f.date')} value={r.date ? formatStoredDate(r.date, { year: 'numeric', month: 'long', day: 'numeric' }, dateLocale) : '—'} />
           <Row label={t('record.f.minister')} value={fmt(r.minister)} />
           <Row label={t('record.f.place')} value={fmt(r.place)} />
           <Row label={t('record.f.certNo')} value={fmt(r.certificate_no)} />

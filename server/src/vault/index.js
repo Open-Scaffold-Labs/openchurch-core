@@ -36,13 +36,19 @@
 
 import pool from '../db.js'
 import { monitor } from '../monitoring/index.js'
+import { sanitizeRow, sanitizeSnapshot } from '../services/credentialSanitize.js'
 import { PROTECTED, RETENTION_DAYS, MAX_CAPTURED_ROWS } from './registry.js'
 import { columns, foreignKeys, assertIdent } from './schema.js'
 
 export class VaultError extends Error {
-  constructor(code, message, status = 409) {
+  constructor(code, message, status = 409, extra = undefined) {
     super(message); this.code = code; this.status = status
+    this.extra = extra && typeof extra === 'object' ? extra : undefined
   }
+}
+
+export function vaultErrorPayload(err) {
+  return { error: err.message, code: err.code, ...(err.extra || {}) }
 }
 
 const q = t => `"${assertIdent(t)}"`
@@ -135,6 +141,56 @@ async function walk(conn, table, ids, orgId) {
   return { cascaded, relinks }
 }
 
+// CHK-05. A Mass (or the series/seed set that would disappear with it)
+// that already has check-ins cannot go through capture-then-delete.
+//
+// The named roots are already locked FOR UPDATE. This locks every
+// occurrence the seed would cascade as well, then counts. A concurrent
+// check-in takes KEY SHARE on the event it names and so waits on that
+// lock rather than inserting between the count and the delete — the
+// TOCTOU Leo named (T0 count=0 → T1 check-in → T2 CASCADE-wipe).
+// CASCADE stays; the lock-then-recheck is the gate. Changing the FK
+// is a later authorized PR.
+async function refuseEventIfAttendance(conn, rootIds, orgId) {
+  const { rows: events } = await conn.query(
+    `SELECT id FROM ochr_calendar_events
+      WHERE organization_id = $2
+        AND (id = ANY($1::int[]) OR recurrence_parent_id = ANY($1::int[]))
+      ORDER BY id
+      FOR UPDATE`,
+    [rootIds, orgId]
+  )
+  const eventIds = events.map(r => r.id)
+  if (!eventIds.length) return
+
+  // attendance = DISTINCT_PEOPLE (reporting/definitions.js): a member
+  // who checked out and returned is one person; guests still count
+  // per row. checkin_count is the raw rows so that return is visible.
+  const { rows: [att] } = await conn.query(
+    `SELECT COUNT(*)::int AS checkin_count,
+            COUNT(DISTINCT COALESCE(client_id::text, 'row:' || id::text))::int AS attendance,
+            COUNT(DISTINCT calendar_event_id)::int AS events_with_attendance
+       FROM ochr_checkins
+      WHERE organization_id = $2 AND calendar_event_id = ANY($1::int[])`,
+    [eventIds, orgId]
+  )
+  const checkinCount = att?.checkin_count ?? 0
+  const people = att?.attendance ?? 0
+  if (checkinCount > 0) {
+    const who = people === 1 ? 'One person was' : `${people} people were`
+    throw new VaultError(
+      'has_attendance',
+      `${who} checked in at this Mass. It was not erased.`,
+      409,
+      {
+        checkin_count: checkinCount,
+        attendance: people,
+        events_with_attendance: att?.events_with_attendance ?? 0,
+      },
+    )
+  }
+}
+
 function summarise(cascaded, relinks) {
   const counts = {}
   for (const c of cascaded) counts[c.table] = (counts[c.table] || 0) + 1
@@ -205,6 +261,7 @@ export async function captureAndDeleteMany({ kind, ids, orgId, user = null, reas
     for (const root of roots) delete root.search_vec
 
     const rootIds = roots.map(r => r.id)
+    if (kind === 'event') await refuseEventIfAttendance(conn, rootIds, orgId)
     const { cascaded, relinks } = await walk(conn, spec.table, rootIds, orgId)
     const summary = { ...summarise(cascaded, relinks), roots: roots.length }
 
@@ -223,7 +280,10 @@ export async function captureAndDeleteMany({ kind, ids, orgId, user = null, reas
        RETURNING id, label, retention_until`,
       [
         orgId, kind, spec.table, String(roots[0].id), label,
-        JSON.stringify({ roots, cascaded, relinks }), JSON.stringify(summary),
+        // New snapshots do not keep a second copy of a bearer token.
+        // Rows already stored are left untouched; export and restore strip
+        // those on the way out and on the way back in.
+        JSON.stringify(sanitizeSnapshot(spec.table, { roots, cascaded, relinks })), JSON.stringify(summary),
         reason, user?.id ?? null, user?.name ?? null, user?.email ?? null,
         retention.toISOString().slice(0, 10),
       ]
@@ -321,7 +381,19 @@ export async function restoreEntry({ entryId, orgId, user = null }) {
     // yet. No savepoints here: a root that cannot return is a failed
     // restore, not a footnote.
     for (const root of await orderRoots(entry.entity_table, roots)) {
-      await insertRow(conn, entry.entity_table, root)
+      try {
+        await insertRow(conn, entry.entity_table, root)
+      } catch (err) {
+        // Stage 6: a member whose contact data was minimized keeps a marker
+        // (migration 114) that refuses an older snapshot carrying it back.
+        // Say that, instead of a 500.
+        if (err?.code === '23514' && /minimized/i.test(err.message ?? '')) {
+          await conn.query('ROLLBACK')
+          throw new VaultError('minimized',
+            'This member\'s contact details were minimized. The saved copy cannot put them back.', 409)
+        }
+        throw err
+      }
     }
 
     const skipped = []
@@ -416,9 +488,17 @@ export async function orderRoots(table, roots) {
 }
 
 async function insertRow(conn, table, row) {
-  const keys = await insertableColumns(table, row)
+  // A restored member gets none of the old credential. calendar_token is
+  // nullable. A fresh one is minted when an admin opens the member's
+  // calendar link, and when a staff member opens their own feed
+  // (GET /api/calendar-sync/my-link). swap_token is omitted too; a new
+  // one exists only after an admin rotates it. Omitting a NOT NULL
+  // credential with no default fails that child insert rather than
+  // writing the stale secret back.
+  const clean = sanitizeRow(table, row)
+  const keys = await insertableColumns(table, clean)
   if (!keys.length) throw new Error(`vault: nothing insertable for ${table}`)
-  const values = await bindValues(table, row, keys)
+  const values = await bindValues(table, clean, keys)
   const placeholders = keys.map((_, i) => `$${i + 1}`).join(', ')
   await conn.query(
     `INSERT INTO ${q(table)} (${keys.map(q).join(', ')}) VALUES (${placeholders})`,
@@ -462,7 +542,11 @@ export async function getEntry(orgId, entryId) {
 export async function pruneExpired({ now = new Date() } = {}) {
   const { rowCount } = await pool.query(
     `DELETE FROM ochr_vault_entries
-      WHERE restored_at IS NULL AND retention_until < $1::date`,
+      WHERE restored_at IS NULL AND retention_until < $1::date
+        -- A held organization's writes are refused (migration 114); one held
+        -- parish must not stop this promise being kept for every other one.
+        -- Its entries stay as they stood when the hold was placed.
+        AND organization_id IN (SELECT id FROM ochr_organizations WHERE held_at IS NULL)`,
     [now.toISOString().slice(0, 10)]
   )
   return { vaultEntriesPruned: rowCount }

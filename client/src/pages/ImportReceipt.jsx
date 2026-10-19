@@ -1,6 +1,8 @@
 // Import receipt (MIG.1) — the onboarding and continuity document.
 //
 // Print-first, same chrome-hiding pattern as the certificate and packet.
+// Print ≠ emailed (OC-READY-01-023 / STMT-01): screen chrome says this is
+// print/PDF only. The paper footer stays a live print marker, not a send.
 // This sheet is what a secretary files in the parish binder: what came
 // over, who prepared and approved it, what was held for follow-up and
 // why, and exactly what protection applies — no more, no less.
@@ -69,7 +71,7 @@ export default function ImportReceipt() {
 
   return (
     <div className="max-w-2xl mx-auto px-4 py-6">
-      <div className="print:hidden mb-6 flex items-center justify-between gap-3">
+      <div className="print:hidden mb-6 flex flex-wrap items-center justify-between gap-3">
         <Link to="/migration" className="inline-flex items-center gap-1.5 text-sm text-church-700 dark:text-brass-300 hover:underline">
           <ArrowLeft size={15} /> {t('mig.backToStudio')}
         </Link>
@@ -84,6 +86,11 @@ export default function ImportReceipt() {
           className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg bg-church-800 text-parchment-50 text-sm font-medium hover:bg-church-900 min-h-[40px]">
           <Printer size={15} /> {t('mig.print')}
         </button>
+        {/* Print ≠ emailed (OC-READY-01-023 / STMT-01 pattern). Screen
+            chrome only — the paper stays a live print marker. */}
+        <p data-testid="receipt-print-not-emailed" className="w-full text-sm text-ink-500 dark:text-parchment-300/70 print:hidden">
+          {t('mig.printHonesty')}
+        </p>
       </div>
 
       <div className="bg-white text-ink-900 mx-auto p-8 sm:p-10 shadow-warm-lg print:shadow-none print:p-0">

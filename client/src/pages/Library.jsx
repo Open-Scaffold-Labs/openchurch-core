@@ -9,6 +9,7 @@ import EmptyState from '../components/EmptyState'
 import { LibraryIllustration } from '../components/illustrations'
 import { SkeletonCard } from '../components/Skeleton'
 import { useToast } from '../components/ToastProvider'
+import { useLocale } from '../i18n'
 import { apiUrl } from '../api'
 import { startOfLocalDayISO, endOfLocalDayISO } from '../utils/dates'
 
@@ -148,7 +149,12 @@ export default function Library() {
   const [offset,   setOffset]   = useState(0)
   const [loading,  setLoading]  = useState(true)
   const [loadingMore, setLoadingMore] = useState(false)
+  // Distinct from an empty archive: the first page was refused, thrown,
+  // or was not a list. Leaving `rows` as [] would render "Your library is empty".
+  const [loadFailed, setLoadFailed] = useState(false)
+  const [adminOnly, setAdminOnly] = useState(false)
   const toast = useToast()
+  const { t } = useLocale()
 
   const buildQuery = useCallback((nextOffset) => {
     const params = new URLSearchParams()
@@ -163,22 +169,31 @@ export default function Library() {
     return params.toString()
   }, [filters])
 
+  const sayUnread = useCallback(() => {
+    toast.error(`${t('load.failedTitle')} ${t('load.failedBody')}`)
+  }, [toast, t])
+
   const fetchFirstPage = useCallback(async () => {
     setLoading(true)
     try {
       const res = await fetch(apiUrl(`/api/ai/generations?${buildQuery(0)}`))
-      if (!res.ok) throw new Error(`Failed to load library (${res.status})`)
+      if (res.status === 403) { setAdminOnly(true); setLoadFailed(false); return }
+      if (!res.ok) throw new Error('unread')
       const data = await res.json()
-      setRows(data.rows ?? [])
+      // A missing or non-list `rows` is not an empty archive.
+      if (!data || !Array.isArray(data.rows)) throw new Error('malformed')
+      setRows(data.rows)
       setTotal(data.total ?? 0)
       setHasMore(!!data.hasMore)
-      setOffset(data.rows?.length ?? 0)
-    } catch (e) {
-      toast.error("Couldn't load the library. Nothing was lost — please retry.")
+      setOffset(data.rows.length)
+      setLoadFailed(false)
+    } catch {
+      setLoadFailed(true)
+      sayUnread()
     } finally {
       setLoading(false)
     }
-  }, [buildQuery, toast])
+  }, [buildQuery, sayUnread])
 
   useEffect(() => { fetchFirstPage() }, [fetchFirstPage])
 
@@ -187,13 +202,15 @@ export default function Library() {
     setLoadingMore(true)
     try {
       const res = await fetch(apiUrl(`/api/ai/generations?${buildQuery(offset)}`))
-      if (!res.ok) throw new Error(`Failed to load more (${res.status})`)
+      if (!res.ok) throw new Error('unread')
       const data = await res.json()
-      setRows(prev => [...prev, ...(data.rows ?? [])])
+      if (!data || !Array.isArray(data.rows)) throw new Error('malformed')
+      setRows(prev => [...prev, ...data.rows])
       setHasMore(!!data.hasMore)
-      setOffset(o => o + (data.rows?.length ?? 0))
-    } catch (e) {
-      toast.error("Couldn't load more of the library. Nothing was lost — please retry.")
+      setOffset(o => o + data.rows.length)
+    } catch {
+      // Keep the rows already on screen. A failed next page is not an empty archive.
+      sayUnread()
     } finally {
       setLoadingMore(false)
     }
@@ -282,6 +299,19 @@ export default function Library() {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {Array.from({ length: 4 }, (_, i) => <SkeletonCard key={i} />)}
           </div>
+        ) : adminOnly ? (
+          <EmptyState
+            icon={BookOpen}
+            title={t('lib.adminOnlyTitle')}
+            body={t('lib.adminOnlyBody')}
+          />
+        ) : loadFailed ? (
+          <EmptyState
+            icon={BookOpen}
+            title={t('load.failedTitle')}
+            body={t('load.failedBody')}
+            action={{ label: t('load.retry'), onClick: fetchFirstPage }}
+          />
         ) : rows.length === 0 ? (
           <EmptyState
             illustration={!isFiltered ? LibraryIllustration : undefined}
@@ -310,7 +340,7 @@ export default function Library() {
                   className="inline-flex items-center gap-1.5 text-xs font-semibold text-church-800 dark:text-brass-200 hover:text-church-900 dark:hover:text-parchment-50 disabled:opacity-50 transition-colors"
                 >
                   {loadingMore && <Loader2 size={12} className="animate-spin" />}
-                  Load more
+                  {t('mem.loadMore')}
                 </button>
               )}
             </div>

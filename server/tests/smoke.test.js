@@ -34,6 +34,7 @@ import { liturgicalLine } from '../src/notifications/calendarReminders.js'
 import { sendPushToUser, isPushConfigured } from '../src/notifications/push.js'
 import { monitor, _setDispatchForTests } from '../src/monitoring/index.js'
 import { RUN_ID as HARNESS_RUN_ID, bindServer, closeServer, migrateOnce } from './support/harness.js'
+import { grantPlatformIdFor, clearPlatformIds } from './support/platform.js'
 import { _setAuditCountCapForTests } from '../src/routes/auditLog.js'
 import { enqueueSacramentAnniversaryDigests } from '../src/notifications/sacramentAnniversaries.js'
 import crypto from 'node:crypto'
@@ -966,7 +967,7 @@ describe('audit log', () => {
     expect(res.status).toBe(200)
     expect(res.headers['content-type']).toMatch(/text\/csv/)
     expect(res.headers['content-disposition']).toMatch(/attachment; filename="audit-log-/)
-    expect(res.text.split('\n')[0]).toBe('timestamp,user_name,user_email,action,entity_type,entity_id,summary,method,path,status,ip_address')
+    expect(res.text.split('\n')[0]).toBe('timestamp,user_name,user_email,action,entity_type,entity_id,summary,method,path,status,ip_address,user_id')
   })
 
   it('GET /api/audit-log/export.csv honors the same filter validation', async () => {
@@ -1465,26 +1466,38 @@ describe('notification triggers + drain', () => {
     // proven in notificationsAdminAuthz.test.js.
     const savedSuperAdmin = process.env.SUPER_ADMIN_EMAIL
     process.env.SUPER_ADMIN_EMAIL = orgA.email
+    await grantPlatformIdFor(orgA.email) // F-01: operator lists this id
     let drain
     try {
       drain = await request(server)
         .post('/api/admin/notifications/drain')
         .set('Authorization', `Bearer ${tokenA}`)
     } finally {
-      if (savedSuperAdmin === undefined) delete process.env.SUPER_ADMIN_EMAIL
+      if (savedSuperAdmin === undefined) { delete process.env.SUPER_ADMIN_EMAIL; clearPlatformIds() }
       else process.env.SUPER_ADMIN_EMAIL = savedSuperAdmin
+      clearPlatformIds()
     }
     expect(drain.status).toBe(200)
     expect(drain.body.processed).toBeGreaterThanOrEqual(1)
     expect(drain.body.sent).toBeGreaterThanOrEqual(1)
-    expect(drain.body.failed).toBe(0)
+    // OWNED-FIXTURE (was `drain.body.failed === 0`): the drain is global, so
+    // any other file's due row that fails counted here. What this test owns
+    // is its row: it must not have failed, and it was handled exactly once.
+    expect(Number.isInteger(drain.body.failed)).toBe(true)
 
     // Queue row should now be 'sent' with a sent_at timestamp.
     const { rows: after } = await pool.query(
-      'SELECT status, sent_at FROM ochr_scheduled_notifications WHERE id = $1',
+      'SELECT status, sent_at, error, attempts FROM ochr_scheduled_notifications WHERE id = $1',
       [queuedId]
     )
     expect(after[0].status).toBe('sent')
+    expect(after[0].error).toBeNull()
+    expect(after[0].attempts).toBe(1) // claimed once, by one drainer
+    // Exactly one delivery record for this recipient, none failed: no double send.
+    const { rows: logs } = await pool.query(
+      'SELECT status FROM ochr_notification_log WHERE recipient_email = $1', [recipient])
+    expect(logs).toHaveLength(1)
+    expect(['sent', 'stubbed']).toContain(logs[0].status)
     expect(after[0].sent_at).toBeTruthy()
 
     // And a notification_log row should exist for the recipient.
@@ -1831,14 +1844,16 @@ describe('birthday + anniversary enqueue', () => {
     // notificationsAdminAuthz.test.js.
     const savedSuperAdmin = process.env.SUPER_ADMIN_EMAIL
     process.env.SUPER_ADMIN_EMAIL = orgA.email
+    await grantPlatformIdFor(orgA.email) // F-01: operator lists this id
     let res
     try {
       res = await request(server)
         .post('/api/admin/notifications/enqueue-birthdays')
         .set('Authorization', `Bearer ${tokenA}`)
     } finally {
-      if (savedSuperAdmin === undefined) delete process.env.SUPER_ADMIN_EMAIL
+      if (savedSuperAdmin === undefined) { delete process.env.SUPER_ADMIN_EMAIL; clearPlatformIds() }
       else process.env.SUPER_ADMIN_EMAIL = savedSuperAdmin
+      clearPlatformIds()
     }
     expect(res.status).toBe(200)
     expect(res.body.birthdays_enqueued).toBeGreaterThanOrEqual(1)
@@ -2024,15 +2039,21 @@ describe('retention prune', () => {
     expect(asParishAdmin.status).toBe(404)
 
     process.env.SUPER_ADMIN_EMAIL = orgA.email
+
+    await grantPlatformIdFor(orgA.email) // F-01: operator lists this id
     const res = await request(server)
       .post('/api/admin/maintenance/retention-prune')
       .set('Authorization', `Bearer ${tokenA}`)
-    delete process.env.SUPER_ADMIN_EMAIL
+    { delete process.env.SUPER_ADMIN_EMAIL; clearPlatformIds() }
     expect(res.status).toBe(200)
-    expect(res.body.audit_pruned).toBeGreaterThanOrEqual(1)
-    expect(res.body.notification_log_pruned).toBeGreaterThanOrEqual(1)
-    expect(res.body.ai_usage_pruned).toBeGreaterThanOrEqual(1)
-    expect(res.body.scheduled_pruned).toBeGreaterThanOrEqual(1)
+    // OWNED-FIXTURE (were `*_pruned >= 1`): these counts are GLOBAL. Another
+    // file's pruneOldRecords() running in parallel can delete this test's old
+    // rows first, leaving this call's counts at 0. The per-row checks below
+    // are the contract for THIS test's rows: each old row is gone, each recent
+    // row (and the old PENDING row) survives. Here: the counts are reported.
+    for (const k of ['audit_pruned', 'notification_log_pruned', 'ai_usage_pruned', 'scheduled_pruned']) {
+      expect(Number.isInteger(res.body[k]) && res.body[k] >= 0, k).toBe(true)
+    }
 
     // ── Verify each table ──
     async function exists(table, id) {
@@ -2327,23 +2348,10 @@ describe('giving statements', () => {
     expect(res.body.organization.name).toBe(orgA.organizationName)
   })
 
-  it('GET /donor excludes a refunded gift from the PRINTED statement', async () => {
-    // WHAT EXACT DEFECT THIS DETECTS: removing
-    // `AND payment_status IS DISTINCT FROM 'refunded'` from the /donor
-    // query in routes/givingStatements.js.
-    //
-    // Why it exists: on 27 Aug an auditor removed exactly that predicate —
-    // from /donor only — and BOTH guards stayed green. money-invariants
-    // scans for SQL aggregates (SUM/COUNT/AVG/MAX/MIN) and this route
-    // SELECTs rows and sums them in JavaScript, so the scanner saw nothing;
-    // the existing behavioural test asserted /preview, not /donor.
-    //
-    // /donor is the document a donor files with a tax return. A refunded
-    // gift printing there at full value is the original defect that
-    // migration 090 exists to prevent, in the one place it matters most.
-    // Refunds are only possible on gifts whose source is 'online' with a
-    // payment_ref, and the create route derives source rather than accepting
-    // it — so the gift is inserted directly, then refunded through the API.
+  it('GET /donor nets a refunded gift on the PRINTED statement without omitting it', async () => {
+    // GIV-06 Option A: the gift stays on the letter. Live total is
+    // gift.amount − Σ(posted refunds). Printing the refunded gift at full
+    // value is still the defect; omitting it is the old model.
     const ins = await pool.query(
       `INSERT INTO ochr_donations
          (organization_id, donor_name, donor_email, amount, category, method, date, source, payment_ref, payment_status)
@@ -2371,11 +2379,13 @@ describe('giving statements', () => {
       .get(`/api/giving-statements/donor?year=${thisYear}&key=${encodeURIComponent(knownEmail)}`)
       .set('Authorization', `Bearer ${tokenA}`)
     expect(after.status).toBe(200)
-    // The refunded gift must be gone from the total AND from the printed lines.
+    // Live total drops; the gift line stays (amount unchanged, live_amount 0).
     expect(Number(after.body.total)).toBe(350)
-    expect(after.body.gift_count).toBe(2)
-    expect(after.body.lines.map(l => Number(l.amount))).not.toContain(500)
-    expect(after.body.lines.some(l => String(l.id) === String(gift.body.id))).toBe(false)
+    expect(after.body.gift_count).toBe(3)
+    const refundedLine = after.body.lines.find(l => String(l.id) === String(gift.body.id))
+    expect(refundedLine).toBeTruthy()
+    expect(Number(refundedLine.amount)).toBe(500)
+    expect(Number(refundedLine.live_amount)).toBe(0)
   })
 
   it('GET /donor returns 404 when the donor has no gifts in that year', async () => {
@@ -2491,9 +2501,12 @@ describe('organization settings', () => {
   // just refreshed is worse than one that never worked, because it looks
   // like the feature is there.
   it('EVERY AUTH PATH CARRIES THE PARISH LANGUAGE, NOT JUST THE ONE THAT USES RETURNING *', async () => {
+    const before = await request(server)
+      .get('/api/organization').set('Authorization', `Bearer ${tokenA}`)
+    const originalTz = before.body.timezone
     await request(server)
       .patch('/api/organization').set('Authorization', `Bearer ${tokenA}`)
-      .send({ locale: 'es' })
+      .send({ locale: 'es', timezone: 'America/Chicago' })
     try {
       // signup — RETURNING *
       const fresh = {
@@ -2503,30 +2516,38 @@ describe('organization settings', () => {
       const signed = await createOrg(server, fresh)
       expect(signed.status).toBe(201)
       expect(signed.body.user.organization.locale).toBe('en')   // a new parish defaults
+      expect(signed.body.user.organization.timezone).toBe('UTC')
 
       // login — hand-listed SELECT
       const login = await request(server).post('/api/auth/login')
         .send({ email: orgA.email, password: orgA.password })
       expect(login.status).toBe(200)
       expect(login.body.user.organization.locale).toBe('es')
+      expect(login.body.user.organization.timezone).toBe('America/Chicago')
 
       // /me — hand-listed SELECT
       const me = await request(server).get('/api/auth/me')
         .set('Authorization', `Bearer ${login.body.token}`)
       expect(me.status).toBe(200)
       expect(me.body.user.organization.locale).toBe('es')
+      expect(me.body.user.organization.timezone).toBe('America/Chicago')
 
-      // The point of the test: all three agree. A parish whose language
-      // depends on which request last populated the session is not a parish
-      // with a language.
+      // The point of the test: login and /me agree with each other, and
+      // signup's new parish keeps the column default. A parish whose
+      // language or civil clock depends on which request last populated
+      // the session is not a parish with one of either.
       expect(new Set([
         login.body.user.organization.locale,
         me.body.user.organization.locale,
       ]).size).toBe(1)
+      expect(new Set([
+        login.body.user.organization.timezone,
+        me.body.user.organization.timezone,
+      ]).size).toBe(1)
     } finally {
       await request(server)
         .patch('/api/organization').set('Authorization', `Bearer ${tokenA}`)
-        .send({ locale: 'en' })
+        .send({ locale: 'en', timezone: originalTz || 'UTC' })
     }
   })
 
@@ -5173,8 +5194,9 @@ describe('refund online gift (GIV.6)', () => {
   afterAll(()  => { delete process.env.PAYMENTS_PROVIDER })
 
 
-  // Refunding an online gift marks it refunded and drops it from fund
-  // totals. Placed ABOVE 'role enforcement'.
+  // Refunding an online gift marks it refunded and nets it from fund
+  // totals (Option A: the gift stays, live contribution is 0).
+  // Placed ABOVE 'role enforcement'.
 
   let slugA, fundId, donationId
   const FUND = `Refund Fund ${RUN_ID}`
@@ -5192,7 +5214,7 @@ describe('refund online gift (GIV.6)', () => {
     fundId = f.body.id
   })
 
-  it('refunds an online gift and drops it from fund totals', async () => {
+  it('refunds an online gift and nets it from fund totals', async () => {
     const give = await request(server).post(`/api/public/${slugA}/give`)
       .send({ fund_id: fundId, amount: 60, donor_name: `Refund Donor ${RUN_ID}` })
     expect(give.status).toBe(201)
@@ -5213,7 +5235,10 @@ describe('refund online gift (GIV.6)', () => {
 
     const after = await request(server).get('/api/donations/by-fund?days=365')
       .set('Authorization', `Bearer ${tokenA}`)
-    expect(after.body.funds.find(f => f.category === FUND)).toBeFalsy()
+    const fundRow = after.body.funds.find(f => f.category === FUND)
+    expect(fundRow).toBeTruthy()
+    expect(Number(fundRow.total)).toBe(0)
+    expect(Number(fundRow.count)).toBe(1)
   })
 
   it('409s a double refund', async () => {
@@ -5516,6 +5541,22 @@ describe('auth hardening — session lifecycle (H5)', () => {
       .set('Authorization', `Bearer ${authToken}`)
     expect(before.status).toBe(200)
 
+    // A second token issued BEFORE the bump must die with the first.
+    // Login in the same second mints the same JWT (no jti) — so mint a
+    // sibling with the same tv and a different expiry. Two outstanding
+    // tokens, one token_version.
+    const claims = jwt.decode(authToken)
+    const secondToken = jwt.sign(
+      { userId: claims.userId, organizationId: claims.organizationId,
+        email: claims.email, name: claims.name, role: claims.role, tv: claims.tv },
+      SECRET, { expiresIn: '6d' }
+    )
+    expect(secondToken).toBeTruthy()
+    expect(secondToken).not.toBe(authToken)
+    const secondBefore = await request(server).get('/api/auth/me')
+      .set('Authorization', `Bearer ${secondToken}`)
+    expect(secondBefore.status).toBe(200)
+
     // …until the version bump…
     const revoke = await request(server).post('/api/auth/logout-all')
       .set('Authorization', `Bearer ${authToken}`)
@@ -5524,6 +5565,10 @@ describe('auth hardening — session lifecycle (H5)', () => {
     const after = await request(server).get('/api/auth/me')
       .set('Authorization', `Bearer ${authToken}`)
     expect(after.status).toBe(401)
+
+    const secondAfter = await request(server).get('/api/auth/me')
+      .set('Authorization', `Bearer ${secondToken}`)
+    expect(secondAfter.status).toBe(401)
 
     // …and a fresh login issues a token carrying the new version.
     const relogin = await request(server).post('/api/auth/login')
@@ -6499,7 +6544,7 @@ describe('liturgical auto-mapping on calendar events (LIT.1)', () => {
         WHERE recurrence_parent_id = $1 ORDER BY date ASC`,
       [res.body.id]
     )
-    const dec27 = rows.find(r => r.date.toISOString().slice(0, 10) === '2026-12-27')
+    const dec27 = rows.find(r => String(r.date).slice(0, 10) === '2026-12-27')
     expect(dec27?.liturgical_season).toBe('Christmas')
   })
 
@@ -8750,6 +8795,11 @@ describe('sacristy weekly manifest (MI.2)', () => {
     const res = await request(server).get('/api/mass-intentions/weekly?start=2027-03-01&end=2027-03-07')
       .set('Authorization', `Bearer ${tokenA}`)
     expect(res.status).toBe(200)
+    const org = await request(server).get('/api/organization')
+      .set('Authorization', `Bearer ${tokenA}`)
+    expect(org.status).toBe(200)
+    expect(res.body.timezone).toBe(org.body.timezone)
+    expect(Number.isNaN(new Date(res.body.generated_at).getTime())).toBe(false)
     const formatted = res.body.intentions.map(r => r.formatted_intention)
     expect(formatted).toContain(`† Souls ${uniq}`)
     expect(formatted).toContain(`Living intention ${uniq}`)
@@ -8979,7 +9029,7 @@ describe('founder workbench (FB.2)', () => {
   let noteA, noteB
 
   beforeAll(async () => {
-    delete process.env.SUPER_ADMIN_EMAIL
+    { delete process.env.SUPER_ADMIN_EMAIL; clearPlatformIds() }
     const a = await request(server).post('/api/feedback')
       .set('Authorization', `Bearer ${tokenA}`)
       .send({ category: 'suggestion', message: `WB note A ${RUN_ID}`, route: '/register' })
@@ -8990,7 +9040,7 @@ describe('founder workbench (FB.2)', () => {
     noteB = b.body.id
   })
 
-  afterAll(() => { delete process.env.SUPER_ADMIN_EMAIL })
+  afterAll(() => { { delete process.env.SUPER_ADMIN_EMAIL; clearPlatformIds() } })
 
   it('404s when no super-admin is configured (fail closed)', async () => {
     const res = await request(server).get('/api/admin/feedback')
@@ -9007,6 +9057,7 @@ describe('founder workbench (FB.2)', () => {
 
   it('lists feedback across ALL parishes for the configured founder', async () => {
     process.env.SUPER_ADMIN_EMAIL = orgA.email
+    await grantPlatformIdFor(orgA.email) // F-01: operator lists this id
     const res = await request(server).get('/api/admin/feedback?status=open')
       .set('Authorization', `Bearer ${tokenA}`)
     expect(res.status).toBe(200)
@@ -9020,6 +9071,7 @@ describe('founder workbench (FB.2)', () => {
 
   it('toggles status open → replied (and validates input)', async () => {
     process.env.SUPER_ADMIN_EMAIL = orgA.email
+    await grantPlatformIdFor(orgA.email) // F-01: operator lists this id
     const bad = await request(server).patch(`/api/admin/feedback/${noteA}`)
       .set('Authorization', `Bearer ${tokenA}`).send({ status: 'archived' })
     expect(bad.status).toBe(400)
@@ -9040,7 +9092,7 @@ describe('intention ↔ calendar link (MI.3)', () => {
   beforeAll(async () => {
     const ev = await request(server).post('/api/calendar')
       .set('Authorization', `Bearer ${tokenA}`)
-      .send({ title: `10:30 Mass ${RUN_ID}`, date: '2027-04-06', start_time: '10:30', end_time: '11:30' })
+      .send({ title: `10:30 Mass ${RUN_ID}`, date: '2027-04-06', start_time: '10:30', end_time: '11:30', type: 'service' })
     eventA = ev.body.id
   })
 
@@ -9190,40 +9242,40 @@ describe('weekly backup digest (BKP.1)', () => {
 
   afterAll(() => {
     global.fetch = realFetch
-    delete process.env.SUPER_ADMIN_EMAIL
+    { delete process.env.SUPER_ADMIN_EMAIL; clearPlatformIds() }
     delete process.env.RESEND_API_KEY
   })
 
   it('reports itself skipped without SUPER_ADMIN_EMAIL (never silent)', async () => {
-    delete process.env.SUPER_ADMIN_EMAIL
+    { delete process.env.SUPER_ADMIN_EMAIL; clearPlatformIds() }
     const { runWeeklyBackupDigest } = await import('../src/services/backupDigest.js')
     const result = await runWeeklyBackupDigest()
     expect(result.skipped).toBeTruthy()
   })
 
-  it('builds gzipped per-parish attachments and mails them off-site', async () => {
+  it('never mails exports: with no storage the run is skipped and sends a zero-PII heartbeat (#214)', async () => {
     process.env.SUPER_ADMIN_EMAIL = `founder-${RUN_ID}@example.com`
     process.env.RESEND_API_KEY = 're_test_key'
-    let sent = null
+    const sent = []
     global.fetch = async (url, init) => {
-      sent = JSON.parse(init.body)
+      sent.push(JSON.parse(init.body))
       return { ok: true, json: async () => ({ id: 're_backup_1' }) }
     }
 
     const { runWeeklyBackupDigest } = await import('../src/services/backupDigest.js')
     const result = await runWeeklyBackupDigest()
 
-    expect(result.orgs).toBeGreaterThanOrEqual(2)
-    expect(result.attached).toBeGreaterThanOrEqual(2)
-    expect(result.failed).toBe(0)
-    expect(sent.to).toEqual([`founder-${RUN_ID}@example.com`])
-    expect(sent.attachments.length).toBe(result.attached)
-    expect(sent.attachments[0].filename).toMatch(/\.json\.gz$/)
-
-    // Round-trip one attachment: valid gzip, valid export JSON.
-    const { gunzipSync } = await import('node:zlib')
-    const dump = JSON.parse(gunzipSync(Buffer.from(sent.attachments[0].content, 'base64')).toString('utf8'))
-    expect(dump.format).toBe('openchurch-export')
+    expect(result.skipped).toMatch(/no backup storage/i)
+    expect(result.notified).toBe(true)
+    expect(sent.length).toBe(1)
+    expect(sent[0].to).toEqual([`founder-${RUN_ID}@example.com`])
+    expect(sent[0]).not.toHaveProperty('attachments')
+    expect(sent[0].subject).toMatch(/NOT RUNNING/)
+    // No parish identity or data in the message.
+    const body = JSON.stringify(sent[0])
+    expect(body).not.toContain(orgA.organizationName)
+    expect(body).not.toContain(orgB.organizationName)
+    expect(body).not.toMatch(/openchurch-export/)
   })
 })
 
@@ -9812,9 +9864,11 @@ describe('the Sunday Packet (SPK.1)', () => {
     // Order of worship with the assignment name resolved.
     expect(res.body.plan.title).toBe('Packet Test Mass')
     expect(res.body.plan.elements[0].assigned_name).toBe(`Packet Lector ${RUN_ID}`)
-    // Serving schedule resolved the jsonb id array to names.
+    // Serving schedule resolved the jsonb id array to { id, name }.
     const serving = res.body.serving.find(s => s.title === `Packet Mass ${RUN_ID}`)
-    expect(serving.assigned).toContain(`Packet Lector ${RUN_ID}`)
+    const lector = serving.assigned.find(a => a.name === `Packet Lector ${RUN_ID}`)
+    expect(lector).toBeTruthy()
+    expect(Number(lector.id)).toBe(Number(memberId))
     // The week of intentions includes ours, formatted with the †.
     expect(res.body.intentions.some(i => i.formatted_intention.includes('Packet Test Soul'))).toBe(true)
     // Bulletin announcements rode along.
@@ -9854,6 +9908,43 @@ describe('the Sunday Packet (SPK.1)', () => {
     expect(res.status).toBe(200)
     expect(res.body.date).toMatch(/^\d{4}-\d{2}-\d{2}$/)
     expect(res.body.lectionary.is_sunday).toBe(true)
+  })
+
+  it('serving assigned carries the joined client id; a stale id is not a person', async () => {
+    const alpha = await request(server).post('/api/clients')
+      .set('Authorization', `Bearer ${tokenA}`)
+      .send({ name: `Packet Alpha ${RUN_ID}` })
+    const omega = await request(server).post('/api/clients')
+      .set('Authorization', `Bearer ${tokenA}`)
+      .send({ name: `Packet Omega ${RUN_ID}` })
+    expect(alpha.status).toBe(201)
+    expect(omega.status).toBe(201)
+
+    const TWO_DATE = '2027-06-13'
+    const created = await request(server).post('/api/calendar')
+      .set('Authorization', `Bearer ${tokenA}`)
+      .send({
+        title: `Packet Two Servers ${RUN_ID}`,
+        date: TWO_DATE,
+        start_time: '09:00',
+        end_time: '10:15',
+        type: 'service',
+        assigned_to: [alpha.body.id, omega.body.id, 999999999],
+      })
+    expect(created.status).toBe(201)
+
+    const res = await request(server).get(`/api/packet?date=${TWO_DATE}`)
+      .set('Authorization', `Bearer ${tokenA}`)
+    expect(res.status).toBe(200)
+    const serving = res.body.serving.find(s => s.title === `Packet Two Servers ${RUN_ID}`)
+    expect(serving.assigned).toHaveLength(2)
+    const a = serving.assigned.find(x => x.name === `Packet Alpha ${RUN_ID}`)
+    const o = serving.assigned.find(x => x.name === `Packet Omega ${RUN_ID}`)
+    expect(Number(a.id)).toBe(Number(alpha.body.id))
+    expect(Number(o.id)).toBe(Number(omega.body.id))
+    expect(a.id).not.toBe(o.id)
+    expect(serving.assigned.some(x => Number(x.id) === 999999999)).toBe(false)
+    expect(serving.assigned.every(x => x.id != null && typeof x.name === 'string')).toBe(true)
   })
 })
 
@@ -10038,11 +10129,11 @@ describe('pledge fulfillment on the list endpoint (regression)', () => {
       .send({ name: `Pledge Reg Member ${RUN_ID}`, email })
     const p = await request(server).post('/api/pledges')
       .set('Authorization', `Bearer ${tokenA}`)
-      .send({ member_id: m.body.id, amount: 100, frequency: 'monthly', start_date: '2027-01-01', end_date: '2027-12-31' })
+      .send({ member_id: m.body.id, amount: 100, frequency: 'monthly', start_date: '2020-01-01', end_date: '2099-12-31' })
     expect(p.status).toBe(201)
     const d = await request(server).post('/api/donations')
       .set('Authorization', `Bearer ${tokenA}`)
-      .send({ donor_name: `Pledge Reg Member ${RUN_ID}`, donor_email: email, amount: 250, category: 'tithe', date: '2027-02-15' })
+      .send({ donor_name: `Pledge Reg Member ${RUN_ID}`, donor_email: email, amount: 250, category: 'tithe', date: '2020-06-15' })
     expect(d.status).toBe(201)
 
     const list = await request(server).get('/api/pledges')
@@ -10129,7 +10220,8 @@ describe('pledge fulfillment: pledges with no matching giving (batch aggregate)'
 
   it('a refunded gift does not count toward fulfillment', async () => {
     const row = await fromList(refundedId)
-    expect(row.gift_count).toBe(0)
+    // Option A: the gift is still a matching line; live contribution is 0.
+    expect(row.gift_count).toBe(1)
     expect(Number(row.matched_total)).toBe(0)
   })
 
@@ -11177,15 +11269,10 @@ describe('CLASS: every admin surface refuses a stale role (INVARIANT)', () => {
   })
 })
 
-describe('CLASS: no donation aggregate counts refunded gifts (INVARIANT)', () => {
+describe('CLASS: live donation money is gift minus posted refunds (INVARIANT)', () => {
   it('THE SCANNER PASSES ACROSS THE WHOLE TREE', async () => {
-    // The behavioural tests above prove the statement and the ledger are
-    // right today. This proves the CLASS: every aggregate over ochr_donations
-    // in the whole of server/src either excludes refunds or is listed as a
-    // deliberate exception with a written reason.
-    //
-    // Run as a child process so the test reports the scanner's own output,
-    // which names the file and line — the message somebody needs at 11pm.
+    // Option A: every live aggregate over gifts uses gift.amount − Σ(posted
+    // refunds), or is listed as a deliberate exception with a written reason.
     const { execFile } = await import('node:child_process')
     const { promisify } = await import('node:util')
     const run = promisify(execFile)
@@ -11199,10 +11286,9 @@ describe('CLASS: no donation aggregate counts refunded gifts (INVARIANT)', () =>
     } catch (err) {
       throw new Error(`money-invariants failed:\n${err.stdout || ''}${err.stderr || ''}`)
     }
-    expect(out).toMatch(/all exclude refunded gifts/)
-    // It must have actually looked at something.
+    expect(out).toMatch(/Option A/)
     const n = Number(out.match(/(\d+) donation aggregates/)?.[1] ?? 0)
-    expect(n, 'the scanner examined nothing').toBeGreaterThanOrEqual(10)
+    expect(n, 'the scanner examined nothing').toBeGreaterThanOrEqual(6)
   })
 })
 
@@ -11275,11 +11361,10 @@ describe('the public giving surface cannot write for free (SWEEP2)', () => {
   })
 })
 
-describe('a refunded gift leaves every total it entered (SWEEP2)', () => {
-  // Nine aggregates excluded refunds and five did not, including both
-  // documents that leave the building: the donor's year-end tax statement and
-  // the diocesan assessable base. A parish was being assessed on money it had
-  // given back, and telling a donor they gave more than they did.
+describe('a refunded gift leaves the LIVE NET of every total it entered (SWEEP2)', () => {
+  // Option A: the gift stays; live contribution is gift.amount − Σ refunds.
+  // A parish must not be assessed on money it gave back, and a donor must
+  // not be told they gave more than they did — without erasing the gift.
   let tok, orgId, giftId
   const donor = `Refund Case ${RUN_ID}`
   const email = `refund_case_${RUN_ID}@example.com`
@@ -11323,22 +11408,35 @@ describe('a refunded gift leaves every total it entered (SWEEP2)', () => {
     expect(await assessable()).toBeGreaterThanOrEqual(5000)
   })
 
-  it('LEAVES THE YEAR-END TAX STATEMENT once refunded', async () => {
+  it('NETS THE YEAR-END TAX STATEMENT once refunded — gift still listed', async () => {
     const r = await request(server).post(`/api/donations/${giftId}/refund`)
       .set('Authorization', `Bearer ${tok}`).send({ reason: 'donor asked' })
     expect(r.status).toBe(200)
-    const { rows } = await pool.query('SELECT payment_status FROM ochr_donations WHERE id = $1', [giftId])
+    const { rows } = await pool.query('SELECT payment_status, amount FROM ochr_donations WHERE id = $1', [giftId])
     expect(rows[0].payment_status).toBe('refunded')
+    expect(Number(rows[0].amount)).toBe(5000)
 
     expect(await statementTotal(), 'the letter a donor files with a tax return').toBe(0)
+    const preview = await request(server).get('/api/giving-statements/preview?year=' + new Date().getFullYear())
+      .set('Authorization', `Bearer ${tok}`)
+    const donorRow = (preview.body.donors ?? []).find(d => d.donor_email === email)
+    expect(donorRow, 'fully refunded donor stays on the preview at net 0').toBeTruthy()
+    expect(Number(donorRow.gift_count)).toBe(1)
   })
 
-  it('LEAVES THE ASSESSABLE BASE the diocese bills on', async () => {
+  it('NETS THE ASSESSABLE BASE the diocese bills on — gift fact remains', async () => {
     const after = await assessable()
-    const { rows } = await pool.query(
+    const { rows: giftFact } = await pool.query(
       `SELECT COALESCE(SUM(amount),0)::numeric(12,2) AS n FROM ochr_parish_ledger
-        WHERE organization_id = $1 AND source_type = 'donation' AND amount = 5000`, [orgId])
-    expect(Number(rows[0].n), 'the refunded gift must be gone from the ledger view').toBe(0)
+        WHERE organization_id = $1 AND source_type = 'donation' AND source_id = $2`, [orgId, giftId])
+    expect(Number(giftFact[0].n), 'the gift fact stays in the ledger').toBe(5000)
+    const { rows: refundFact } = await pool.query(
+      `SELECT COALESCE(SUM(l.amount),0)::numeric(12,2) AS n
+         FROM ochr_parish_ledger l
+         JOIN ochr_donation_refunds r ON r.id = l.source_id
+        WHERE l.organization_id = $1 AND l.source_type = 'donation_refund'
+          AND r.donation_id = $2`, [orgId, giftId])
+    expect(Number(refundFact[0].n), 'the refund fact is the negative').toBe(-5000)
     expect(after).toBeLessThan(5000)
   })
 
@@ -11624,8 +11722,8 @@ describe('support tickets (SUP.2)', () => {
   beforeAll(async () => {
     // No AI key, no vendor identity — the baseline posture for these tests.
     delete process.env.ANTHROPIC_API_KEY
-    delete process.env.SUPER_ADMIN_EMAIL
-    delete process.env.VENDOR_ADMIN_EMAILS
+    { delete process.env.SUPER_ADMIN_EMAIL; clearPlatformIds() }
+    { delete process.env.VENDOR_ADMIN_EMAILS; clearPlatformIds() }
 
     const { rows } = await pool.query(
       'SELECT id, name FROM ochr_organizations WHERE name = ANY($1) ORDER BY name',
@@ -11648,8 +11746,8 @@ describe('support tickets (SUP.2)', () => {
   })
 
   afterAll(() => {
-    delete process.env.SUPER_ADMIN_EMAIL
-    delete process.env.VENDOR_ADMIN_EMAILS
+    { delete process.env.SUPER_ADMIN_EMAIL; clearPlatformIds() }
+    { delete process.env.VENDOR_ADMIN_EMAILS; clearPlatformIds() }
   })
 
   it('a viewer can submit a report (no writeGate on intake)', async () => {
@@ -11762,6 +11860,7 @@ describe('support tickets (SUP.2)', () => {
     // Nothing configured → org-scoped even for admins (asserted above via
     // vendor:false). Configure the founder → cross-org with org names.
     process.env.SUPER_ADMIN_EMAIL = orgA.email
+    await grantPlatformIdFor(orgA.email) // F-01: operator lists this id
     const res = await request(server).get('/api/support-tickets')
       .set('Authorization', `Bearer ${tokenA}`)
     expect(res.status).toBe(200)
@@ -11773,6 +11872,7 @@ describe('support tickets (SUP.2)', () => {
 
   it('the vendor runs full triage on any org’s ticket, audited', async () => {
     process.env.SUPER_ADMIN_EMAIL = orgA.email
+    await grantPlatformIdFor(orgA.email) // F-01: operator lists this id
     const res = await request(server).patch(`/api/support-tickets/${ticketB}`)
       .set('Authorization', `Bearer ${tokenA}`)
       .send({
@@ -11797,6 +11897,7 @@ describe('support tickets (SUP.2)', () => {
 
   it('the vendor can filter by organization and search report text', async () => {
     process.env.SUPER_ADMIN_EMAIL = orgA.email
+    await grantPlatformIdFor(orgA.email) // F-01: operator lists this id
     const byOrg = await request(server).get(`/api/support-tickets?org_id=${orgBId}`)
       .set('Authorization', `Bearer ${tokenA}`)
     expect(byOrg.status).toBe(200)
@@ -11816,8 +11917,8 @@ describe('support tickets (SUP.2)', () => {
   })
 
   it('org_id from a parish admin can never widen the scope', async () => {
-    delete process.env.SUPER_ADMIN_EMAIL
-    delete process.env.VENDOR_ADMIN_EMAILS
+    { delete process.env.SUPER_ADMIN_EMAIL; clearPlatformIds() }
+    { delete process.env.VENDOR_ADMIN_EMAILS; clearPlatformIds() }
     const res = await request(server).get(`/api/support-tickets?org_id=${orgBId}`)
       .set('Authorization', `Bearer ${tokenA}`)
     expect(res.status).toBe(200)
@@ -11826,8 +11927,9 @@ describe('support tickets (SUP.2)', () => {
   })
 
   it('VENDOR_ADMIN_EMAILS extends the allowlist beyond the founder', async () => {
-    delete process.env.SUPER_ADMIN_EMAIL
+    { delete process.env.SUPER_ADMIN_EMAIL; clearPlatformIds() }
     process.env.VENDOR_ADMIN_EMAILS = ` other@osl.dev , ${orgB.email.toUpperCase()} `
+    await grantPlatformIdFor(orgB.email) // F-01: operator lists this id
     const res = await request(server).get('/api/support-tickets')
       .set('Authorization', `Bearer ${tokenB}`)
     expect(res.status).toBe(200)
@@ -11835,9 +11937,11 @@ describe('support tickets (SUP.2)', () => {
     expect(res.body.tickets.some(t => t.organization_id === orgAId)).toBe(true)
   })
 
-  it('a vendor resolution notifies the reporter (once, prefs respected)', async () => {
-    process.env.SUPER_ADMIN_EMAIL = orgA.email
-    delete process.env.VENDOR_ADMIN_EMAILS
+  it('a same-parish admin resolution notifies the reporter (once, prefs respected)', async () => {
+    // R286-4: ordinary-org case, deliberately with NO platform grant: the
+    // parish admin resolves their own viewer's ticket. The vendor case is
+    // proven separately below against another org's ticket.
+    delete process.env.SUPER_ADMIN_EMAIL; delete process.env.VENDOR_ADMIN_EMAILS; clearPlatformIds()
     // A fresh ticket from the viewer, resolved by the vendor.
     const fresh = await request(server).post('/api/support-tickets')
       .set('Authorization', `Bearer ${viewerToken}`)
@@ -11876,7 +11980,46 @@ describe('support tickets (SUP.2)', () => {
       `SELECT COUNT(*)::int AS n FROM ochr_notification_log
         WHERE organization_id = $1 AND notification_type = 'support_ticket_update'`, [orgAId])).rows[0].n
     expect(afterCount).toBe(beforeCount)
-    delete process.env.SUPER_ADMIN_EMAIL
+  })
+
+  it('a vendor (by id) resolves ANOTHER org’s ticket and that reporter is notified; without the id it is 404', async () => {
+    // R286-4: scoped vendor grant, saved and restored explicitly; only
+    // VENDOR_ADMIN_USER_IDS is set, so this is vendor (not founder) scope.
+    delete process.env.SUPER_ADMIN_EMAIL; delete process.env.VENDOR_ADMIN_EMAILS; clearPlatformIds()
+    const fresh = await request(server).post('/api/support-tickets')
+      .set('Authorization', `Bearer ${tokenB}`)
+      .send({ description: `Vendor-cross-org check ${RUN_ID}` })
+    expect(fresh.status).toBe(201)
+    const denied = await request(server).patch(`/api/support-tickets/${fresh.body.id}`)
+      .set('Authorization', `Bearer ${tokenA}`)
+      .send({ status: 'resolved', resolution_notes: 'should not apply' })
+    expect(denied.status).toBe(404)
+
+    const adminAId = (await pool.query('SELECT id FROM ochr_users WHERE lower(email) = lower($1)', [orgA.email])).rows[0].id
+    const saved = process.env.VENDOR_ADMIN_USER_IDS
+    process.env.VENDOR_ADMIN_USER_IDS = String(adminAId)
+    let res
+    try {
+      res = await request(server).patch(`/api/support-tickets/${fresh.body.id}`)
+        .set('Authorization', `Bearer ${tokenA}`)
+        .send({ status: 'resolved', resolution_notes: 'Vendor fixed it.' })
+    } finally {
+      if (saved === undefined) delete process.env.VENDOR_ADMIN_USER_IDS
+      else process.env.VENDOR_ADMIN_USER_IDS = saved
+    }
+    expect(res.status).toBe(200)
+    let row = null
+    for (let i = 0; i < 40 && !row; i++) {
+      const { rows } = await pool.query(
+        `SELECT recipient_email, body FROM ochr_notification_log
+          WHERE organization_id = $1 AND notification_type = 'support_ticket_update'
+            AND body LIKE '%Vendor-cross-org check%' ORDER BY id DESC LIMIT 1`, [orgBId])
+      row = rows[0] ?? null
+      if (!row) await new Promise(r => setTimeout(r, 50))
+    }
+    expect(row).toBeTruthy()
+    expect(row.recipient_email.toLowerCase()).toBe(orgB.email.toLowerCase())
+    expect(row.body).toContain('Vendor fixed it.')
   })
 })
 
@@ -11897,8 +12040,8 @@ describe('in-app assistant (SUP.3)', () => {
 
   it('feedback is org-scoped', async () => {
     const { rows: [msg] } = await pool.query(
-      `INSERT INTO ochr_assistant_messages (organization_id, question, answer)
-       VALUES ($1, 'q', 'a') RETURNING id`, [orgAId])
+      `INSERT INTO ochr_assistant_messages (organization_id, user_id)
+       SELECT $1, id FROM ochr_users WHERE organization_id = $1 ORDER BY id LIMIT 1 RETURNING id`, [orgAId])
     const cross = await request(server).post(`/api/assistant/${msg.id}/feedback`)
       .set('Authorization', `Bearer ${tokenB}`).send({ feedback: 'up' })
     expect(cross.status).toBe(404)
@@ -13122,14 +13265,14 @@ describe('Continuity Vault — recovery, not just retention', () => {
       .set('Authorization', `Bearer ${staffToken}`)
     expect(asStaff.status).toBe(403)
 
-    // …but staff and viewers CAN both see that the mistake is
-    // recoverable and say so. The archive names records they could
-    // already read yesterday; it is the restoring that is privileged.
-    for (const t of [staffToken, viewerToken]) {
-      const canSee = await request(server).get('/api/vault').set('Authorization', `Bearer ${t}`)
-      expect(canSee.status).toBe(200)
-      expect(canSee.body.entries.some(e => e.id === entryId)).toBe(true)
-    }
+    // …staff CAN see that the mistake is recoverable and say so; it is the
+    // restoring that is privileged. SP-014..022: Viewers no longer read the
+    // archive (not in the Help role table).
+    const canSee = await request(server).get('/api/vault').set('Authorization', `Bearer ${staffToken}`)
+    expect(canSee.status).toBe(200)
+    expect(canSee.body.entries.some(e => e.id === entryId)).toBe(true)
+    const viewerSee = await request(server).get('/api/vault').set('Authorization', `Bearer ${viewerToken}`)
+    expect(viewerSee.status).toBe(403)
 
     // Falsification: still absent, so the 403s were the reason and not a
     // restore that happened anyway.

@@ -61,7 +61,7 @@ export async function enqueueSacramentAnniversaryDigests({ now = new Date() } = 
   let orgsSkipped = 0
 
   try {
-    const { rows: orgs } = await pool.query('SELECT id, name FROM ochr_organizations')
+    const { rows: orgs } = await pool.query('SELECT id, name FROM ochr_organizations WHERE held_at IS NULL')
 
     for (const org of orgs) {
       orgsScanned++
@@ -76,7 +76,7 @@ export async function enqueueSacramentAnniversaryDigests({ now = new Date() } = 
       if (already.length) { orgsSkipped++; continue }
 
       const { rows } = await pool.query(
-        `SELECT s.type, to_char(s.date, 'YYYY-MM-DD') AS date, c.name AS member_name
+        `SELECT s.type, to_char(s.date, 'YYYY-MM-DD') AS date, s.member_name AS member_name
            FROM ochr_sacramental_records s
            JOIN ochr_clients c
              ON c.id = s.client_id AND c.organization_id = s.organization_id AND c.status = 'active'
@@ -102,6 +102,9 @@ export async function enqueueSacramentAnniversaryDigests({ now = new Date() } = 
         if (next < today) { annYear += 1; next = new Date(annYear, m - 1, d); next.setHours(0, 0, 0, 0) }
         const years = annYear - y
         if (years < 1) continue
+        // No recorded name: do not draft "since {today's roster name}'s
+        // baptism". A missing snapshot is unavailable, not a live alias.
+        if (r.member_name == null || String(r.member_name).trim() === '') continue
         if (next >= today && next <= end) {
           items.push({ member: r.member_name, type: r.type, years, when: next })
         }
@@ -118,14 +121,16 @@ export async function enqueueSacramentAnniversaryDigests({ now = new Date() } = 
       }).join('\n\n')
 
       const { rows: admins } = await pool.query(
+        // F-06: never mail member PII to a closed or deactivated admin.
         `SELECT id, email, name FROM ochr_users
-          WHERE organization_id = $1 AND role = 'admin'`,
+          WHERE organization_id = $1 AND role = 'admin'
+            AND closed_at IS NULL AND deactivated_at IS NULL`,
         [org.id]
       )
       if (!admins.length) continue
 
       for (const admin of admins) {
-        await scheduleNotification({
+        const scheduled = await scheduleNotification({
           organizationId:    org.id,
           userId:            admin.id,
           recipient:         admin.email,
@@ -140,7 +145,7 @@ export async function enqueueSacramentAnniversaryDigests({ now = new Date() } = 
             items_block:    itemsBlock,
           },
         })
-        digestsEnqueued++
+        if (scheduled) digestsEnqueued++
       }
     }
 

@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
-import { ChevronLeft, Printer, AlertTriangle, Loader2 } from 'lucide-react'
+import { ChevronLeft, Printer, AlertTriangle, Loader2, Stamp } from 'lucide-react'
 import { apiUrl } from '../api'
 import { useAuth } from '../context/AuthContext'
+import { useLocale } from '../i18n'
 
 // Year-end donor giving statement — the actual receipt the bookkeeper
 // hands the donor (Sprint Y / Y.3). Renders from a single fetch of
@@ -33,12 +34,57 @@ function fmtCurrency(n) {
   return Number(n).toLocaleString(undefined, { style: 'currency', currency: 'USD' })
 }
 
-function fmtDateLong(iso) {
-  // YYYY-MM-DD only — parse as local so we don't shift across timezones.
-  const [y, m, d] = iso.split('T')[0].split('-').map(Number)
-  return new Date(y, m - 1, d).toLocaleDateString(undefined, {
+// Version-1 snapshots stored String(Date).slice(0, 10): "Sun Sep 27".
+// That text is not an instant. new Date('Sun Sep 27') is 2001 in V8, and
+// splitting on 'T' eats "Tue" and "Thu" (both start with T) down to an
+// empty prefix and then "Invalid Date". Rebuild the civil day from the
+// snapshot's tax year, and only when the stored weekday agrees.
+const LEGACY_CIVIL_DAY = /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) (\d{1,2})$/
+const LEGACY_MONTHS = {
+  Jan: 0, Feb: 1, Mar: 2, Apr: 3, May: 4, Jun: 5,
+  Jul: 6, Aug: 7, Sep: 8, Oct: 9, Nov: 10, Dec: 11,
+}
+const LEGACY_WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+const ISO_CIVIL_DAY = /^(\d{4})-(\d{2})-(\d{2})(?:$|T)/
+
+function fullDate(date) {
+  const formatted = date.toLocaleDateString(undefined, {
     month: 'long', day: 'numeric', year: 'numeric',
   })
+  return formatted === 'Invalid Date' ? null : formatted
+}
+
+export function fmtDateLong(value, taxYear) {
+  if (value == null || value === '') return ''
+  const raw = String(value)
+
+  const legacy = LEGACY_CIVIL_DAY.exec(raw)
+  if (legacy) {
+    const year = Number(taxYear)
+    const month = LEGACY_MONTHS[legacy[2]]
+    const day = Number(legacy[3])
+    if (!Number.isInteger(year) || month == null || !Number.isInteger(day)) return raw
+    // Parts only. The legacy string itself is never a Date argument.
+    const reconstructed = new Date(year, month, day)
+    const sameDay = reconstructed.getFullYear() === year
+      && reconstructed.getMonth() === month
+      && reconstructed.getDate() === day
+    const weekdayMatches = LEGACY_WEEKDAYS[reconstructed.getDay()] === legacy[1]
+    if (!sameDay || !weekdayMatches) return raw
+    return fullDate(reconstructed) ?? raw
+  }
+
+  const iso = ISO_CIVIL_DAY.exec(raw)
+  if (!iso) return raw
+  const year = Number(iso[1])
+  const month = Number(iso[2])
+  const day = Number(iso[3])
+  const date = new Date(year, month - 1, day)
+  const sameDay = date.getFullYear() === year
+    && date.getMonth() === month - 1
+    && date.getDate() === day
+  if (!sameDay) return raw
+  return fullDate(date) ?? raw
 }
 
 function todayLong() {
@@ -89,14 +135,94 @@ export default function DonorStatement() {
   const year = params.get('year')
   const by   = params.get('by') // 'email' | 'name' | null (server defaults)
   const { user } = useAuth()
+  const { t } = useLocale()
   const isAdmin = user?.role === 'admin'
 
   const [data, setData]     = useState(null)
   const [loading, setLoad]  = useState(true)
   const [err, setErr]       = useState('')
+  // GIV-09. ?issued=<id> renders the FROZEN claim; without it this page is a
+  // live preview. The two must never look alike: a preview handed to a donor
+  // is not a statement the parish has issued.
+  const issuedId = params.get('issued')
+  const [issuedMeta, setIssuedMeta] = useState(null)
+  const [issuing, setIssuing] = useState(false)
+  // An issuance failure is NOT a page-load failure. Writing it to `err` would
+  // trip the early return below, replace the statement with "couldn't load",
+  // and take the Issue button with it — leaving the parish no way to retry in
+  // place, only to navigate back and remount, which mints a fresh key. That is
+  // how one lost response becomes two historical claims.
+  const [issueErr, setIssueErr] = useState('')
+  // ONE key per intentional issuance, held across every transport retry. It is
+  // minted on the first attempt and released only when the claim is confirmed,
+  // so a retry after a lost or ambiguous response asks the server about the
+  // SAME claim instead of asking for a second one. Remounting the page — the
+  // parish deliberately starting again — is what mints a new one.
+  const issueKeyRef = useRef(null)
 
   useEffect(() => {
-    if (!isAdmin || !donorKey || !year) return
+    if (!isAdmin || !issuedId) return
+    let cancelled = false
+    setLoad(true); setErr('')
+    fetch(apiUrl(`/api/giving-statements/issued/${issuedId}`))
+      .then(async r => {
+        if (r.status === 404) throw new Error('That issued statement is not on this church\u2019s register.')
+        if (r.status === 403) throw new Error('admin-only')
+        if (!r.ok) throw new Error("Couldn't load the issued statement. Nothing was lost \u2014 please retry.")
+        return r.json()
+      })
+      .then(({ statement }) => {
+        if (cancelled) return
+        const snap = statement.snapshot_json
+        setData({
+          organization: snap.organization, donor: snap.donor,
+          // The row list keys on `id`; the frozen line carries `donation_id`.
+          lines: snap.lines.map(l => ({ ...l, id: l.donation_id })),
+          total: Number(snap.total), year: snap.tax_year,
+        })
+        setIssuedMeta({
+          statement_no: statement.statement_no, issued_at: statement.issued_at,
+          status: statement.status, issued_by_name: statement.issued_by_name,
+          superseded_by_id: statement.superseded_by_id,
+          unknown_at_issue: snap.unknown_at_issue ?? [],
+          correction: snap.correction ?? null,
+        })
+      })
+      .catch(e => { if (!cancelled) setErr(e.message) })
+      .finally(() => { if (!cancelled) setLoad(false) })
+    return () => { cancelled = true }
+  }, [issuedId, isAdmin])
+
+  async function issueStatement() {
+    if (issueKeyRef.current == null) {
+      const nonce = globalThis.crypto?.randomUUID?.()
+        ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`
+      issueKeyRef.current = `${donorKey}|${year}|${nonce}`
+    }
+    setIssuing(true); setIssueErr('')
+    try {
+      const res = await fetch(apiUrl('/api/giving-statements/issue'), {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          year: Number(year), key: donorKey, by: by || undefined,
+          issue_key: issueKeyRef.current,
+        }),
+      })
+      const body = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(body.error || "Couldn't issue the statement.")
+      // Confirmed — whether this response minted the claim or replayed one that
+      // already existed, the attempt is resolved and the key is spent.
+      issueKeyRef.current = null
+      window.location.search = `?issued=${body.statement.id}`
+    } catch (e) {
+      // The key is deliberately NOT cleared: this attempt is unresolved, and
+      // the next click must ask about the same claim.
+      setIssueErr(e.message || "Couldn't issue the statement.")
+    } finally { setIssuing(false) }
+  }
+
+  useEffect(() => {
+    if (!isAdmin || !donorKey || !year || issuedId) return
     let cancelled = false
     setLoad(true)
     setErr('')
@@ -113,7 +239,7 @@ export default function DonorStatement() {
       .catch(e => { if (!cancelled) setErr(e.message) })
       .finally(() => { if (!cancelled) setLoad(false) })
     return () => { cancelled = true }
-  }, [donorKey, year, by, isAdmin])
+  }, [donorKey, year, by, isAdmin, issuedId])
 
   // Defense-in-depth admin gate — sidebar entry is admin-only and the
   // server gates the endpoint, but a non-admin typing the URL should
@@ -164,13 +290,89 @@ export default function DonorStatement() {
         >
           <ChevronLeft size={15} /> Back to statements
         </Link>
-        <button
-          type="button"
-          onClick={() => window.print()}
-          className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-church-900 dark:bg-church-700 text-parchment-50 text-sm font-semibold shadow-warm hover:bg-church-800 dark:hover:bg-church-600 transition-colors"
-        >
-          <Printer size={15} /> Print / Save as PDF
-        </button>
+        <div className="flex items-center gap-2">
+          {!issuedId && (
+            <button
+              type="button"
+              onClick={issueStatement}
+              disabled={issuing}
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-brass-700/60 text-brass-800 dark:text-brass-300 text-sm font-semibold hover:bg-brass-50 dark:hover:bg-brass-900/20 disabled:opacity-50 transition-colors"
+            >
+              {issuing ? <Loader2 size={15} className="animate-spin" /> : <Stamp size={15} />} Issue statement
+            </button>
+          )}
+          {issuedId && (
+            <span data-testid="statement-issued-chrome-not-sent" className="text-xs font-semibold text-ink-500 dark:text-parchment-300/70">
+              {t('stmt.notSentChip')}
+            </span>
+          )}
+          <button
+            type="button"
+            onClick={() => window.print()}
+            className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-church-900 dark:bg-church-700 text-parchment-50 text-sm font-semibold shadow-warm hover:bg-church-800 dark:hover:bg-church-600 transition-colors"
+          >
+            <Printer size={15} /> Print / Save as PDF
+          </button>
+        </div>
+      </div>
+
+      {/* GIV-09 — what this page is, on screen and on paper. A preview is
+          live giving; an issued statement is a claim frozen on a date. The
+          marker prints, because the difference matters most on the copy the
+          donor actually holds. */}
+      <div className="max-w-3xl mx-auto px-4">
+        {issuedId ? (
+          <div data-testid="statement-issued-banner" className="mb-4 rounded-lg border border-brass-600/50 bg-brass-50 dark:bg-brass-900/20 px-4 py-2 text-xs text-brass-900 dark:text-brass-200">
+            {/* Print keeps the frozen-claim marker. Screen must also say
+                the claim was not emailed — Issued ≠ delivered (STMT-01). */}
+            <span className="font-semibold uppercase tracking-wider hidden print:inline">Issued statement</span>
+            <span className="font-semibold uppercase tracking-wider print:hidden">{t('stmt.issuedNotSent')}</span>
+            {issuedMeta && <> · No. {issuedMeta.statement_no} · issued {new Date(issuedMeta.issued_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+              {issuedMeta.issued_by_name ? ` by ${issuedMeta.issued_by_name}` : ''}</>}
+            <span data-testid="statement-issued-not-sent" className="block mt-1 print:hidden text-brass-800/90 dark:text-brass-300/90">
+              {t('stmt.issuedNotSentBody')}
+            </span>
+            {issuedMeta?.correction && (
+              <span className="block mt-1 font-semibold">
+                Corrected statement — supersedes No. {issuedMeta.correction.supersedes_statement_no}.
+                {issuedMeta.correction.zero_is_a_claim && (
+                  <span className="block font-normal">
+                    {issuedMeta.correction.reason} This total is zero because the parish says so, not because anything is missing.
+                  </span>
+                )}
+              </span>
+            )}
+            {issuedMeta?.status === 'superseded' && (
+              <span className="block mt-1 font-semibold text-amber-800 dark:text-amber-300">
+                Superseded by statement #{issuedMeta.superseded_by_id}. This remains what was claimed on the date above.
+              </span>
+            )}
+            {issuedMeta?.unknown_at_issue?.length > 0 && (
+              <span className="block mt-1 text-brass-800/80 dark:text-brass-300/80">
+                Not known when issued: {issuedMeta.unknown_at_issue.join(', ')}.
+              </span>
+            )}
+          </div>
+        ) : (
+          <div data-testid="statement-preview-banner" className="mb-4 rounded-lg border border-ink-300/60 dark:border-parchment-300/20 bg-parchment-100 dark:bg-ink-800 px-4 py-2 text-xs text-ink-700 dark:text-parchment-200">
+            <span className="font-semibold uppercase tracking-wider">Preview — not issued</span>
+            <span className="block mt-1 text-ink-500 dark:text-parchment-300/70">
+              Figures follow the parish's live giving and will change if a gift is refunded or edited. Issue the statement to freeze what you send.
+            </span>
+          </div>
+        )}
+        {/* An issuance that failed is reported HERE, beside the button, and
+            never through the page-level error state — the retry has to stay
+            reachable, because retrying in place reuses the idempotency key and
+            navigating away to try again does not. */}
+        {issueErr && (
+          <div data-testid="statement-issue-error" role="status" className="print:hidden mb-4 rounded-lg border border-amber-300/70 dark:border-amber-800/40 bg-amber-50 dark:bg-amber-900/20 px-4 py-2 text-xs text-amber-900 dark:text-amber-200">
+            <span className="font-semibold">{issueErr}</span>
+            <span className="block mt-1">
+              Nothing was lost. Press Issue statement again — if it already went through, you will be taken to that statement rather than a second one.
+            </span>
+          </div>
+        )}
       </div>
 
       {/* The statement itself. max-w-3xl + print:max-w-none so screen
@@ -242,7 +444,7 @@ export default function DonorStatement() {
           <tbody>
             {lines.map(l => (
               <tr key={l.id} className="border-b border-ink-100 print:border-ink-300">
-                <td className="py-2 pr-2">{fmtDateLong(l.date)}</td>
+                <td className="py-2 pr-2">{fmtDateLong(l.date, y)}</td>
                 <td className="py-2 px-2 capitalize">{l.category ?? '—'}</td>
                 <td className="py-2 px-2 capitalize">{l.method ?? '—'}</td>
                 <td className="py-2 pl-2 text-right font-medium tabular-nums">

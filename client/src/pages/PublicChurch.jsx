@@ -30,8 +30,10 @@ function splitLines(text) {
 // (CC.1 backend) — never an auto-add. Fetches the church's groups for
 // the picker; works as a general "reach out" form even if there are
 // none. On success it swaps to a thank-you state rather than clearing,
-// so a double-submit isn't tempting.
+// so a double-submit isn't tempting. User-visible chrome goes through
+// t() (OC-READY-01-035). POST body keys stay the connect contract.
 function ConnectCard({ slug }) {
+  const { t } = useLocale()
   const [groups, setGroups] = useState([])
   const [groupsFailed, setGroupsFailed] = useState(false)
   const [form, setForm] = useState({ group_id: '', name: '', email: '', phone: '', message: '' })
@@ -76,7 +78,7 @@ function ConnectCard({ slug }) {
       })
       if (!res.ok) {
         const d = await res.json().catch(() => ({}))
-        throw new Error(d.error || `Something went wrong (${res.status})`)
+        throw new Error(d.error || t('contact.submitFail', { status: res.status }))
       }
       setStatus('done')
     } catch (err) {
@@ -92,7 +94,7 @@ function ConnectCard({ slug }) {
       <div className="flex items-center gap-2 mb-3">
         <Users size={15} className="text-brass-600 dark:text-brass-300" />
         <h2 className="text-sm font-semibold uppercase tracking-wider text-ink-700 dark:text-parchment-200">
-          Get connected
+          {t('contact.title')}
         </h2>
       </div>
 
@@ -102,32 +104,30 @@ function ConnectCard({ slug }) {
             <Check size={16} />
           </span>
           <div>
-            <p className="text-sm font-semibold text-ink-900 dark:text-parchment-50">Thanks for reaching out!</p>
+            <p className="text-sm font-semibold text-ink-900 dark:text-parchment-50">{t('contact.thanks')}</p>
             <p className="text-sm text-ink-600 dark:text-parchment-300/80 mt-0.5">
-              Someone from the church will be in touch soon.
+              {t('contact.thanksBody')}
             </p>
           </div>
         </div>
       ) : (
         <>
           <p className="text-sm text-ink-600 dark:text-parchment-300/80 mb-4">
-            New here or want to join a ministry? Leave your details and we&apos;ll reach out.
+            {t('contact.intro')}
           </p>
           <form onSubmit={onSubmit} className="space-y-3">
             {groupsFailed && (
               <p role="status" className="text-xs text-amber-700 dark:text-amber-400">
-                We couldn&apos;t load this church&apos;s ministries just now — that&apos;s a
-                connection problem, not a church without them. Send your note anyway and
-                someone will be in touch.
+                {t('contact.groupsFail')}
               </p>
             )}
             {groups.length > 0 && (
               <div>
                 <label className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">
-                  I&apos;m interested in
+                  {t('contact.interest')}
                 </label>
                 <select value={form.group_id} onChange={field('group_id')} className={inputCls}>
-                  <option value="">I&apos;m not sure yet</option>
+                  <option value="">{t('contact.unsure')}</option>
                   {groups.map(g => (
                     <option key={g.id} value={g.id}>{g.name}</option>
                   ))}
@@ -138,18 +138,18 @@ function ConnectCard({ slug }) {
               type="text"
               value={form.name}
               onChange={field('name')}
-              placeholder="Your name *" aria-label="Your name *"
+              placeholder={t('contact.namePh')} aria-label={t('contact.namePh')}
               className={inputCls}
             />
             <div className="grid sm:grid-cols-2 gap-3">
-              <input type="email" value={form.email} onChange={field('email')} placeholder="Email" aria-label="Email" className={inputCls} />
-              <input type="tel" value={form.phone} onChange={field('phone')} placeholder="Phone" aria-label="Phone" className={inputCls} />
+              <input type="email" value={form.email} onChange={field('email')} placeholder={t('contact.emailPh')} aria-label={t('contact.emailPh')} className={inputCls} />
+              <input type="tel" value={form.phone} onChange={field('phone')} placeholder={t('contact.phonePh')} aria-label={t('contact.phonePh')} className={inputCls} />
             </div>
             <textarea
               value={form.message}
               onChange={field('message')}
               rows={3}
-              placeholder="Anything you'd like us to know? (optional)" aria-label="Anything you'd like us to know? (optional)"
+              placeholder={t('contact.messagePh')} aria-label={t('contact.messagePh')}
               className={`${inputCls} resize-none`}
             />
             {error && <p className="text-xs text-rose-700 dark:text-rose-300">{error}</p>}
@@ -159,8 +159,8 @@ function ConnectCard({ slug }) {
               className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-church-900 dark:bg-church-700 text-parchment-50 text-sm font-semibold shadow-warm hover:bg-church-800 dark:hover:bg-church-600 transition-colors disabled:opacity-40"
             >
               {status === 'submitting'
-                ? <><Loader2 size={15} className="animate-spin" /> Sending…</>
-                : <><Send size={15} /> Send</>}
+                ? <><Loader2 size={15} className="animate-spin" /> {t('contact.sending')}</>
+                : <><Send size={15} /> {t('contact.send')}</>}
             </button>
           </form>
         </>
@@ -170,10 +170,11 @@ function ConnectCard({ slug }) {
 }
 
 export default function PublicChurch() {
-  // Not for t() — these pages are still English (the string pass is
-  // separate work). This is the switch that lets the parish's language
-  // reach a page nobody signs in to.
-  const { setPublicLocale } = useLocale()
+  // User-visible chrome goes through t() (OC-READY-01-036). Church
+  // name, tagline, about, address, and free-text service times stay
+  // parish-supplied data. This is the switch that lets the parish's
+  // language reach a page nobody signs in to.
+  const { t, setPublicLocale } = useLocale()
   const { slug } = useParams()
   const [data, setData]    = useState(null)
   const [loading, setLoad] = useState(true)
@@ -235,7 +236,7 @@ export default function PublicChurch() {
       .catch(e => { if (!cancelled) setErr(e.message) })
       .finally(() => { if (!cancelled) setLoad(false) })
     return () => { cancelled = true }
-  }, [slug])
+  }, [slug, setPublicLocale])
 
   // Per-church browser title: this reads as the church's own website,
   // so the tab should carry the church name, not the product default.
@@ -261,10 +262,10 @@ export default function PublicChurch() {
         <div className="text-center max-w-md">
           <AlertTriangle size={28} className="mx-auto text-amber-600 dark:text-amber-300 mb-3" />
           <h1 className="font-display text-2xl font-semibold text-ink-900 dark:text-parchment-50">
-            Church not found
+            {t('church.notFound')}
           </h1>
           <p className="mt-2 text-sm text-ink-500 dark:text-parchment-300/70">
-            We couldn't find a published page at <span className="font-mono">/p/{slug}</span>. Double-check the link.
+            {t('church.notFoundBefore')}<span className="font-mono">/p/{slug}</span>{t('church.notFoundAfter')}
           </p>
         </div>
       </div>
@@ -277,9 +278,9 @@ export default function PublicChurch() {
         <div className="text-center max-w-md">
           <AlertTriangle size={28} className="mx-auto text-rose-700 dark:text-rose-300 mb-3" />
           <h1 className="font-display text-2xl font-semibold text-ink-900 dark:text-parchment-50">
-            Couldn't load page
+            {t('church.loadFailTitle')}
           </h1>
-          <p className="mt-2 text-sm text-ink-500 dark:text-parchment-300/70">{err}</p>
+          <p className="mt-2 text-sm text-ink-500 dark:text-parchment-300/70">{t('church.loadFailBody')}</p>
         </div>
       </div>
     )
@@ -301,11 +302,10 @@ export default function PublicChurch() {
         <div className="max-w-md text-center">
           <AlertTriangle size={28} className="mx-auto text-amber-700 dark:text-amber-400 mb-3" />
           <h1 className="font-display text-2xl font-semibold text-ink-900 dark:text-parchment-50">
-            Couldn&apos;t load page
+            {t('church.loadFailTitle')}
           </h1>
           <p className="mt-2 text-sm text-ink-500 dark:text-parchment-300/70">
-            This church&apos;s page didn&apos;t come back in a form we could read. That&apos;s a
-            problem on our side, not a church that isn&apos;t here — please try again shortly.
+            {t('church.unreadableBody')}
           </p>
         </div>
       </div>
@@ -354,7 +354,7 @@ export default function PublicChurch() {
             <div className="flex items-center gap-2 mb-4">
               <Clock size={15} className="text-brass-600 dark:text-brass-300" />
               <h2 className="text-sm font-semibold uppercase tracking-wider text-ink-700 dark:text-parchment-200">
-                Service times
+                {t('church.serviceTimes')}
               </h2>
             </div>
             <ul className="space-y-2">
@@ -371,7 +371,7 @@ export default function PublicChurch() {
         {aboutParas.length > 0 && (
           <section className="bg-parchment-100 dark:bg-ink-900/80 rounded-2xl border border-parchment-300/60 dark:border-brass-900/30 shadow-warm p-6 mb-6">
             <h2 className="text-sm font-semibold uppercase tracking-wider text-ink-700 dark:text-parchment-200 mb-4">
-              Welcome
+              {t('church.welcome')}
             </h2>
             <div className="space-y-3">
               {aboutParas.map((para, i) => (
@@ -389,7 +389,7 @@ export default function PublicChurch() {
             <div className="flex items-center gap-2 mb-3">
               <MapPin size={15} className="text-brass-600 dark:text-brass-300" />
               <h2 className="text-sm font-semibold uppercase tracking-wider text-ink-700 dark:text-parchment-200">
-                Find us
+                {t('church.findUs')}
               </h2>
             </div>
             <p className="text-base text-ink-800 dark:text-parchment-100">{page.address}</p>
@@ -400,7 +400,7 @@ export default function PublicChurch() {
                 rel="noopener noreferrer"
                 className="inline-flex items-center gap-1.5 mt-3 text-sm font-semibold text-church-800 dark:text-brass-300 hover:text-church-900 dark:hover:text-brass-200 transition-colors"
               >
-                Get directions <ArrowRight size={14} />
+                {t('church.directions')} <ArrowRight size={14} />
               </a>
             )}
           </section>
@@ -415,21 +415,21 @@ export default function PublicChurch() {
             to={`/p/${slug}/events`}
             className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-church-900 dark:bg-church-700 text-parchment-50 text-sm font-semibold shadow-warm hover:bg-church-800 dark:hover:bg-church-600 transition-colors"
           >
-            <Calendar size={15} /> Upcoming events
+            <Calendar size={15} /> {t('church.events')}
           </Link>
           {hasGiving && (
             <Link
               to={`/p/${slug}/give`}
               className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl border border-church-900/30 dark:border-brass-300/40 text-church-900 dark:text-brass-200 text-sm font-semibold hover:bg-parchment-100 dark:hover:bg-ink-900/60 transition-colors"
             >
-              <Heart size={15} /> Give
+              <Heart size={15} /> {t('church.give')}
             </Link>
           )}
         </div>
 
         {/* Footer attribution — quiet */}
         <p className="mt-12 text-center text-[11px] text-ink-500 dark:text-parchment-300/70">
-          Powered by OpenChurch
+          {t('church.powered')}
         </p>
       </motion.div>
     </div>

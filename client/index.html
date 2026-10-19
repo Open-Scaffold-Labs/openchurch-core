@@ -2,6 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <meta name="referrer" content="no-referrer" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="description" content="OpenChurch — church management for liturgical congregations: members, scheduling, giving, events, and more." />
     <title>OpenChurch</title>
@@ -11,14 +12,13 @@
          Parchment & Brass burgundy (church-600). Manifest itself is
          emitted by vite-plugin-pwa during build. -->
     <meta name="theme-color" content="#7B2D26" />
+    <!-- Browsers request /favicon.ico even when the SVG icon is linked.
+         This file is the 16 and 32 raster of the install mark. -->
+    <link rel="icon" href="/favicon.ico" sizes="16x16 32x32" />
     <link rel="icon" type="image/svg+xml" href="/icon.svg" />
 
-    <!-- iOS standalone-mode hints. apple-mobile-web-app-capable lets
-         users 'Add to Home Screen' and get a chromeless app shell;
-         status-bar-style controls the notch bar's tone. The
-         apple-touch-icon is a PNG (iOS doesn't parse SVG here) — drop
-         a proper 180x180 in client/public/apple-touch-icon.png before
-         public launch; until then iOS falls back to a screenshot. -->
+    <!-- apple-touch-icon.png is the 180×180 PNG linked below.
+         These tags do not establish iOS Add to Home Screen. -->
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <meta name="apple-mobile-web-app-title" content="OpenChurch" />

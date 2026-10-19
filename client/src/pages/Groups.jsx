@@ -1,8 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Plus, X, Loader2, Users2, Trash2, CalendarPlus, Check, UserPlus, Mail, Phone } from 'lucide-react'
 import { apiUrl } from '../api'
+import { loadList } from '../utils/format'
+import { useLocale } from '../i18n'
 import PageWrapper from '../components/PageWrapper'
 import EmptyState from '../components/EmptyState'
 import MemberPicker from '../components/MemberPicker'
@@ -39,45 +41,73 @@ const EMPTY_FORM = {
 }
 
 export default function Groups() {
+  const { t } = useLocale()
   const [groups,    setGroups]    = useState([])
   const [members,   setMembers]   = useState([])
   const [membersFailed, setMembersFailed] = useState(false)
   const [groupsFailed, setGroupsFailed] = useState(false)
   const [interests, setInterests] = useState([]) // pending connect-card requests (CC.3)
+  const [interestsFailed, setInterestsFailed] = useState(false)
   const [busyId,    setBusyId]    = useState(null) // interest id being approved/declined
   const [loading,   setLoading]   = useState(true)
   const [modal,     setModal]     = useState(null) // null | {} for create | full group for edit
   const toast = useToast()
   const navigate = useNavigate()
+  // Overlapping reloads (save, approve, retry) each GET /api/groups.
+  // Only the latest claim may paint. An older [] must not replace a newer list.
+  const groupsLoadGen = useRef(0)
 
   const load = async () => {
+    const gen = ++groupsLoadGen.current
     setLoading(true)
     try {
-      const [gRes, mRes, iRes] = await Promise.all([
+      const [gRes, roster, iRes] = await Promise.all([
         fetch(apiUrl('/api/groups')),
         // Members feed the group's picker — a bounded sample is enough, so
         // ask for the max (200) rather than relying on the /api/clients
-        // endpoint's invisible safety cap.
-        fetch(apiUrl('/api/clients?limit=200')),
+        // endpoint's invisible safety cap. loadList refuses a 200 that is
+        // not an array. `m.clients ?? []` used to turn `{}` into an empty
+        // picker and leave membersFailed false.
+        loadList(apiUrl('/api/clients?limit=200')),
         fetch(apiUrl('/api/connect?status=pending')),
       ])
+      if (gen !== groupsLoadGen.current) return
       // A failed groups call left `groups` at [] and the page rendered
       // "No groups yet — Create your first ministry team". The only signal
       // was a toast, which is gone seconds later. Observed 27 Aug.
-      const g = gRes.ok ? await gRes.json() : { groups: [] }
-      setGroupsFailed(!gRes.ok)
+      // A 200 null used to throw on `.groups` and take that same path.
+      // Non-OK is left unread: it is a failure, not an empty list.
+      let g = null
+      if (gRes.ok) {
+        g = await gRes.json()
+        if (gen !== groupsLoadGen.current) return
+      }
+      // A 200 null used to throw on `.interests` before the failure note,
+      // so the page looked like nobody was waiting.
+      let i = null
+      if (iRes.ok) {
+        i = await iRes.json()
+        if (gen !== groupsLoadGen.current) return
+      }
       // An empty roster here feeds the same MemberPicker as Events. A failed
       // call must not arrive there looking like a parish with no members.
-      const m = mRes.ok ? await mRes.json() : []
-      setMembersFailed(!mRes.ok)
-      const i = iRes.ok ? await iRes.json() : { interests: [] }
-      setGroups(g.groups ?? [])
-      setMembers(Array.isArray(m) ? m : (m.clients ?? []))
-      setInterests(i.interests ?? [])
+      setMembersFailed(!roster.ok)
+      setMembers(roster.data)
+      // A 200 whose list is not a list is not an empty parish, and it must
+      // not reach `.map`. A real empty list is an array.
+      const groupsList = g && typeof g === 'object' && !Array.isArray(g) && Array.isArray(g.groups) ? g.groups : null
+      setGroupsFailed(!gRes.ok || groupsList === null)
+      setGroups(groupsList ?? [])
+      const interestList = i && typeof i === 'object' && !Array.isArray(i) && Array.isArray(i.interests) ? i.interests : null
+      setInterestsFailed(!iRes.ok || interestList === null)
+      setInterests(interestList ?? [])
     } catch (err) {
-      toast.error("Couldn't load groups. Nothing was lost — please retry.")
+      if (gen !== groupsLoadGen.current) return
+      // A thrown read is the failure banner, not "No groups yet".
+      setGroupsFailed(true)
+      toast.error(t('err.load'))
     } finally {
-      setLoading(false)
+      if (gen === groupsLoadGen.current) setLoading(false)
     }
   }
 
@@ -157,6 +187,12 @@ export default function Groups() {
         {/* Connection requests (CC.3) — pending connect-card submissions
             from the public church page. Approving links/creates the
             member and adds them to the requested group. */}
+        {interestsFailed && (
+          <p role="status" className="text-sm text-amber-700 dark:text-amber-400">
+            {t('load.failedBody')}
+          </p>
+        )}
+
         {interests.length > 0 && (
           <section className="rounded-2xl border border-brass-200/70 dark:border-brass-900/40 bg-gradient-to-br from-brass-50 to-parchment-50 dark:from-ink-900 dark:to-ink-900/80 shadow-warm p-4 md:p-5">
             <div className="flex items-center gap-2 mb-3">
@@ -222,12 +258,12 @@ export default function Groups() {
         ) : groupsFailed ? (
           <div role="status" className="flex items-start gap-3 rounded-2xl border border-amber-300/70 dark:border-amber-700/40 bg-amber-50/70 dark:bg-amber-900/15 px-5 py-4">
             <div className="flex-1 min-w-0">
-              <p className="text-sm font-semibold text-ink-900 dark:text-parchment-50">We couldn't load your groups.</p>
+              <p className="text-sm font-semibold text-ink-900 dark:text-parchment-50">{t('load.failedTitle')}</p>
               <p className="text-sm text-ink-600 dark:text-parchment-300/80 mt-0.5">
-                This is a connection problem, not a parish without groups. Nothing has been removed.
+                {t('load.failedBody')}
               </p>
             </div>
-            <button onClick={load} className="shrink-0 text-sm font-medium text-church-700 dark:text-brass-300 underline min-h-[32px]">Try again</button>
+            <button onClick={load} className="shrink-0 text-sm font-medium text-church-700 dark:text-brass-300 underline min-h-[32px]">{t('error.tryAgain')}</button>
           </div>
         ) : groups.length === 0 ? (
           <EmptyState
@@ -305,6 +341,7 @@ export default function Groups() {
 }
 
 function GroupModal({ group, members, membersFailed, onClose, onSaved }) {
+  const { t } = useLocale()
   const isEdit = !!group?.id
   const [form, setForm] = useState(() => {
     if (!isEdit) return EMPTY_FORM
@@ -432,6 +469,11 @@ function GroupModal({ group, members, membersFailed, onClose, onSaved }) {
         </div>
 
         <div className="flex-1 overflow-y-auto p-5 space-y-4">
+          {membersFailed && (
+            <p role="status" className="text-xs text-amber-700 dark:text-amber-400">
+              {t('mem.listFailed')}
+            </p>
+          )}
           <div>
             <label className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1.5">
               Name *

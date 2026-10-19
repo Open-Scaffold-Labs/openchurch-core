@@ -2,7 +2,7 @@
 //
 // OpenChurch already had three of the four resilience layers:
 //   orgExport.js    — a portable, intelligible copy of a parish's records
-//   backupDigest.js — that copy, gzipped and mailed off-site every week
+//   backupDigest.js — that copy, gzipped and written to backup storage every week
 //   retention.js    — an explicit, written-down prune policy
 //
 // What it did not have was the layer people actually meet: somebody

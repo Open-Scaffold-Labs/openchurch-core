@@ -346,7 +346,7 @@ export const MODULE_HELP = {
         items: [
           { label: 'Admin', desc: 'Everything, including settings, finance, register confirmation, and this page.' },
           { label: 'Staff', desc: 'Day-to-day work: members, schedule, donations, intentions — no org settings.' },
-          { label: 'Viewer', desc: 'Read-only everywhere; mutations are blocked at the API.' },
+          { label: 'Viewer', desc: 'Sees the Dashboard, Members and Schedule, plus a simplified Getting settled card. Cannot change parish records; can update their own profile, preferences and support tickets. The notification bell stays empty for viewers. Both limits are enforced by the API.' },
         ] },
     ],
     tips: ['Volunteers who only need to see the schedule are viewers; resist the urge to make everyone staff.'],
@@ -408,8 +408,21 @@ export const MODULE_HELP = {
   },
 }
 
+// SP-014..022: the Viewer column is fixed here, after the table, so it holds
+// whichever Billing/Finance option (ux-legal 0005a or 0005b) shaped the rows
+// above. A Viewer reads only the rows named below; the server enforces the
+// same list (server/src/middleware/viewerScope.js).
+const VIEWER_ROWS = new Set([
+  'Dashboard, Schedule, Members (view)',
+  'Report a problem; use the Assistant',
+])
+function fixViewerColumn(table) {
+  for (const row of table) row.viewer = VIEWER_ROWS.has(row.area)
+  return table
+}
+
 // ─── Role permission table ──────────────────────────────────────────────────
-export const ROLE_TABLE = [
+export const ROLE_TABLE = fixViewerColumn([
   { area: 'Dashboard, Schedule, Members (view)', admin: true, staff: true, viewer: true },
   { area: 'Add/edit members, events, intentions, donations', admin: true, staff: true, viewer: false },
   { area: 'Confirm register drafts (permanent record)', admin: true, staff: true, viewer: false },
@@ -417,7 +430,7 @@ export const ROLE_TABLE = [
   { area: 'Insights, Team, Org details, Billing, Audit log', admin: true, staff: false, viewer: false },
   { area: 'Donation refunds', admin: true, staff: false, viewer: false },
   { area: 'Report a problem; use the Assistant', admin: true, staff: true, viewer: true },
-]
+])
 
 // ─── Cross-cutting tips ─────────────────────────────────────────────────────
 export const TIPS = [
@@ -452,7 +465,7 @@ export const FAQ = [
   { q: 'A lector can\u2019t make Sunday. Do I reschedule everyone?',
     a: 'No — they open their swap link and another qualified member accepts it, no login needed. The schedule and reminders update themselves.' },
   { q: 'Can volunteers see the schedule without being able to change anything?',
-    a: 'Yes — invite them as viewers (Team). Viewers read everything they\u2019re shown and can change nothing; the API itself blocks their writes.' },
+    a: 'Yes — add them as viewers (Team). Viewers see the Dashboard, Members and Schedule and cannot change parish records (they can still update their own profile, preferences and support tickets); the API itself enforces both. Giving, payroll, finance, attendance, the archive, events and tasks stay with staff and admins.' },
   { q: 'How do I move us off our old system?',
     a: 'Members → Import CSV for the census; funds first, then donation history; digitize register entries as needed via Drafts. The [Sample] data clears in one action when you\u2019re ready.' },
   { q: 'Is OpenChurch in Spanish?',

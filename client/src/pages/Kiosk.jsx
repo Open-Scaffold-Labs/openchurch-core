@@ -148,8 +148,16 @@ export default function Kiosk() {
         // the roster, because a request failed. The duplicate then outlives
         // the outage.
         if (!res.ok) { setSearchFailed(true); return }
+        // A 200 whose members list is missing or holds an unusable entry is
+        // the same unread search. `d.members ?? []` painted "No members
+        // match — try the guest button", the duplicate-record path above.
+        const list = d && typeof d === 'object' && !Array.isArray(d) ? d.members : null
+        const usable = Array.isArray(list) && list.every(m =>
+          m && typeof m === 'object' && !Array.isArray(m)
+          && Number.isInteger(m.id) && m.id > 0 && typeof m.name === 'string')
+        if (!usable) { setSearchFailed(true); return }
         setSearchFailed(false)
-        setMatches(d.members ?? [])
+        setMatches(list)
       } catch (err) {
         if (err?.name !== 'AbortError' && seq === searchSeq.current) setSearchFailed(true)
         // AbortError (superseded) or network hiccup — leave the last

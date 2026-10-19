@@ -10,7 +10,7 @@
 // was never the part that lied.
 
 import { describe, it, expect, vi } from 'vitest'
-import { mutate, loadOne } from './format'
+import { mutate, loadOne, loadList, asMemberRoster, memberRosterUnreadable } from './format'
 
 const respond = (status, body) => vi.stubGlobal('fetch', vi.fn(async () => ({
   ok: status >= 200 && status < 300,
@@ -134,5 +134,84 @@ describe('loadOne shape validation', () => {
     const r = await loadOne('/x', [], Array.isArray)
     expect(r.ok).toBe(true)
     expect(r.data).toEqual([1, 2])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Member roster shape.
+//
+// WHAT EXACT DEFECT THESE DETECT: a 200 whose body is not an array being
+// treated as an empty member list. `{}`, null, a scalar, and `{ clients: [...] }`
+// are unreadable. `[]` is a real empty roster.
+// ---------------------------------------------------------------------------
+
+describe('member roster shape', () => {
+  it('an array is a roster, including a genuinely empty one', () => {
+    expect(asMemberRoster([])).toEqual({ ok: true, members: [] })
+    expect(asMemberRoster([{ id: 1, name: 'Ana' }])).toEqual({ ok: true, members: [{ id: 1, name: 'Ana' }] })
+  })
+
+  it('REFUSES {} — the object that used to become an empty roll', () => {
+    expect(asMemberRoster({})).toEqual({ ok: false, members: [] })
+  })
+
+  it('REFUSES null', () => {
+    expect(asMemberRoster(null)).toEqual({ ok: false, members: [] })
+  })
+
+  it('REFUSES a scalar and a wrapped object', () => {
+    expect(asMemberRoster(4).ok).toBe(false)
+    expect(asMemberRoster('none').ok).toBe(false)
+    expect(asMemberRoster({ clients: [{ id: 1 }] }).ok).toBe(false)
+  })
+
+  it('REFUSES a nested array — a list of lists is not a roster', () => {
+    expect(asMemberRoster([[{ id: 1, name: 'Ana' }]])).toEqual({ ok: false, members: [] })
+    expect(asMemberRoster([{ id: 1, name: 'Ana' }, [{ id: 2, name: 'Bea' }]]).ok).toBe(false)
+    expect(asMemberRoster([null]).ok).toBe(false)
+  })
+
+  it('null is not yet a failed render; a present non-array is', () => {
+    expect(memberRosterUnreadable(null, false)).toBe(false)
+    expect(memberRosterUnreadable(undefined, false)).toBe(false)
+    expect(memberRosterUnreadable([], false)).toBe(false)
+    expect(memberRosterUnreadable({}, false)).toBe(true)
+    expect(memberRosterUnreadable([], true)).toBe(true)
+  })
+
+  it('loadList accepts a 200 array', async () => {
+    respond(200, [{ id: 1, name: 'Ana' }])
+    await expect(loadList('/api/clients')).resolves.toEqual({ ok: true, data: [{ id: 1, name: 'Ana' }] })
+  })
+
+  it('loadList accepts a 200 empty array as empty, not failed', async () => {
+    respond(200, [])
+    await expect(loadList('/api/clients')).resolves.toEqual({ ok: true, data: [] })
+  })
+
+  it('loadList REFUSES a 200 {}', async () => {
+    respond(200, {})
+    const r = await loadList('/api/clients')
+    expect(r.ok).toBe(false)
+    expect(r.data).toEqual([])
+  })
+
+  it('loadList REFUSES a 200 null', async () => {
+    respond(200, null)
+    const r = await loadList('/api/clients')
+    expect(r.ok).toBe(false)
+    expect(r.data).toEqual([])
+  })
+
+  it('loadList REFUSES a 200 scalar', async () => {
+    respond(200, 4)
+    expect((await loadList('/api/clients')).ok).toBe(false)
+  })
+
+  it('loadList REFUSES a 200 nested array', async () => {
+    respond(200, [[{ id: 1, name: 'Ana' }]])
+    const r = await loadList('/api/clients')
+    expect(r.ok).toBe(false)
+    expect(r.data).toEqual([])
   })
 })

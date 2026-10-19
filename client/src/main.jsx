@@ -1,5 +1,6 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
+import { MotionConfig } from 'framer-motion'
 // Self-hosted design-system fonts. Weights here MUST stay in lockstep with
 // tailwind.config.js (fontFamily.sans / fontFamily.serif) and index.css.
 //
@@ -26,9 +27,11 @@ import './index.css'
 import App from './App.jsx'
 import ErrorBoundary from './components/ErrorBoundary'
 import { ToastProvider } from './components/ToastProvider'
+import { AuthProvider } from './context/AuthContext'
+import { LocaleProvider } from './i18n'
 import { installFetchInterceptor } from './auth/fetchInterceptor'
 
-// Attach the auth token to every /api request before React mounts so the
+// Send the session cookie on every /api request before React mounts so the
 // very first page-load fetches (e.g. /api/auth/me for rehydration) carry it.
 installFetchInterceptor()
 
@@ -45,15 +48,26 @@ window.addEventListener('unhandledrejection', (e) => {
 
 createRoot(document.getElementById('root')).render(
   <StrictMode>
-    <ErrorBoundary>
-      {/* ConfirmProvider used to sit here. It moved inside <LocaleProvider>
-          in App.jsx when the dialog started speaking — its recoverable
-          note has to be translated, and a provider cannot read a context
-          that is mounted below it. The build was perfectly happy; every
-          page threw on first paint. */}
-      <ToastProvider>
-        <App />
-      </ToastProvider>
-    </ErrorBoundary>
+    <MotionConfig reducedMotion="user">
+      {/* Outer ErrorBoundary wraps Auth + Locale so a crash in either
+          still shows recovery chrome (useOptionalLocale → ochr_locale /
+          EN). AuthProvider wraps LocaleProvider because LocaleProvider
+          reads useAuth() for the parish default. LocaleProvider wraps
+          the inner ErrorBoundary and ToastProvider so an App-tree crash
+          (and toast chrome) speak the live app locale. ConfirmProvider
+          stays inside App.jsx: it calls useLocale(), and a provider
+          cannot read a context mounted below it. */}
+      <ErrorBoundary>
+        <AuthProvider>
+          <LocaleProvider>
+            <ErrorBoundary>
+              <ToastProvider>
+                <App />
+              </ToastProvider>
+            </ErrorBoundary>
+          </LocaleProvider>
+        </AuthProvider>
+      </ErrorBoundary>
+    </MotionConfig>
   </StrictMode>
 )

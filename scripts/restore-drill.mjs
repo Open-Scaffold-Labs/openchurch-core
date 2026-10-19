@@ -1,22 +1,45 @@
 #!/usr/bin/env node
-// The restore drill.
+// The restore drill (Continuity Vault / layer 3).
 //
 // A backup nobody has restored is a rumour. This script proves, against
-// whatever database DATABASE_URL points at, that the Continuity Vault
-// can actually put a record back — the row, the rows Postgres cascaded
-// away with it, and the reference it set to NULL on a row that survived.
+// a disposable LOCAL Postgres, that the Continuity Vault can put a
+// record back — the row, the rows Postgres cascaded away with it, and
+// the reference it set to NULL on a row that survived.
 //
 // It builds its own throwaway organisation, does the whole round trip,
-// checks the result, and removes everything it made. Safe to run against
-// production; it touches nothing that was already there.
+// checks the result, and removes everything it made.
 //
-//   node --env-file-if-exists=server/.env scripts/restore-drill.mjs
+// FAIL-CLOSED (RECOVERY-L3-05). Requires OCHR_REHEARSAL=local and a
+// loopback DATABASE_URL (including libpq ?host= / ?hostaddr=). The gate
+// runs BEFORE any database driver import so a refuse path cannot depend
+// on server deps. It never follows server/.env as a safety mechanism —
+// export DATABASE_URL from `node scripts/local-db.mjs env` first. Local
+// restore success is not PITR, not hosted backup, and not production
+// rollback.
+//
+//   OCHR_REHEARSAL=local DATABASE_URL="$(node scripts/local-db.mjs env | cut -d= -f2- | tr -d \')" \
+//     node scripts/restore-drill.mjs
 //
 // Exit 0 = recovery works here today. Exit 1 = it does not, and the
 // promise on the Archive & Recovery page is not currently true.
+// Exit 2 = refused (wrong identity or non-loopback target).
 
-import pool from '../server/src/db.js'
-import { captureAndDelete, restoreEntry } from '../server/src/vault/index.js'
+import { redactDatabaseUrl, requireLocalRehearsal } from './lib/db-target-guard.mjs'
+
+const gate = requireLocalRehearsal({
+  rehearsal: process.env.OCHR_REHEARSAL,
+  urls: [{ label: 'DATABASE_URL', url: process.env.DATABASE_URL }],
+})
+if (!gate.ok) {
+  console.error(`restore-drill: ${gate.reason}`)
+  process.exit(gate.code)
+}
+console.log(`restore-drill: ${gate.reason}`)
+console.log(`              target ${redactDatabaseUrl(process.env.DATABASE_URL)}`)
+console.log('              LOCAL ONLY — not PITR, not hosted backup, not production.\n')
+
+const { default: pool } = await import('../server/src/db.js')
+const { captureAndDelete, restoreEntry } = await import('../server/src/vault/index.js')
 
 const stamp = new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 14)
 const checks = []

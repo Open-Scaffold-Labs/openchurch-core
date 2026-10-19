@@ -54,8 +54,11 @@ function HelpText({ field }) {
 
 // One row per configured field. The 8 supported types each get their
 // own rendering, with a shared <Label> + <HelpText> wrapper so the
-// label/required/help styling stays uniform.
+// label/required/help styling stays uniform. Field labels, options,
+// and help_text stay parish-supplied data; only the select empty
+// option is page chrome.
 function Field({ field, value, onChange }) {
+  const { t } = useLocale()
   const id = `f_${field.id}`
   const common = { id, name: field.id, required: Boolean(field.required) }
 
@@ -134,7 +137,7 @@ function Field({ field, value, onChange }) {
           onChange={(e) => onChange(e.target.value)}
           className={`${INPUT_CLS} mt-1.5`}
         >
-          <option value="">— Select —</option>
+          <option value="">{t('form.select')}</option>
           {(field.options ?? []).map((opt) => (
             <option key={opt} value={opt}>{opt}</option>
           ))}
@@ -194,10 +197,11 @@ function Field({ field, value, onChange }) {
 }
 
 export default function PublicForm() {
-  // Not for t() — these pages are still English (the string pass is
-  // separate work). This is the switch that lets the parish's language
-  // reach a page nobody signs in to.
-  const { setPublicLocale } = useLocale()
+  // User-visible chrome goes through t() (Levi knock-out #3). Form
+  // title, description, field labels, options, help_text, and API
+  // error text stay parish / API data. setPublicLocale is the switch
+  // that lets the parish's language reach a page nobody signs in to.
+  const { t, setPublicLocale } = useLocale()
   const { slug, formSlug } = useParams()
   const [form, setForm]       = useState(null)
   const [loading, setLoad]    = useState(true)
@@ -234,7 +238,7 @@ export default function PublicForm() {
       .catch((e) => { if (!cancelled) setErr(e.message) })
       .finally(() => { if (!cancelled) setLoad(false) })
     return () => { cancelled = true }
-  }, [slug, formSlug])
+  }, [slug, formSlug, setPublicLocale])
 
   function setAnswer(fieldId, value) {
     setAnswers((prev) => ({ ...prev, [fieldId]: value }))
@@ -253,7 +257,7 @@ export default function PublicForm() {
       if (f.type === 'multiselect' && f.required) {
         const v = answers[f.id]
         if (!Array.isArray(v) || v.length === 0) {
-          setSubmitErr(`${f.label} is required`)
+          setSubmitErr(t('form.fieldRequired', { label: f.label }))
           return
         }
       }
@@ -273,7 +277,7 @@ export default function PublicForm() {
       if (res.status === 429) { setSubmitErr('rate-limited'); return }
       if (!res.ok) {
         const data = await res.json().catch(() => ({}))
-        throw new Error(data.error || `Submit failed (${res.status})`)
+        throw new Error(data.error || t('form.submitFail'))
       }
       setSubmitted(true)
       if (submittedKey) {
@@ -302,10 +306,10 @@ export default function PublicForm() {
         <div className="text-center max-w-md">
           <AlertTriangle size={28} className="mx-auto text-amber-600 dark:text-amber-300 mb-3" />
           <h1 className="font-display text-2xl font-semibold text-ink-900 dark:text-parchment-50">
-            Form not available
+            {t('form.notFound')}
           </h1>
           <p className="mt-2 text-sm text-ink-500 dark:text-parchment-300/70">
-            We couldn't find an open form at <span className="font-mono">/p/{slug}/forms/{formSlug}</span>. It may have closed or the link may be off — double-check the link from your bulletin.
+            {t('form.notFoundBefore')}<span className="font-mono">/p/{slug}/forms/{formSlug}</span>{t('form.notFoundAfter')}
           </p>
         </div>
       </div>
@@ -318,9 +322,9 @@ export default function PublicForm() {
         <div className="text-center max-w-md">
           <AlertTriangle size={28} className="mx-auto text-rose-700 dark:text-rose-300 mb-3" />
           <h1 className="font-display text-2xl font-semibold text-ink-900 dark:text-parchment-50">
-            Couldn't load the form
+            {t('form.loadFailTitle')}
           </h1>
-          <p className="mt-2 text-sm text-ink-500 dark:text-parchment-300/70">{err || 'Please try again in a moment.'}</p>
+          <p className="mt-2 text-sm text-ink-500 dark:text-parchment-300/70">{t('form.loadFailBody')}</p>
         </div>
       </div>
     )
@@ -351,10 +355,10 @@ export default function PublicForm() {
           <div className="bg-parchment-100 dark:bg-ink-900/80 rounded-2xl border border-parchment-300/60 dark:border-brass-900/30 shadow-warm p-8 text-center">
             <CheckCircle2 size={32} className="mx-auto text-brass-600 dark:text-brass-300 mb-3" />
             <h1 className="font-display text-2xl font-semibold text-ink-900 dark:text-parchment-50">
-              Thank you
+              {t('form.thanks')}
             </h1>
             <p className="mt-2 text-sm text-ink-600 dark:text-parchment-200">
-              Your response to <span className="font-semibold">{form.title}</span> was received.
+              {t('form.receivedBefore')}<span className="font-semibold">{form.title}</span>{t('form.receivedAfter')}
             </p>
           </div>
         ) : (
@@ -383,7 +387,7 @@ export default function PublicForm() {
               <div className="space-y-4 pb-5 border-b border-parchment-300/60 dark:border-brass-900/30">
                 <div>
                   <label className="block text-sm font-semibold text-ink-800 dark:text-parchment-100" htmlFor="contact_name">
-                    Your name
+                    {t('form.name')}
                   </label>
                   <input
                     id="contact_name"
@@ -396,7 +400,7 @@ export default function PublicForm() {
                 </div>
                 <div>
                   <label className="block text-sm font-semibold text-ink-800 dark:text-parchment-100" htmlFor="contact_email">
-                    Email
+                    {t('form.email')}
                   </label>
                   <input
                     id="contact_email"
@@ -407,7 +411,7 @@ export default function PublicForm() {
                     className={`${INPUT_CLS} mt-1.5`}
                   />
                   <p className="mt-1 text-xs text-ink-500 dark:text-parchment-300/70">
-                    Only used to contact you about your response.
+                    {t('form.emailHelp')}
                   </p>
                 </div>
               </div>
@@ -423,7 +427,7 @@ export default function PublicForm() {
 
               {submitErr === 'rate-limited' ? (
                 <div className="text-sm text-amber-700 dark:text-amber-200 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-900/40 rounded-lg p-3">
-                  Too many submissions from this network. Please wait a minute and try again.
+                  {t('form.rateLimited')}
                 </div>
               ) : submitErr ? (
                 <div className="text-sm text-rose-700 dark:text-rose-200 bg-rose-50 dark:bg-rose-900/20 border border-rose-200 dark:border-rose-900/40 rounded-lg p-3">
@@ -437,14 +441,14 @@ export default function PublicForm() {
                 className="w-full inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-church-900 dark:bg-church-700 text-parchment-50 text-sm font-semibold shadow-warm hover:bg-church-800 dark:hover:bg-church-600 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
               >
                 {submitting && <Loader2 size={14} className="animate-spin" />}
-                {submitting ? 'Submitting…' : 'Submit'}
+                {submitting ? t('form.submitting') : t('form.submit')}
               </button>
             </form>
           </>
         )}
 
         <p className="mt-12 text-center text-[11px] text-ink-500 dark:text-parchment-300/70">
-          Powered by OpenChurch
+          {t('form.powered')}
         </p>
       </motion.div>
     </div>

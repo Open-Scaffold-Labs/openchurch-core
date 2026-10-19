@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Download, X, Share } from 'lucide-react'
+import { useLocale } from '../i18n'
 
 // Install-to-home-screen prompt (Sprint PWA / PWA.1b).
 //
@@ -26,6 +27,11 @@ import { Download, X, Share } from 'lucide-react'
 //   - Running in standalone mode (already installed).
 //   - User dismissed this session OR persistently.
 //   - Browser doesn't support PWA install AND device isn't iOS.
+//
+// Copy lives in strings.js / t() (OC-READY-01-026). This file does
+// not change when the banner is shown, dismissed, or how install
+// is offered. {share} and {add} in install.iosBody are JSX slots
+// for the Share icon and the bold Add-to-Home-Screen phrase.
 
 const DISMISS_KEY = 'ochr_install_dismissed'
 
@@ -47,7 +53,23 @@ function isIOSSafari() {
   return isIOS && isSafari
 }
 
+function IosInstallBody({ t }) {
+  const add = t('install.iosAdd')
+  const [beforeShare, afterShare = ''] = t('install.iosBody').split('{share}')
+  const [beforeAdd, afterAdd = ''] = afterShare.split('{add}')
+  return (
+    <p className="text-xs text-ink-500 dark:text-parchment-300/70 mt-1 leading-snug">
+      {beforeShare}
+      <Share size={11} className="inline mx-0.5 align-text-bottom" aria-hidden="true" />
+      {beforeAdd}
+      <span className="font-semibold">{add}</span>
+      {afterAdd}
+    </p>
+  )
+}
+
 export default function InstallPrompt() {
+  const { t } = useLocale()
   const [deferredPrompt, setDeferredPrompt] = useState(null)
   const [showIOS, setShowIOS] = useState(false)
   const [dismissed, setDismissed] = useState(() => {
@@ -121,8 +143,8 @@ export default function InstallPrompt() {
           exit={{ opacity: 0, y: 20 }}
           transition={{ duration: 0.25, ease: [0.25, 0.1, 0.25, 1] }}
           role="dialog"
-          aria-label="Install OpenChurch"
-          className="fixed bottom-4 left-4 right-4 md:left-auto md:right-6 md:bottom-6 md:max-w-sm z-40 rounded-2xl border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-50 dark:bg-ink-900 shadow-warm-lg p-4"
+          aria-label={t('install.title')}
+          className="safe-mb fixed bottom-4 left-4 right-4 md:left-auto md:right-6 md:bottom-6 md:max-w-sm z-40 rounded-2xl border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-50 dark:bg-ink-900 shadow-warm-lg p-4"
         >
           <div className="flex items-start gap-3">
             <div className="shrink-0 w-9 h-9 rounded-xl bg-church-50 dark:bg-church-900/40 flex items-center justify-center text-church-800 dark:text-brass-300">
@@ -130,18 +152,14 @@ export default function InstallPrompt() {
             </div>
             <div className="flex-1 min-w-0">
               <p className="text-sm font-semibold text-ink-900 dark:text-parchment-50">
-                Install OpenChurch
+                {t('install.title')}
               </p>
               {deferredPrompt ? (
                 <p className="text-xs text-ink-500 dark:text-parchment-300/70 mt-1 leading-snug">
-                  Add to your home screen for one-tap access to the schedule,
-                  members, and the daily verse.
+                  {t('install.body')}
                 </p>
               ) : (
-                <p className="text-xs text-ink-500 dark:text-parchment-300/70 mt-1 leading-snug">
-                  Tap the <Share size={11} className="inline mx-0.5 align-text-bottom" /> Share icon, then
-                  choose <span className="font-semibold">Add to Home Screen</span>.
-                </p>
+                <IosInstallBody t={t} />
               )}
               {deferredPrompt && (
                 <button
@@ -149,14 +167,14 @@ export default function InstallPrompt() {
                   onClick={install}
                   className="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-church-900 dark:bg-church-700 text-parchment-50 text-xs font-semibold shadow-warm hover:bg-church-800 dark:hover:bg-church-600 transition-colors"
                 >
-                  <Download size={13} /> Install
+                  <Download size={13} /> {t('install.cta')}
                 </button>
               )}
             </div>
             <button
               type="button"
               onClick={dismiss}
-              aria-label="Dismiss install prompt"
+              aria-label={t('install.dismiss')}
               className="shrink-0 -m-2 p-2 text-ink-400 dark:text-parchment-400/60 hover:text-ink-700 dark:hover:text-parchment-100 transition-colors"
             >
               <X size={14} />

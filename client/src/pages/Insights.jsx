@@ -112,16 +112,24 @@ export default function Insights() {
 
   // "Who hasn't shown up" — pastoral care list. Separate fetch so the
   // weeks selector can re-query without reloading the whole dashboard.
+  // A refused read is not "everyone has been seen." The previous list
+  // is cleared on failure so a later miss is not the old answer.
   const [lapsedWeeks, setLapsedWeeks] = useState(3)
   const [lapsed, setLapsed] = useState(null)
+  const [lapsedErr, setLapsedErr] = useState(false)
 
   useEffect(() => {
     if (!isAdmin) return
     let cancelled = false
     fetch(apiUrl(`/api/insights/lapsed?weeks=${lapsedWeeks}`))
-      .then(r => (r.ok ? r.json() : null))
-      .then(d => { if (!cancelled) setLapsed(d) })
-      .catch(() => { if (!cancelled) setLapsed(null) })
+      .then(async r => {
+        if (!r.ok) throw new Error(`${r.status}`)
+        const d = await r.json()
+        if (!d || !Array.isArray(d.members)) throw new Error('malformed')
+        return d
+      })
+      .then(d => { if (!cancelled) { setLapsedErr(false); setLapsed(d) } })
+      .catch(() => { if (!cancelled) { setLapsed(null); setLapsedErr(true) } })
     return () => { cancelled = true }
   }, [isAdmin, lapsedWeeks])
 
@@ -273,8 +281,8 @@ export default function Insights() {
         {/* Who hasn't shown up — members with a real attendance/check-in
             history whose last appearance is older than N weeks. Never-seen
             members are excluded server-side (they're an onboarding
-            problem, not a lapse). Renders only when the query returned. */}
-        {lapsed && (
+            problem, not a lapse). A refused read still shows the card. */}
+        {(lapsed || lapsedErr) && (
           <motion.div
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
@@ -299,7 +307,11 @@ export default function Insights() {
                 </select>
               </label>
             </div>
-            {lapsed.members.length === 0 ? (
+            {lapsedErr ? (
+              <p role="status" className="px-5 py-4 text-center text-sm text-amber-800 dark:text-amber-300">
+                {t('ins.lapsedUnread')}
+              </p>
+            ) : lapsed.members.length === 0 ? (
               <p className="text-sm text-ink-500 dark:text-parchment-300/70 py-4 text-center">
                 {t('ins.lapsedNone', { n: lapsed.weeks })}
               </p>

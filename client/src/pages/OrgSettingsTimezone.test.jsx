@@ -13,11 +13,14 @@ import { LocaleProvider } from '../i18n'
 import { ToastProvider } from '../components/ToastProvider'
 import { ConfirmProvider } from '../components/ConfirmProvider'
 import OrgSettings from './OrgSettings'
+import { canonicalParishTimeZone } from '../utils/parishTimeZone'
+
+const auth = vi.hoisted(() => ({ updateUser: vi.fn() }))
 
 vi.mock('../context/AuthContext', () => ({
   useAuth: () => ({
-    user: { id: 1, name: 'Rector', role: 'admin', organization: { id: 1, name: 'St Test', locale: 'en' } },
-    updateUser: () => {},
+    user: { id: 1, name: 'Rector', role: 'admin', organization: { id: 1, name: 'St Test', locale: 'en', timezone: 'UTC' } },
+    updateUser: auth.updateUser,
     token: 't', loading: false,
   }),
 }))
@@ -52,7 +55,10 @@ const mount = () => render(
   </ConfirmProvider></ToastProvider></LocaleProvider></MemoryRouter>
 )
 
-beforeEach(() => vi.unstubAllGlobals())
+beforeEach(() => {
+  vi.unstubAllGlobals()
+  auth.updateUser.mockClear()
+})
 
 describe('the parish timezone', () => {
   it('is offered on Org details, showing the zone the org has', async () => {
@@ -77,6 +83,9 @@ describe('the parish timezone', () => {
       expect(patch).toBeTruthy()
       expect(patch.body.timezone).toBe('America/Chicago')
     })
+    expect(auth.updateUser).toHaveBeenCalledWith({
+      organization: expect.objectContaining({ timezone: 'America/Chicago', locale: 'en' }),
+    })
   })
 
   it('offers real IANA zones, not a hand-typed few', async () => {
@@ -87,5 +96,21 @@ describe('the parish timezone', () => {
     expect(values).toContain('America/New_York')
     expect(values).toContain('Europe/Madrid')
     expect(values.length).toBeGreaterThan(100)
+    // Legacy names Intl still lists, and this Postgres does not.
+    // The option value is the modern name, which is what a save stores.
+    const legacy = [
+      'America/Indianapolis', 'America/Louisville', 'America/Cordoba',
+      'America/Mendoza', 'America/Jujuy', 'America/Catamarca',
+      'America/Godthab', 'Atlantic/Faeroe', 'Africa/Asmera',
+      'Pacific/Enderbury', 'Pacific/Ponape', 'Pacific/Truk',
+      'Asia/Calcutta', 'Europe/Kiev',
+    ]
+    for (const name of legacy) expect(values).not.toContain(name)
+    expect(values).toContain('America/Indiana/Indianapolis')
+    expect(values).toContain('America/Nuuk')
+    expect(values).toContain('Pacific/Kanton')
+    for (const value of values) {
+      expect(canonicalParishTimeZone(value)).toBe(value)
+    }
   })
 })

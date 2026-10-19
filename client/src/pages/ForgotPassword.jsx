@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import { Mail, Loader2, CheckCircle2 } from 'lucide-react'
 import { apiUrl } from '../api'
+import { useLocale } from '../i18n'
 import TextField from '../components/TextField'
 
 // Step 1 of password reset. Collects an email, asks the server to issue
@@ -12,10 +13,12 @@ import TextField from '../components/TextField'
 // a confirming UI.
 
 export default function ForgotPassword() {
+  const { t, locale, setLocale } = useLocale()
   const [email,    setEmail]    = useState('')
   const [loading,  setLoading]  = useState(false)
   const [error,    setError]    = useState('')
   const [sent,     setSent]     = useState(false)
+  const [sentBefore, sentAfter] = t('forgot.sentBody').split('{email}')
 
   async function onSubmit(e) {
     e.preventDefault()
@@ -29,7 +32,7 @@ export default function ForgotPassword() {
       })
       if (!res.ok) {
         const data = await res.json().catch(() => ({}))
-        throw new Error(data.error || "That didn't save — nothing was lost. Please try again.")
+        throw new Error(data.error || t('err.save'))
       }
       setSent(true)
     } catch (err) {
@@ -66,41 +69,41 @@ export default function ForgotPassword() {
                 <CheckCircle2 size={20} />
               </div>
               <h1 className="font-display text-2xl font-semibold text-ink-900 dark:text-parchment-50">
-                Check your email
+                {t('forgot.sentTitle')}
               </h1>
               <p className="mt-3 text-sm text-ink-500 dark:text-parchment-300/70 leading-relaxed">
-                If an account exists for <span className="font-semibold text-ink-700 dark:text-parchment-100">{email}</span>, we&rsquo;ve sent a link to reset the password. The link is valid for one hour.
+                {sentBefore}<span className="font-semibold text-ink-700 dark:text-parchment-100">{email}</span>{sentAfter}
               </p>
               <Link
                 to="/login"
                 className="tap mt-6 inline-flex items-center justify-center px-5 py-2.5 rounded-lg bg-church-900 dark:bg-church-700 text-parchment-50 text-sm font-semibold shadow-warm hover:bg-church-800 dark:hover:bg-church-600 transition-colors"
               >
-                Back to sign in
+                {t('forgot.back')}
               </Link>
             </div>
           ) : (
             <>
               <h1 className="font-display text-2xl font-semibold text-ink-900 dark:text-parchment-50">
-                Reset your password
+                {t('forgot.title')}
               </h1>
               <p className="text-sm text-ink-500 dark:text-parchment-300/70 mt-1">
-                Enter the email associated with your church. We&rsquo;ll send a link to set a new password.
+                {t('forgot.sub')}
               </p>
 
               <form onSubmit={onSubmit} className="mt-6 space-y-4">
                 <TextField
-                  label="Email"
+                  label={t('login.email')}
                   type="email"
                   required
                   autoComplete="email"
                   value={email}
                   onChange={e => setEmail(e.target.value)}
-                  placeholder="you@yourchurch.com"
+                  placeholder={t('signup.emailPh')}
                   leadingIcon={Mail}
                 />
 
                 {error && (
-                  <div className="text-xs text-rose-700 dark:text-rose-300 bg-rose-50 dark:bg-rose-900/20 border border-rose-100 dark:border-rose-800/30 rounded-lg px-3 py-2">
+                  <div role="alert" className="text-xs text-rose-700 dark:text-rose-300 bg-rose-50 dark:bg-rose-900/20 border border-rose-100 dark:border-rose-800/30 rounded-lg px-3 py-2">
                     {error}
                   </div>
                 )}
@@ -111,7 +114,7 @@ export default function ForgotPassword() {
                   className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-church-900 dark:bg-church-700 text-parchment-50 text-sm font-semibold shadow-warm hover:bg-church-800 dark:hover:bg-church-600 transition-colors disabled:opacity-50"
                 >
                   {loading ? <Loader2 size={15} className="animate-spin" /> : null}
-                  {loading ? 'Sending…' : 'Send reset link'}
+                  {loading ? t('forgot.submitting') : t('forgot.submit')}
                 </button>
               </form>
             </>
@@ -120,15 +123,34 @@ export default function ForgotPassword() {
 
         {!sent && (
           <p className="mt-5 text-center text-sm text-ink-500 dark:text-parchment-300/70">
-            Remembered it?{' '}
+            {t('forgot.remembered')}{' '}
             <Link
               to="/login"
-              className="tap-reach inline-block font-semibold text-church-700 hover:text-church-900 dark:text-brass-300 dark:hover:text-brass-200 transition-colors"
+              className="tap-auth font-semibold text-church-700 hover:text-church-900 dark:text-brass-300 dark:hover:text-brass-200 transition-colors"
             >
-              Back to sign in
+              {t('forgot.back')}
             </Link>
           </p>
         )}
+
+        {/* Quiet language switch — same unauthenticated fold as Login/Signup. */}
+        <p className="mt-3 text-center text-xs text-ink-400 dark:text-parchment-400/60">
+          <button
+            type="button"
+            onClick={() => setLocale('en')}
+            className={`tap-auth px-1 transition-colors ${locale === 'en' ? 'text-church-800 dark:text-brass-300 font-semibold' : 'hover:text-ink-600 dark:hover:text-parchment-200'}`}
+          >
+            English
+          </button>
+          {' · '}
+          <button
+            type="button"
+            onClick={() => setLocale('es')}
+            className={`tap-auth px-1 transition-colors ${locale === 'es' ? 'text-church-800 dark:text-brass-300 font-semibold' : 'hover:text-ink-600 dark:hover:text-parchment-200'}`}
+          >
+            Español
+          </button>
+        </p>
       </motion.div>
     </div>
   )

@@ -7,6 +7,7 @@ import EmptyState from '../components/EmptyState'
 import { SkeletonRowList } from '../components/Skeleton'
 import { apiUrl } from '../api'
 import { useAuth } from '../context/AuthContext'
+import { useLocale } from '../i18n'
 
 // Year-end giving statements admin list (Sprint Y / Y.2). Admin-only —
 // the server enforces requireRole('admin') on /api/giving-statements,
@@ -25,6 +26,18 @@ function fmtCurrency(n) {
   return Number(n).toLocaleString(undefined, {
     style: 'currency', currency: 'USD',
   })
+}
+
+// A 200 is not a year of donors. Missing `donors` or a non-numeric
+// `total_donors` must stay a failed load — `{ total_donors: 0 }` alone
+// used to read as an empty tax year.
+function isStatementPreview(body) {
+  return Boolean(body)
+    && typeof body === 'object'
+    && !Array.isArray(body)
+    && Array.isArray(body.donors)
+    && typeof body.total_donors === 'number'
+    && Number.isFinite(body.total_donors)
 }
 
 function YearPicker({ year, onChange }) {
@@ -55,26 +68,53 @@ function YearPicker({ year, onChange }) {
 
 export default function GivingStatements() {
   const { user } = useAuth()
+  const { t } = useLocale()
   const isAdmin = user?.role === 'admin'
 
   const [year, setYear] = useState(() => new Date().getFullYear())
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState('')
+  const [issued, setIssued] = useState(null)
+  const [issuedErr, setIssuedErr] = useState('')
+  const [issuedLoading, setIssuedLoading] = useState(true)
 
   const load = useCallback(async () => {
     setLoading(true)
     setErr('')
+    setIssuedErr('')
+    setIssuedLoading(true)
     try {
-      const res = await fetch(apiUrl(`/api/giving-statements/preview?year=${year}`))
-      if (res.status === 403) { setErr('admin-only'); setData(null); return }
-      if (!res.ok) throw new Error("Couldn't load statements. Nothing was lost — please retry.")
-      setData(await res.json())
-    } catch (e) {
-      setErr("Couldn't load statements. Nothing was lost — please retry.")
+      const [previewResult, issuedResult] = await Promise.allSettled([
+        fetch(apiUrl(`/api/giving-statements/preview?year=${year}`)),
+        fetch(apiUrl(`/api/giving-statements/issued?year=${year}`)),
+      ])
+      if (previewResult.status !== 'fulfilled') {
+        throw new Error('preview-load-failed')
+      }
+      const res = previewResult.value
+      if (res.status === 403) { setErr('admin-only'); setData(null); setIssued(null); return }
+      if (!res.ok) throw new Error('preview-load-failed')
+      const preview = await res.json()
+      if (!isStatementPreview(preview)) throw new Error('preview-load-failed')
+      setData(preview)
+
+      try {
+        if (issuedResult.status !== 'fulfilled' || !issuedResult.value.ok) {
+          throw new Error('issued-load-failed')
+        }
+        const body = await issuedResult.value.json()
+        setIssued(Array.isArray(body.statements) ? body.statements : [])
+      } catch {
+        setIssuedErr('failed')
+        setIssued(null)
+      }
+    } catch {
+      setErr('failed')
       setData(null)
     } finally {
       setLoading(false)
+      setIssuedLoading(false)
     }
   }, [year])
 
@@ -86,6 +126,8 @@ export default function GivingStatements() {
     return (
       <PageWrapper>
         <div className="max-w-2xl mx-auto py-16">
+          {/* No stmt.* key names this gate. ins.adminOnly and np.adminsOnly
+              speak about insights and notifications, so the sentence stays. */}
           <EmptyState
             icon={AlertTriangle}
             title="Admins only"
@@ -114,6 +156,9 @@ export default function GivingStatements() {
               Year-end donor receipts. Pick a tax year, then open any donor to
               preview and print their statement.
             </p>
+            <p data-testid="statement-list-not-sent" className="text-sm text-ink-500 dark:text-parchment-300/70 mt-1">
+              {t('stmt.listHonesty')}
+            </p>
           </div>
           <YearPicker year={year} onChange={setYear} />
         </motion.div>
@@ -141,14 +186,58 @@ export default function GivingStatements() {
           </motion.div>
         )}
 
+        {/* Issued register — frozen claims, not deliveries (STMT-01). */}
+        {issuedErr && (
+          <EmptyState
+            icon={AlertTriangle}
+            title={t('load.failedTitle')}
+            body={t('load.failedBody')}
+            action={{ label: 'Retry', onClick: load }}
+          />
+        )}
+        {!issuedLoading && !issuedErr && issued && issued.length > 0 && (
+          <div data-testid="statement-issued-list" className="rounded-2xl border border-brass-600/40 dark:border-brass-900/40 bg-parchment-50 dark:bg-ink-900 overflow-hidden">
+            <div className="px-5 py-3 border-b border-parchment-200/70 dark:border-brass-900/30">
+              <h2 className="font-display text-lg font-semibold text-ink-900 dark:text-parchment-50">
+                {t('stmt.issuedListTitle')}
+              </h2>
+              <p className="text-xs text-ink-500 dark:text-parchment-300/70 mt-0.5">
+                {t('stmt.listHonesty')}
+              </p>
+            </div>
+            <ul className="divide-y divide-parchment-200/60 dark:divide-brass-900/25">
+              {issued.map(s => (
+                <li key={s.id}>
+                  <Link
+                    to={`/donations/statements/${encodeURIComponent(s.donor_key)}?issued=${s.id}`}
+                    className="flex items-center gap-4 px-5 py-3 hover:bg-parchment-100/60 dark:hover:bg-ink-800/40 transition-colors"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-semibold text-ink-900 dark:text-parchment-50 truncate">
+                        No. {s.statement_no}
+                      </p>
+                      <p className="text-xs text-ink-500 dark:text-parchment-300/70 mt-0.5 truncate">
+                        {s.donor_key}
+                      </p>
+                    </div>
+                    <span data-testid="statement-issued-list-not-sent" className="shrink-0 text-[11px] font-semibold uppercase tracking-wider text-brass-800 dark:text-brass-300">
+                      {t('stmt.issuedNotSent')}
+                    </span>
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
         {/* Body */}
         {loading ? (
           <SkeletonRowList count={5} />
         ) : err ? (
           <EmptyState
             icon={AlertTriangle}
-            title="Couldn't load statements"
-            body={err}
+            title={t('load.failedTitle')}
+            body={t('load.failedBody')}
             action={{ label: 'Retry', onClick: load }}
           />
         ) : data?.total_donors === 0 ? (

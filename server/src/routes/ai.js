@@ -1,20 +1,16 @@
 import { Router } from 'express'
-import Anthropic from '@anthropic-ai/sdk'
-import OpenAI from 'openai'
+import { dispatch, refusalBody } from '../ai/gate.js'
 import pool from '../db.js'
 import { requireIntParam } from '../utils/params.js'
 import { quotaFor, reserveSlot, releaseSlot, updateSlotProvider } from '../billing/aiQuota.js'
 import { requireRole } from '../middleware/auth.js'
-import { getOrgProvider, encryptApiKey } from '../ai/orgProvider.js'
+import { getOrgProvider, encryptApiKey, AI_PROVIDER_BROKEN } from '../ai/orgProvider.js'
 import { resolveLiturgicalContext } from './liturgical.js'
 import { monitor } from '../monitoring/index.js'
 
 const router = Router()
 
-// Default models — kept small and cheap. Callers can still override via
-// body.model if we ever expose that.
-const DEFAULT_ANTHROPIC_MODEL = 'claude-haiku-4-5-20251001'
-const DEFAULT_OPENAI_MODEL    = 'gpt-4o-mini'
+// Models are pinned per route in ai/policy.js (ROUTES), not here.
 
 // System prompts per generation type. Keeping them here (rather than the
 // client) keeps prompt engineering server-side where it belongs.
@@ -27,76 +23,24 @@ const SYSTEM_PROMPTS = {
 
 const ALLOWED_TYPES = new Set(Object.keys(SYSTEM_PROMPTS))
 
-// Run a prompt through the provider chain. With no org override:
-// platform keys, Anthropic → OpenAI fallback. When the org has plugged
-// in its OWN provider (AIP.1), we use exactly that — their provider,
-// their key, their optional model pin, no silent fallback onto the
-// platform's bill. Returns { text, provider, model } or throws.
-async function runLLM({ systemPrompt, userPrompt, maxTokens = 1024, org = null }) {
-  const errors = []
+// Every model call goes through ai/gate.js dispatch: platform stop,
+// explicit routing (no silent managed fallback), data classes, input bound.
+async function runLLM({ systemPrompt, userPrompt, maxTokens, orgId, capability }) {
+  return dispatch({ orgId, capabilityId: capability, system: systemPrompt,
+    messages: [{ role: 'user', content: userPrompt }], maxTokens })
+}
 
-  if (org?.provider === 'anthropic') {
-    const model = org.model || DEFAULT_ANTHROPIC_MODEL
-    const client = new Anthropic({ apiKey: org.apiKey })
-    const message = await client.messages.create({
-      model, max_tokens: maxTokens, system: systemPrompt,
-      messages: [{ role: 'user', content: userPrompt }],
-    })
-    const text = message.content?.[0]?.text
-    if (text) return { text, provider: 'anthropic (org key)', model }
-    throw new Error('anthropic (org key): empty response')
-  }
-  if (org?.provider === 'openai') {
-    const model = org.model || DEFAULT_OPENAI_MODEL
-    const client = new OpenAI({ apiKey: org.apiKey })
-    const completion = await client.chat.completions.create({
-      model,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user',   content: userPrompt },
-      ],
-    })
-    const text = completion.choices?.[0]?.message?.content
-    if (text) return { text, provider: 'openai (org key)', model }
-    throw new Error('openai (org key): empty response')
-  }
+function sendAiFailure(res, err) {
+  const r = refusalBody(err)
+  if (r) return res.status(r.status).json(r.body)
+  return res.status(500).json({ code: 'ai_failed', error: 'AI request failed' })
+}
 
-  if (process.env.ANTHROPIC_API_KEY) {
-    try {
-      const client = new Anthropic()
-      const message = await client.messages.create({
-        model: DEFAULT_ANTHROPIC_MODEL,
-        max_tokens: maxTokens,
-        system: systemPrompt,
-        messages: [{ role: 'user', content: userPrompt }],
-      })
-      const text = message.content?.[0]?.text
-      if (text) return { text, provider: 'anthropic', model: DEFAULT_ANTHROPIC_MODEL }
-    } catch (err) {
-      errors.push(`anthropic: ${err.message}`)
-    }
-  }
-
-  if (process.env.OPENAI_API_KEY) {
-    try {
-      const client = new OpenAI()
-      const completion = await client.chat.completions.create({
-        model: DEFAULT_OPENAI_MODEL,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user',   content: userPrompt },
-        ],
-      })
-      const text = completion.choices?.[0]?.message?.content
-      if (text) return { text, provider: 'openai', model: DEFAULT_OPENAI_MODEL }
-    } catch (err) {
-      errors.push(`openai: ${err.message}`)
-    }
-  }
-
-  const err = new Error(errors.length ? `All providers failed: ${errors.join(' | ')}` : 'No AI provider configured')
-  err.code = errors.length ? 'ALL_FAILED' : 'NO_PROVIDER'
-  throw err
+const CAPABILITY_FOR_TYPE = {
+  sermon: 'parish_sermon_draft_v1',
+  message: 'parish_message_draft_v1',
+  devotional: 'parish_devotional_draft_v1',
+  announcement: 'parish_announcement_draft_v1',
 }
 
 // POST /api/ai/enhance — kept for existing callers.
@@ -143,8 +87,7 @@ router.post('/enhance', async (req, res) => {
   const userPrompt   = `Context: ${context || 'General church notes'}\n\nText: ${text}`
 
   try {
-    const org = await getOrgProvider(req.organizationId).catch(() => null)
-    const { text: result, provider, model } = await runLLM({ systemPrompt, userPrompt, org })
+    const { text: result, provider, model } = await runLLM({ systemPrompt, userPrompt, orgId: req.organizationId, capability: 'parish_text_enhance_v1' })
     // Backfill the provider/model onto the reserved usage row now that we
     // know which provider served the call. Best-effort — never fails the request.
     updateSlotProvider(slotId, { provider, model }).catch(uErr => monitor.error('ai-quota.update', uErr, { orgId: req.organizationId, endpoint: 'enhance' }))
@@ -154,10 +97,9 @@ router.post('/enhance', async (req, res) => {
     // call doesn't count against the org's quota. Best-effort.
     releaseSlot(slotId).catch(rErr => monitor.error('ai-quota.release', rErr, { orgId: req.organizationId, endpoint: 'enhance' }))
     monitor.error('ai.enhance', err, { orgId: req.organizationId })
-    // Provider errors stay in the logs — clients get a stable message,
-    // never raw upstream detail (key fragments, model names, quotas).
-    const status = err.code === 'NO_PROVIDER' ? 503 : 500
-    res.status(status).json({ error: status === 503 ? 'AI is not configured' : 'AI request failed' })
+    // Provider errors stay in the logs, already reduced to provider/status/
+    // category. Clients get a stable machine-readable code.
+    sendAiFailure(res, err)
   }
 })
 
@@ -224,12 +166,12 @@ router.post('/generate', async (req, res) => {
       }
     }
 
-    const org = await getOrgProvider(req.organizationId).catch(() => null)
     const { text, provider, model } = await runLLM({
       systemPrompt: SYSTEM_PROMPTS[type],
       userPrompt,
-      org,
+      orgId: req.organizationId,
       maxTokens: 1500,
+      capability: CAPABILITY_FOR_TYPE[type],
     })
 
     // Backfill the provider/model onto the reserved usage row now that we
@@ -260,9 +202,8 @@ router.post('/generate', async (req, res) => {
     // The LLM call failed after we reserved a slot — refund it so a failed
     // call doesn't count against the org's quota. Best-effort.
     releaseSlot(slotId).catch(rErr => monitor.error('ai-quota.release', rErr, { orgId: req.organizationId }))
-    console.error(err)
-    const status = err.code === 'NO_PROVIDER' ? 503 : 500
-    res.status(status).json({ error: status === 503 ? 'AI is not configured' : 'AI request failed' })
+    monitor.error('ai.generate', err, { orgId: req.organizationId, type })
+    sendAiFailure(res, err)
   }
 })
 
@@ -289,7 +230,9 @@ router.get('/quota', async (req, res) => {
 // Returns { rows, total, hasMore, limit, offset } so the Library
 // page can paginate. The AI Studio's right-rail strip reads
 // data.rows; the previous bare-array shape is gone.
-router.get('/generations', async (req, res) => {
+// Shared history of raw prompts/outputs: tenant admins only (TARS #280
+// disposition 3). A writer still gets their own new draft in the response.
+router.get('/generations', requireRole('admin'), async (req, res) => {
   try {
     const { type } = req.query
     const limit  = Math.min(parseInt(req.query.limit, 10) || 25, 200)
@@ -351,7 +294,7 @@ router.get('/generations', async (req, res) => {
 })
 
 // DELETE /api/ai/generations/:id — remove one history entry.
-router.delete('/generations/:id', async (req, res) => {
+router.delete('/generations/:id', requireRole('admin'), async (req, res) => {
   const id = requireIntParam(req, res); if (id === null) return
   try {
     const result = await pool.query(
@@ -361,7 +304,7 @@ router.delete('/generations/:id', async (req, res) => {
     if (result.rowCount === 0) return res.status(404).json({ error: 'Not found' })
     res.status(204).end()
   } catch (err) {
-    console.error(err)
+    monitor.error('ai.generations.delete', err, { orgId: req.organizationId, id })
     res.status(500).json({ error: 'Failed to delete generation' })
   }
 })
@@ -379,6 +322,14 @@ router.get('/provider', requireRole('admin'), async (req, res) => {
     }
     res.json({ source: 'org', provider: org.provider, model: org.model, key_last4: org.last4 })
   } catch (err) {
+    // R4-3/R5-2: only a provider the gate cannot use (no key, or a key that
+    // no longer decrypts) is shown as broken, so an admin can fix it. Any
+    // other failure (e.g. a transient DB error) is an honest 500, never
+    // "broken". No key material or error text is returned.
+    if (err?.code === AI_PROVIDER_BROKEN) {
+      monitor.warn('ai.provider.get', 'org AI provider is broken', { orgId: req.organizationId })
+      return res.json({ source: 'org', provider: err.provider, model: err.model ?? null, key_last4: null, broken: true })
+    }
     monitor.error('ai.provider.get', err, { orgId: req.organizationId })
     res.status(500).json({ error: 'Failed to load AI provider settings' })
   }

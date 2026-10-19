@@ -16,10 +16,14 @@
 //      405 and an instruction to void instead — and the UI threw that
 //      instruction away, showing "Failed (405)".
 
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { LocaleProvider } from '../i18n'
+import { STRINGS } from '../i18n/strings'
 import { ToastProvider } from '../components/ToastProvider'
 import { ConfirmProvider } from '../components/ConfirmProvider'
 import MemberDetail from './MemberDetail'
@@ -40,6 +44,26 @@ const REC = {
 
 const EMPTY_CLAIM = /no sacraments recorded yet/i
 const UNREAD      = /could not be read/i
+const MEMBER_SRC = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'MemberDetail.jsx'), 'utf8')
+const PROFILE_HOP_KEYS = ['register.certLine', 'register.editRecord', 'register.removeRecord']
+
+function stripComments(src) {
+  return src
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^\s*\/\/.*$/gm, '')
+}
+
+function certLine(locale, n) {
+  return STRINGS[locale]['register.certLine'].replaceAll('{n}', n)
+}
+
+function editBaptism(locale) {
+  return STRINGS[locale]['register.editRecord'].replaceAll('{sacrament}', STRINGS[locale]['sac.baptism'])
+}
+
+function removeBaptism(locale) {
+  return STRINGS[locale]['register.removeRecord'].replaceAll('{sacrament}', STRINGS[locale]['sac.baptism'])
+}
 
 // One stub for every endpoint the profile touches; `routes` overrides the
 // ones a given test cares about. Each entry is [matcher, handler].
@@ -74,7 +98,13 @@ const renderProfile = () =>
 
 const sacramentList = () => u => u.includes('/api/sacraments?client_id')
 
-beforeEach(() => { vi.unstubAllGlobals() })
+beforeEach(() => {
+  vi.unstubAllGlobals()
+  localStorage.removeItem('ochr_locale')
+})
+afterEach(() => {
+  localStorage.removeItem('ochr_locale')
+})
 
 describe("a member's sacramental record", () => {
   it('CONTROL: a successful read shows the record and never the empty claim', async () => {
@@ -173,5 +203,47 @@ describe('removing a register entry', () => {
     expect(await screen.findByText(/never deleted\. Void the entry instead/i)).toBeInTheDocument()
     expect(screen.queryByText(/Failed \(405\)/)).not.toBeInTheDocument()
     expect(screen.getByText(/Cert\. P6-002/)).toBeInTheDocument()
+  })
+})
+
+describe('GJ2 profile hop chrome is translated (POLISH-L0-02)', () => {
+  it('ENGLISH CERT LINE AND EDIT/REMOVE ARIA USE t() COPY', async () => {
+    stubFetch()
+    renderProfile()
+    expect(await screen.findByText(certLine('en', REC.certificate_no))).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: editBaptism('en') })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: removeBaptism('en') })).toBeInTheDocument()
+  })
+
+  it('SPANISH CERT LINE AND EDIT/REMOVE ARE SPANISH — NOT THE ENGLISH CHROME', async () => {
+    localStorage.setItem('ochr_locale', 'es')
+    stubFetch()
+    renderProfile()
+    expect(await screen.findByText(certLine('es', REC.certificate_no))).toBeInTheDocument()
+    expect(screen.queryByText(certLine('en', REC.certificate_no))).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: editBaptism('es') })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: removeBaptism('es') })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: editBaptism('en') })).toBeNull()
+    expect(screen.queryByRole('button', { name: removeBaptism('en') })).toBeNull()
+  })
+
+  it('i18n strings and the component wiring cannot reintroduce hard-EN hop chrome', () => {
+    const jsx = stripComments(MEMBER_SRC)
+    for (const key of PROFILE_HOP_KEYS) {
+      expect(MEMBER_SRC, key).toMatch(new RegExp(`t\\('${key.replace('.', '\\.')}'`))
+      expect(STRINGS.en[key], key).toBeTruthy()
+      expect(STRINGS.es[key], key).toBeTruthy()
+      expect(STRINGS.es[key], key).not.toBe(STRINGS.en[key])
+    }
+    expect(MEMBER_SRC).toMatch(/useLocale\(/)
+    expect(jsx).not.toMatch(/>Cert\. \{/)
+    expect(jsx).not.toMatch(/aria-label=\{`Edit \$\{/)
+    expect(jsx).not.toMatch(/aria-label=\{`Remove \$\{/)
+    expect(STRINGS.en['register.certLine']).toBe('Cert. {n}')
+    expect(STRINGS.en['register.editRecord']).toBe('Edit {sacrament} record')
+    expect(STRINGS.en['register.removeRecord']).toBe('Remove {sacrament} record')
+    expect(STRINGS.es['register.certLine']).toMatch(/cert\. n\.º \{n\}/i)
+    expect(STRINGS.es['register.editRecord']).toMatch(/editar la partida de \{sacrament\}/i)
+    expect(STRINGS.es['register.removeRecord']).toMatch(/quitar la partida de \{sacrament\}/i)
   })
 })

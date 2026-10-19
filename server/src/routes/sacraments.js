@@ -94,13 +94,28 @@ async function clientInOrg(clientId, orgId) {
   return rows.length > 0
 }
 
+// A godparent or sponsor is a name. The register stores that name as a
+// string. A string is the name. An object that carries a string `name`
+// is the name. Anything else is not a person: String({}) is the literal
+// "[object Object]", and that literal must not be written into the book.
+// An entry that is not a name is omitted. Primitives other than strings
+// keep the previous String() reading.
+function readWitnessName(entry) {
+  if (typeof entry === 'string') return entry.trim()
+  if (entry != null && typeof entry === 'object') {
+    if (!Array.isArray(entry) && typeof entry.name === 'string') return entry.name.trim()
+    return ''
+  }
+  return String(entry ?? '').trim()
+}
+
 // meta_attributes (SAC.5) — closed allowlist of structured sub-fields.
 // Anything else in the payload is rejected, not silently stored: the
 // register is canonical and doesn't grow junk keys.
 //   godparents / sponsors — arrays of non-empty names (≤10, each ≤200 chars)
 //   spouse_client_id      — member id, validated against the caller's org
 // Returns { value } (a plain object, possibly {}) or { error }.
-async function parseMetaAttributes(input, orgId) {
+export async function parseMetaAttributes(input, orgId) {
   if (input == null) return { value: {} }
   if (typeof input !== 'object' || Array.isArray(input)) {
     return { error: 'meta_attributes must be an object' }
@@ -112,7 +127,7 @@ async function parseMetaAttributes(input, orgId) {
       if (!Array.isArray(val) || val.length > 10) {
         return { error: `${key} must be an array of at most 10 names` }
       }
-      const names = val.map(v => String(v ?? '').trim()).filter(Boolean)
+      const names = val.map(readWitnessName).filter(Boolean)
       if (names.some(n => n.length > 200)) return { error: `${key} names must be 200 characters or fewer` }
       if (names.length) out[key] = names
     } else if (key === 'spouse_client_id') {
@@ -159,10 +174,11 @@ const cols = (p = '') =>
 //   was baptised, under the name the register recorded.
 //
 // The resolver used to read COALESCE(c.name, s.member_name) — the live
-// member name first — so renaming a member silently rewrote every
-// sacramental record and certificate that pointed at them. The order is now
-// reversed. The snapshot is the record; the live name survives only as a
-// fallback for rows predating migration 054's backfill.
+// member name first — and then COALESCE(s.member_name, c.name), which still
+// filled a missing snapshot from the roster. A row with no stored name then
+// followed every later rename, and the certificate presented that live name
+// as if the book had recorded it. A missing name is unavailable. It is not
+// an invitation to copy the roster.
 //
 // The member link is still valuable — lookup, navigation, household context,
 // tying a historical entry to the person in front of you — it is simply not
@@ -170,14 +186,14 @@ const cols = (p = '') =>
 //
 // This is a data-integrity and historical-fidelity rule for OpenChurch. It is
 // NOT a claim about canon law, which differs by tradition.
-const SUBJECT_NAME = 'COALESCE(s.member_name, c.name) AS member_name'
+const SUBJECT_NAME = 's.member_name AS member_name'
 
 // Unprefixed, for INSERT/UPDATE ... RETURNING and for the amendment
 // snapshot, which must carry the stored name so a correction to it shows up
 // in the record's history like any other change.
 const SELECT_COLS = cols() + ', member_name'
-// Prefixed, for the queries that JOIN ochr_clients. These pair with
-// SUBJECT_NAME above, so the raw column is deliberately absent here.
+// Prefixed, for the register reads. These pair with SUBJECT_NAME above,
+// so the raw column is deliberately absent here.
 const SELECT_COLS_S = cols('s.')
 
 // GET /api/sacraments?client_id=ID  (member timeline)
@@ -201,18 +217,16 @@ router.get('/', async (req, res) => {
     // certificate number. LIKE metacharacters are escaped so a stray % or _
     // is treated literally.
     //
-    // The name searched is the same expression the list DISPLAYS
-    // (SUBJECT_NAME): the recorded snapshot, live member name only as the
-    // pre-054 fallback. It used to be c.name alone, which meant an unlinked
-    // historic subject could not be found by name at all, and a renamed
-    // member's baptism turned up under a name nobody was baptised with while
-    // the row on screen showed a name that did not contain the query.
+    // The name searched is the name the list DISPLAYS: the stored snapshot.
+    // Searching the live roster name returned rows whose shown name did not
+    // contain the query, and it treated a missing snapshot as if the book
+    // had recorded whatever the member is called today.
     const q = typeof req.query.q === 'string' ? req.query.q.trim() : ''
     if (q) {
       const escaped = q.replace(/[\\%_]/g, ch => `\\${ch}`)
       params.push(`%${escaped}%`)
       const p = `$${params.length}`
-      where.push(`(COALESCE(s.member_name, c.name) ILIKE ${p} OR s.minister ILIKE ${p} OR s.place ILIKE ${p} OR s.certificate_no ILIKE ${p})`)
+      where.push(`(s.member_name ILIKE ${p} OR s.minister ILIKE ${p} OR s.place ILIKE ${p} OR s.certificate_no ILIKE ${p})`)
     }
 
     // Voided entries leave the working register but never the record.
@@ -222,14 +236,11 @@ router.get('/', async (req, res) => {
       where.push('s.voided_at IS NULL')
     }
     params.push(limit, offset)
-    // LEFT JOIN so the parish-register view can show the member's name; the
-    // join is org-matched so a detached (client_id NULL) record just yields a
-    // null name rather than crossing tenants.
+    // No join to the roster. The subject is the stored name; joining here
+    // was how a live rename leaked into the book.
     const { rows } = await pool.query(
       `SELECT ${SELECT_COLS_S}, ${SUBJECT_NAME}
          FROM ochr_sacramental_records s
-         LEFT JOIN ochr_clients c
-                ON c.id = s.client_id AND c.organization_id = s.organization_id
         WHERE ${where.join(' AND ')}
         ORDER BY s.date DESC NULLS LAST, s.id DESC
         LIMIT $${params.length - 1} OFFSET $${params.length}`,
@@ -262,7 +273,7 @@ router.get('/anniversaries', async (req, res) => {
 
     const { rows } = await pool.query(
       `SELECT s.id, s.client_id AS member_id, s.type,
-              to_char(s.date, 'YYYY-MM-DD') AS date, c.name AS member_name
+              to_char(s.date, 'YYYY-MM-DD') AS date, s.member_name AS member_name
          FROM ochr_sacramental_records s
          JOIN ochr_clients c
            ON c.id = s.client_id AND c.organization_id = s.organization_id AND c.status = 'active'
@@ -527,8 +538,6 @@ router.get('/:id', async (req, res) => {
     const { rows } = await pool.query(
       `SELECT ${SELECT_COLS_S}, ${SUBJECT_NAME}
          FROM ochr_sacramental_records s
-         LEFT JOIN ochr_clients c
-                ON c.id = s.client_id AND c.organization_id = s.organization_id
         WHERE s.id = $1 AND s.organization_id = $2`,
       [id, req.organizationId]
     )
@@ -736,34 +745,19 @@ router.patch('/:id', async (req, res) => {
         })
       }
 
-      // A row with no stored snapshot (pre-054, never backfilled) has been
-      // showing its linked member's name through the COALESCE fallback. If
-      // this correction moves or removes that link, the name it has been
-      // showing is written down FIRST — otherwise the entry silently adopts
-      // the new member's name, and the history reads null → null as though
-      // it never named anyone. Rows that already carry a snapshot are left
-      // alone: relinking those must not re-stamp (see the note above).
+      // A row with no stored name does not acquire one from the roster.
+      // Copying the current member's name in, on a link change, would write
+      // a present-day fact into the book and call it what the register said.
+      // The caller has to supply the name as written on the page. Rows that
+      // already carry a snapshot are left alone: relinking those must not
+      // re-stamp.
       const touchesLink = Object.prototype.hasOwnProperty.call(req.body ?? {}, 'client_id')
-      const suppliesName = Object.prototype.hasOwnProperty.call(req.body ?? {}, 'member_name')
+      const suppliesName = readSubjectName(req.body?.member_name) != null
       if (touchesLink && before.member_name == null && !suppliesName) {
-        const { rows: c } = before.client_id == null ? { rows: [] } : await conn.query(
-          'SELECT name FROM ochr_clients WHERE id = $1 AND organization_id = $2',
-          [before.client_id, req.organizationId]
-        )
-        const shown = c[0]?.name ?? null
-        if (shown == null) {
-          // A true orphan: no snapshot and no member to read one from. The
-          // relink is not allowed to define who was baptised — the caller
-          // has to say what the register page says.
-          await conn.query('ROLLBACK')
-          return res.status(400).json({
-            error: 'A sacramental record must name its subject. This entry has no recorded name — supply member_name as written in the register before changing its member link.',
-          })
-        }
-        params.push(shown); sets.push(`member_name = $${params.length}`)
-        // The amendment's "before" is what the record SAID, and it said
-        // this name (via the fallback) — not null.
-        before.member_name = shown
+        await conn.query('ROLLBACK')
+        return res.status(400).json({
+          error: 'A sacramental record must name its subject. This entry has no recorded name — supply member_name as written in the register before changing its member link.',
+        })
       }
 
       params.push(id, req.organizationId)

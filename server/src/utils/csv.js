@@ -124,3 +124,25 @@ export function parseCSVToObjects(text) {
   })
   return { headers, rows }
 }
+
+// ── Writing ─────────────────────────────────────────────────────────
+// Formula-injection guard (shared by the audit-log CSV and the report
+// CSV, ARG-LEAK-7). A cell starting with =, +, -, @, tab or CR is
+// prefixed with a single quote so a crafted value (e.g. a member named
+// "=cmd|'/c calc'!A1") can't execute as a formula when an admin opens the
+// export in Excel/Sheets. With { allowNumbers: true } a plain numeric value
+// such as -12.50 is left alone so negative figures stay numbers.
+const FORMULA_LEAD = /^[=+\-@\t\r]/
+const PLAIN_NUMBER = /^-?\d+(\.\d+)?$/
+export function guardFormula(v, { allowNumbers = false } = {}) {
+  if (v === null || v === undefined) return ''
+  const s = String(v)
+  if (allowNumbers && (typeof v === 'number' || PLAIN_NUMBER.test(s))) return s
+  return FORMULA_LEAD.test(s) ? `'${s}` : s
+}
+
+// One always-quoted CSV cell (audit-log export).
+export function csvCell(v) {
+  if (v === null || v === undefined) return ''
+  return `"${guardFormula(v).replace(/"/g, '""')}"`
+}

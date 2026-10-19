@@ -8,8 +8,34 @@ import { Router } from 'express'
 import pool from '../db.js'
 import { parseIntId } from '../utils/params.js'
 import { monitor } from '../monitoring/index.js'
+import { FORMER_OPERATOR_LABEL } from '../auth/loginClosure.js'
+import { csvCell } from '../utils/csv.js'
+import { LIFECYCLE_ACTIONS, STEWARDSHIP_ACTIONS } from '../middleware/auditLog.js'
 
 const router = Router()
+
+// Closed logins keep their actor id. The personal name and email on the
+// copy are not returned. The label is the same for every closed login;
+// user_id is what keeps two of them apart.
+async function withClosedActorLabels(organizationId, rows) {
+  const ids = [...new Set(rows.map(r => r.user_id).filter(id => id != null).map(Number))]
+  if (!ids.length) return rows.map(r => ({ ...r, actor_closed: false }))
+  const { rows: closed } = await pool.query(
+    `SELECT id FROM ochr_users
+      WHERE organization_id = $1 AND closed_at IS NOT NULL AND id = ANY($2::int[])`,
+    [organizationId, ids]
+  )
+  const closedIds = new Set(closed.map(r => Number(r.id)))
+  return rows.map(r => {
+    if (!closedIds.has(Number(r.user_id))) return { ...r, actor_closed: false }
+    return {
+      ...r,
+      user_name: FORMER_OPERATOR_LABEL,
+      user_email: null,
+      actor_closed: true,
+    }
+  })
+}
 
 const MAX_LIMIT = 200
 const DEFAULT_LIMIT = 50
@@ -33,7 +59,8 @@ export function _setAuditCountCapForTests(n) {
   return previous
 }
 
-const ALLOWED_ACTIONS = new Set(['create', 'update', 'delete'])
+// Lifecycle actions come from the middleware that writes them (Stage 6).
+const ALLOWED_ACTIONS = new Set(['create', 'update', 'delete', ...LIFECYCLE_ACTIONS, ...STEWARDSHIP_ACTIONS])
 // Keep in step with the entity_type tags used at the call sites in
 // app.js. New routers added to the audit middleware should be added
 // here so the filter dropdown UI can validate input.
@@ -176,7 +203,10 @@ router.get('/', async (req, res) => {
       pageParams
     )
     const hasMore  = rowsQ.rows.length > limit
-    const pageRows = hasMore ? rowsQ.rows.slice(0, limit) : rowsQ.rows
+    const pageRows = await withClosedActorLabels(
+      req.organizationId,
+      hasMore ? rowsQ.rows.slice(0, limit) : rowsQ.rows,
+    )
 
     // 30s private cache. Audit-log entries are append-only, so a brief
     // browser cache of an admin's filtered/paginated view is safe even
@@ -212,14 +242,7 @@ const MAX_EXPORT = 5000
 // A leading =, +, -, @, tab or CR is prefixed with a single quote so a
 // crafted value (e.g. a member named "=cmd|'/c calc'!A1") can't execute
 // as a formula when an admin opens the export in Excel/Sheets.
-function csvCell(v) {
-  if (v === null || v === undefined) return ''
-  let s = String(v)
-  // Prefix only — a single leading apostrophe makes Excel/Sheets treat
-  // the whole cell as text. A trailing one would just corrupt the value.
-  if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`
-  return `"${s.replace(/"/g, '""')}"`
-}
+// csvCell lives in utils/csv.js (shared with reporting/run.js), same behaviour.
 
 // GET /api/audit-log/export.csv  — same filters as the list (AUD.2).
 // Streams the filtered history as a CSV download for compliance /
@@ -230,8 +253,8 @@ router.get('/export.csv', async (req, res) => {
     if (filters.error) return res.status(400).json({ error: filters.error })
     const { extraSql, params } = filters
 
-    const { rows } = await pool.query(
-      `SELECT created_at, user_name, user_email, action, entity_type, entity_id,
+    const { rows: rawRows } = await pool.query(
+      `SELECT created_at, user_id, user_name, user_email, action, entity_type, entity_id,
               summary, request_method, request_path, status_code, ip_address
          FROM ochr_audit_log
         WHERE organization_id = $1${extraSql}
@@ -239,10 +262,11 @@ router.get('/export.csv', async (req, res) => {
         LIMIT $${params.length + 1}`,
       [...params, MAX_EXPORT]
     )
+    const rows = await withClosedActorLabels(req.organizationId, rawRows)
 
     const header = [
       'timestamp', 'user_name', 'user_email', 'action', 'entity_type',
-      'entity_id', 'summary', 'method', 'path', 'status', 'ip_address',
+      'entity_id', 'summary', 'method', 'path', 'status', 'ip_address', 'user_id',
     ]
     const lines = [header.join(',')]
     for (const r of rows) {
@@ -258,6 +282,7 @@ router.get('/export.csv', async (req, res) => {
         csvCell(r.request_path),
         csvCell(r.status_code),
         csvCell(r.ip_address),
+        csvCell(r.user_id),
       ].join(','))
     }
 

@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { motion } from 'framer-motion'
-import { UserCircle, Languages, KeyRound, Eye, EyeOff } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
+import { UserCircle, Languages, KeyRound, Eye, EyeOff, LogOut, UserX } from 'lucide-react'
 import { useLocale } from '../i18n'
 import PageWrapper from '../components/PageWrapper'
 import NotificationPrefs from '../components/NotificationPrefs'
@@ -9,6 +10,7 @@ import AvatarUploader from '../components/AvatarUploader'
 import TextField from '../components/TextField'
 import { useAuth } from '../context/AuthContext'
 import { useToast } from '../components/ToastProvider'
+import { useConfirm } from '../components/ConfirmProvider'
 import { apiUrl } from '../api'
 
 // Self-serve preferences page. Accessible to every signed-in user
@@ -25,6 +27,9 @@ import { apiUrl } from '../api'
 //                                 here rather than /team because every
 //                                 signed-in user owns their credential,
 //                                 including viewers.
+//   5. SessionsCard             — sign out everywhere (logout-all).
+//                                 Bumps token_version so a stolen JWT or
+//                                 a shared kiosk dies immediately.
 //
 // Future: move CalendarSync selfServe here from /team so staff/viewers
 // (currently locked out of /team) can grab their own calendar feed too.
@@ -150,13 +155,12 @@ function LanguageCard() {
 // email provider configured. So this is the ONLY working path today.
 //
 // The server bumps token_version on success, which kills every session
-// signed in with the old password — including this one. It hands back a
-// fresh token so this device survives; replaceToken swaps it in without
-// disturbing the signed-in user. That is why a successful change says
-// "other devices signed out" rather than bouncing the user to /login.
+// signed in with the old password — including this one. It sets a fresh
+// httpOnly cookie on the response so this device survives. That is why
+// a successful change says "other devices signed out" rather than
+// bouncing the user to /login.
 function PasswordCard() {
   const { t } = useLocale()
-  const { replaceToken } = useAuth()
   const toast = useToast()
 
   const [current, setCurrent] = useState('')
@@ -183,9 +187,8 @@ function PasswordCard() {
       })
       const data = await res.json().catch(() => ({}))
       if (!res.ok) throw new Error(data.error || `Could not change password (${res.status})`)
-      // Swap in the re-issued token BEFORE clearing the form, so no
-      // request can go out on the token the server just invalidated.
-      replaceToken(data.token)
+      // The Set-Cookie on this response is the new session. There is
+      // no script-visible token to swap.
       setCurrent(''); setNext(''); setConfirm(''); setShow(false)
       toast.success(t('prefs.pw.done'))
     } catch (err) {
@@ -264,6 +267,221 @@ function PasswordCard() {
   )
 }
 
+// Sessions card — sign out on every device, including this one.
+//
+// POST /api/auth/logout is a no-op: the JWT stays valid until expiry.
+// A stolen token or a kiosk left signed in stays live. This card is
+// the one control that calls /logout-all, which bumps token_version
+// so every outstanding token fails the next /me check. After a
+// successful bump we clear this device and send the secretary to
+// /login; a failed bump leaves her signed in and says so.
+export function SessionsCard() {
+  const { t } = useLocale()
+  const { logoutAll } = useAuth()
+  const ask = useConfirm()
+  const navigate = useNavigate()
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  async function handleSignOutEverywhere() {
+    setError('')
+    const ok = await ask({
+      title: t('prefs.sessions.confirmTitle'),
+      body: t('prefs.sessions.confirmBody'),
+      confirmLabel: t('prefs.sessions.submit'),
+      cancelLabel: t('prefs.sessions.cancel'),
+    })
+    if (!ok) return
+    setBusy(true)
+    try {
+      await logoutAll()
+      navigate('/login', { replace: true })
+    } catch {
+      setError(t('prefs.sessions.failed'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="bg-parchment-50 dark:bg-ink-900/90 rounded-2xl border border-parchment-300/50 dark:border-brass-900/30 shadow-warm overflow-hidden">
+      <div className="px-5 py-4 border-b border-parchment-300/50 dark:border-brass-900/25 flex items-center gap-2">
+        <LogOut size={15} className="text-brass-600 dark:text-brass-300" aria-hidden="true" />
+        <h2 className="font-semibold text-ink-900 dark:text-parchment-50">{t('prefs.sessions.title')}</h2>
+      </div>
+      <div className="px-5 py-5 space-y-4">
+        <p className="text-sm text-ink-600 dark:text-parchment-300/80 leading-relaxed">
+          {t('prefs.sessions.help')}
+        </p>
+        {error && (
+          <p role="alert" className="text-sm text-rose-700 dark:text-rose-300">
+            {error}
+          </p>
+        )}
+        <button
+          type="button"
+          onClick={handleSignOutEverywhere}
+          disabled={busy}
+          className="px-4 py-2 rounded-lg text-sm font-semibold bg-church-800 hover:bg-church-900 text-parchment-50 border border-church-800 transition-colors focus:outline-none focus:ring-2 focus:ring-brass-400 disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {busy ? t('prefs.sessions.saving') : t('prefs.sessions.submit')}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// Turns this login off. The row stays. An admin turns it back on from Team.
+//
+// The confirm dialog is required: one click must not sign the person out.
+// The words say the login is turned off, never that the account is deleted.
+// A 409 proves this login stays on. A 200 whose body says deactivated
+// proves it is off, and this device signs out. A lost response, a 401,
+// or any other answer does not prove whether the login is on or off.
+// Those stay on this page. The words are ours, in the language the
+// person is using — the server's English sentence is not shown.
+export function DeactivateLoginCard() {
+  const { t } = useLocale()
+  const { logout } = useAuth()
+  const ask = useConfirm()
+  const navigate = useNavigate()
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  async function handleDeactivate() {
+    setError('')
+    const ok = await ask({
+      title: t('prefs.deactivate.confirmTitle'),
+      body: t('prefs.deactivate.confirmBody'),
+      confirmLabel: t('prefs.deactivate.confirm'),
+      cancelLabel: t('prefs.deactivate.cancel'),
+      tone: 'destructive',
+    })
+    if (!ok) return
+    setBusy(true)
+    try {
+      const res = await fetch(apiUrl('/api/auth/deactivate'), { method: 'POST' })
+      if (res.status === 409) {
+        setError(t('prefs.deactivate.lastAdmin'))
+        return
+      }
+      let body = null
+      try { body = await res.json() } catch { body = null }
+      if (res.status === 200 && body?.deactivated === true) {
+        await logout()
+        navigate('/login', { replace: true })
+        return
+      }
+      setError(t('prefs.deactivate.failed'))
+    } catch {
+      setError(t('prefs.deactivate.failed'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="bg-parchment-50 dark:bg-ink-900/90 rounded-2xl border border-parchment-300/50 dark:border-brass-900/30 shadow-warm overflow-hidden">
+      <div className="px-5 py-4 border-b border-parchment-300/50 dark:border-brass-900/25 flex items-center gap-2">
+        <UserX size={15} className="text-brass-600 dark:text-brass-300" aria-hidden="true" />
+        <h2 className="font-semibold text-ink-900 dark:text-parchment-50">{t('prefs.deactivate.title')}</h2>
+      </div>
+      <div className="px-5 py-5 space-y-4">
+        <p className="text-sm text-ink-600 dark:text-parchment-300/80 leading-relaxed">
+          {t('prefs.deactivate.help')}
+        </p>
+        {error && (
+          <p role="alert" className="text-sm text-rose-700 dark:text-rose-300">
+            {error}
+          </p>
+        )}
+        <button
+          type="button"
+          onClick={handleDeactivate}
+          disabled={busy}
+          aria-busy={busy || undefined}
+          className="px-4 py-2 min-h-[44px] rounded-lg text-sm font-semibold bg-church-800 hover:bg-church-900 text-parchment-50 border border-church-800 transition-colors focus:outline-none focus:ring-2 focus:ring-brass-400 disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {busy ? t('prefs.deactivate.saving') : t('prefs.deactivate.submit')}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// Closes this login for good. Distinct from turning it off.
+// A 409 proves the login stays open. A 200 whose body says closed
+// proves it is closed, and this device signs out. Anything else is
+// unknown and stays on this page. The words are ours.
+export function CloseLoginCard() {
+  const { t } = useLocale()
+  const { logout } = useAuth()
+  const ask = useConfirm()
+  const navigate = useNavigate()
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  async function handleClose() {
+    setError('')
+    const ok = await ask({
+      title: t('prefs.close.confirmTitle'),
+      body: t('prefs.close.confirmBody'),
+      confirmLabel: t('prefs.close.confirm'),
+      cancelLabel: t('prefs.close.cancel'),
+      tone: 'destructive',
+    })
+    if (!ok) return
+    setBusy(true)
+    try {
+      const res = await fetch(apiUrl('/api/auth/close'), { method: 'POST' })
+      if (res.status === 409) {
+        setError(t('prefs.close.lastAdmin'))
+        return
+      }
+      let body = null
+      try { body = await res.json() } catch { body = null }
+      if (res.status === 200 && body?.closed === true) {
+        await logout()
+        navigate('/login', { replace: true })
+        return
+      }
+      setError(t('prefs.close.failed'))
+    } catch {
+      setError(t('prefs.close.failed'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="bg-parchment-50 dark:bg-ink-900/90 rounded-2xl border border-parchment-300/50 dark:border-brass-900/30 shadow-warm overflow-hidden">
+      <div className="px-5 py-4 border-b border-parchment-300/50 dark:border-brass-900/25 flex items-center gap-2">
+        <UserX size={15} className="text-brass-600 dark:text-brass-300" aria-hidden="true" />
+        <h2 className="font-semibold text-ink-900 dark:text-parchment-50">{t('prefs.close.title')}</h2>
+      </div>
+      <div className="px-5 py-5 space-y-4">
+        <p className="text-sm text-ink-600 dark:text-parchment-300/80 leading-relaxed">
+          {t('prefs.close.help')}
+        </p>
+        {error && (
+          <p role="alert" className="text-sm text-rose-700 dark:text-rose-300">
+            {error}
+          </p>
+        )}
+        <button
+          type="button"
+          onClick={handleClose}
+          disabled={busy}
+          aria-busy={busy || undefined}
+          className="px-4 py-2 min-h-[44px] rounded-lg text-sm font-semibold bg-church-800 hover:bg-church-900 text-parchment-50 border border-church-800 transition-colors focus:outline-none focus:ring-2 focus:ring-brass-400 disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {busy ? t('prefs.close.saving') : t('prefs.close.submit')}
+        </button>
+      </div>
+    </div>
+  )
+}
+
 export default function Preferences() {
   const { t } = useLocale()
   return (
@@ -286,6 +504,18 @@ export default function Preferences() {
 
         <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}>
           <PasswordCard />
+        </motion.div>
+
+        <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}>
+          <SessionsCard />
+        </motion.div>
+
+        <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}>
+          <DeactivateLoginCard />
+        </motion.div>
+
+        <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}>
+          <CloseLoginCard />
         </motion.div>
 
         <motion.div

@@ -26,6 +26,8 @@
 // deferred to keep this change surgical. New routes should call
 // monitor.error directly.
 
+import { buildSentryInitOptions } from './sentryPrivacy.js'
+
 const LEVEL_ORDER = { error: 50, warn: 40, info: 30, debug: 20 }
 
 // Optional Sentry sink. Env-gated and softly-dependent: if SENTRY_DSN is
@@ -37,6 +39,9 @@ const LEVEL_ORDER = { error: 50, warn: 40, info: 30, debug: 20 }
 // Production-only: a DSN accidentally exported in a dev shell or CI must
 // never ship local noise to the project. Dev/test keep pure structured
 // logging even when SENTRY_DSN is present.
+//
+// Init always sets sendDefaultPii off and scrubs the request before send.
+// The SDK still attaches the URL, cookies, and headers without that.
 let sentry = null
 if (process.env.SENTRY_DSN && process.env.NODE_ENV === 'production') {
   // Fire-and-forget: the import is async, so early errors (before Sentry
@@ -45,7 +50,7 @@ if (process.env.SENTRY_DSN && process.env.NODE_ENV === 'production') {
   import('@sentry/node')
     .then((mod) => {
       const Sentry = mod.default ?? mod
-      Sentry.init({ dsn: process.env.SENTRY_DSN })
+      Sentry.init(buildSentryInitOptions(process.env.SENTRY_DSN))
       sentry = Sentry
       process.stdout.write(JSON.stringify({
         level: 'info', scope: 'monitoring.init', message: 'Sentry enabled',
@@ -131,6 +136,26 @@ export const monitor = {
 // Test seam — lets the smoke suite swap dispatch for an in-memory
 // capture. Not exported via a top-level barrel, so app code has no
 // reason to grab it accidentally.
+// Lets a test stand in for the Sentry client. Production only sets
+// `sentry` when a DSN is present, so the extra payload is otherwise
+// unreachable from the suite.
+export function _setSentryForTests(client) {
+  const previous = sentry
+  sentry = client ?? null
+  return () => { sentry = previous }
+}
+
+// Same init the production branch uses, with a local transport supplied
+// by the caller. The DSN here is a placeholder the transport never dials.
+export async function _initSentryForTests(extra = {}) {
+  const mod = await import('@sentry/node')
+  const Sentry = mod.default ?? mod
+  const dsn = typeof extra.dsn === 'string' ? extra.dsn : 'https://public@127.0.0.1/1'
+  Sentry.init(buildSentryInitOptions(dsn, extra))
+  sentry = Sentry
+  return Sentry
+}
+
 export function _setDispatchForTests(fn) {
   const original = dispatch
   // Reassigning the module-local `dispatch` is fragile across

@@ -1,15 +1,28 @@
 import { useState } from 'react'
 import { Link, useNavigate, useLocation } from 'react-router-dom'
 import { motion } from 'framer-motion'
-import { Mail, Lock, Loader2, Eye, EyeOff, Church } from 'lucide-react'
+import { Mail, Lock, Loader2, Eye, EyeOff } from 'lucide-react'
 import OpenMark from '../components/OpenMark'
 import { useAuth } from '../context/AuthContext'
 import { useLocale } from '../i18n'
 import TextField from '../components/TextField'
+import LoginDemoShortcut from './loginDemo'
 
-// Credentials for the seeded Demo Church. Kept in sync with server/migrate.js.
-const DEMO_EMAIL    = 'demo@openchurch.app'
-const DEMO_PASSWORD = 'demo1234'
+// Demo helper is imported only for the compile-time gate below.
+// Production `vite build` sets DEV to false, so the ternary is dropped
+// and this module is tree-shaken — password literals never reach dist.
+// MODE !== 'production' keeps it out even when a production build runs
+// with a non-production NODE_ENV (which makes Vite compile DEV as true).
+// Dot access only: bracket access makes Vite inline the whole env object.
+// VITE_ENABLE_DEMO_LOGIN must stay unset in client/.env.production.
+
+// Server refusals that arrive as English sentences, mapped to locale keys.
+// Only shown after the password matched (server contract).
+const SERVER_SENTENCES = {
+  'This login is deactivated. An admin can turn it back on.': 'login.deactivated',
+  'This login is closed. It cannot be turned back on.': 'login.closed',
+  'This organization is on hold. Access is stopped; parish history remains.': 'login.held',
+}
 
 export default function Login() {
   const { login } = useAuth()
@@ -35,22 +48,8 @@ export default function Login() {
       await login(email.trim(), password)
       navigate(redirectTo, { replace: true })
     } catch (err) {
-      setError(err.message)
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  async function useDemo() {
-    setEmail(DEMO_EMAIL)
-    setPassword(DEMO_PASSWORD)
-    setError('')
-    setLoading(true)
-    try {
-      await login(DEMO_EMAIL, DEMO_PASSWORD)
-      navigate('/', { replace: true })
-    } catch (err) {
-      setError(err.message)
+      // The server sentence is English. Show the same fact in the person's language.
+      setError(SERVER_SENTENCES[err.message] ? t(SERVER_SENTENCES[err.message]) : err.message)
     } finally {
       setLoading(false)
     }
@@ -66,7 +65,7 @@ export default function Login() {
         a single line above the sign-in card.
       */}
       <section
-        aria-label="About OpenChurch"
+        aria-label={t('login.about')}
         className="hidden lg:flex flex-col justify-center px-16 xl:px-24 py-16
                    border-r border-brass-200/60 dark:border-brass-900/30
                    bg-gradient-to-br from-parchment-50 to-parchment-100
@@ -88,9 +87,11 @@ export default function Login() {
             </span>
           </div>
 
-          <h1 className="font-display text-4xl xl:text-[2.75rem] font-medium text-ink-900 dark:text-parchment-50 leading-[1.15] tracking-tight mb-8">
+          {/* Slogan for the narthex copy, not a second page title.
+              The sign-in card is the only h1 (visible at every breakpoint). */}
+          <p className="font-display text-4xl xl:text-[2.75rem] font-medium text-ink-900 dark:text-parchment-50 leading-[1.15] tracking-tight mb-8">
             {t('login.h1')}
-          </h1>
+          </p>
 
           <div className="space-y-5 text-[15px] leading-relaxed text-ink-600 dark:text-parchment-300/80">
             <p>{t('login.p1')}</p>
@@ -143,7 +144,7 @@ export default function Login() {
                 type="button"
                 onClick={() => setResetFlash(false)}
                 className="float-right text-brass-700 dark:text-brass-300 opacity-60 hover:opacity-100 ml-2"
-                aria-label="Dismiss"
+                aria-label={t('login.dismiss')}
               >
                 ×
               </button>
@@ -158,7 +159,7 @@ export default function Login() {
               autoComplete="email"
               value={email}
               onChange={e => setEmail(e.target.value)}
-              placeholder="you@yourchurch.com"
+              placeholder={t('login.emailPh')}
               leadingIcon={Mail}
             />
 
@@ -175,9 +176,8 @@ export default function Login() {
                 <button
                   type="button"
                   onClick={() => setShowPw(s => !s)}
-                  className="tap-reach text-ink-400 dark:text-parchment-400/60 hover:text-ink-600 dark:hover:text-parchment-200 transition-colors"
-                  tabIndex={-1}
-                  aria-label={showPw ? 'Hide password' : 'Show password'}
+                  className="tap-auth text-ink-400 dark:text-parchment-400/60 hover:text-ink-600 dark:hover:text-parchment-200 transition-colors"
+                  aria-label={showPw ? t('login.hidePassword') : t('login.showPassword')}
                 >
                   {showPw ? <EyeOff size={15} /> : <Eye size={15} />}
                 </button>
@@ -185,7 +185,7 @@ export default function Login() {
             />
 
             {error && (
-              <div className="text-xs text-rose-700 dark:text-rose-300 bg-rose-50 dark:bg-rose-900/20 border border-rose-100 dark:border-rose-800/30 rounded-lg px-3 py-2">
+              <div role="alert" className="text-xs text-rose-700 dark:text-rose-300 bg-rose-50 dark:bg-rose-900/20 border border-rose-100 dark:border-rose-800/30 rounded-lg px-3 py-2">
                 {error}
               </div>
             )}
@@ -202,34 +202,29 @@ export default function Login() {
             <div className="text-center">
               <Link
                 to="/forgot"
-                className="tap-reach inline-block text-xs font-medium text-ink-500 hover:text-church-800 dark:text-parchment-300/70 dark:hover:text-brass-200 transition-colors"
+                className="tap-auth inline-flex text-xs font-medium text-ink-500 hover:text-church-800 dark:text-parchment-300/70 dark:hover:text-brass-200 transition-colors"
               >
                 {t('login.forgot')}
               </Link>
             </div>
           </form>
 
-          {/* Demo shortcut */}
-          <div className="mt-5 pt-5 border-t border-parchment-300/60 dark:border-brass-900/30">
-            <button
-              type="button"
-              onClick={useDemo}
-              disabled={loading}
-              className="tap w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-parchment-50 dark:bg-ink-800 border border-brass-500/40 dark:border-brass-500/30 text-church-900 dark:text-brass-200 text-sm font-semibold hover:bg-brass-50 dark:hover:bg-ink-800/70 transition-colors disabled:opacity-50"
-            >
-              <Church size={14} /> {t('login.demo')}
-            </button>
-            <p className="mt-2 text-[11px] text-ink-500 dark:text-parchment-300/70 text-center">
-              {t('login.demoNote')}
-            </p>
-          </div>
+          {import.meta.env.DEV && import.meta.env.MODE !== 'production' && import.meta.env.VITE_ENABLE_DEMO_LOGIN === 'true' ? (
+            <LoginDemoShortcut
+              loading={loading}
+              setLoading={setLoading}
+              setError={setError}
+              setEmail={setEmail}
+              setPassword={setPassword}
+            />
+          ) : null}
         </div>
 
         <p className="mt-5 text-center text-sm text-ink-500 dark:text-parchment-300/70">
           {t('login.newTo')}{' '}
           <Link
             to="/signup"
-            className="tap-reach inline-block font-semibold text-church-700 hover:text-church-900 dark:text-brass-300 dark:hover:text-brass-200 transition-colors"
+            className="tap-auth font-semibold text-church-700 hover:text-church-900 dark:text-brass-300 dark:hover:text-brass-200 transition-colors"
           >
             {t('login.start')}
           </Link>
@@ -241,7 +236,7 @@ export default function Login() {
           <button
             type="button"
             onClick={() => setLocale('en')}
-            className={`tap-reach inline-block px-1 transition-colors ${locale === 'en' ? 'text-church-800 dark:text-brass-300 font-semibold' : 'hover:text-ink-600 dark:hover:text-parchment-200'}`}
+            className={`tap-auth px-1 transition-colors ${locale === 'en' ? 'text-church-800 dark:text-brass-300 font-semibold' : 'hover:text-ink-600 dark:hover:text-parchment-200'}`}
           >
             English
           </button>
@@ -249,7 +244,7 @@ export default function Login() {
           <button
             type="button"
             onClick={() => setLocale('es')}
-            className={`tap-reach inline-block px-1 transition-colors ${locale === 'es' ? 'text-church-800 dark:text-brass-300 font-semibold' : 'hover:text-ink-600 dark:hover:text-parchment-200'}`}
+            className={`tap-auth px-1 transition-colors ${locale === 'es' ? 'text-church-800 dark:text-brass-300 font-semibold' : 'hover:text-ink-600 dark:hover:text-parchment-200'}`}
           >
             Español
           </button>

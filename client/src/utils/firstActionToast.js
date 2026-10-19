@@ -24,15 +24,26 @@ const COPY = {
 // `toast` is the useToast() hook return — needs `.success(message)`.
 // Caller should already have it; we don't import the provider here
 // to keep this util pure / SSR-safe (no React imports).
-export function celebrateFirstAction(type, toast) {
+//
+// `priorCount` is how many of this thing the parish had BEFORE the create,
+// as the page measured it. The toast says "your first", so it fires only
+// when that count is known to be 0 (SP-054: a new browser saw "Your first
+// member is on the roster" with 12 members already present). A known
+// non-zero count retires the toast for this browser; an unknown count
+// (failed or filtered read) says nothing and decides nothing.
+export function celebrateFirstAction(type, toast, priorCount) {
   if (!type || !toast?.success) return false
   const message = COPY[type]
   if (!message) return false
+  // COUNT(*) can arrive as a numeric string (bigint); anything else is unknown.
+  const prior = typeof priorCount === 'string' && /^\d+$/.test(priorCount) ? Number(priorCount) : priorCount
+  if (!Number.isInteger(prior) || prior < 0) return false
 
   const key = `${KEY_PREFIX}${type}`
   try {
     if (localStorage.getItem(key)) return false
     localStorage.setItem(key, '1')
+    if (prior > 0) return false
   } catch {
     // localStorage may be disabled (private browsing, locked-down
     // browsers). Failing closed means the user just doesn't get the

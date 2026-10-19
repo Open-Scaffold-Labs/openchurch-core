@@ -40,6 +40,8 @@
 // produced and discarded, weekly, and the run reported that it had
 // worked. A backup that reports success while delivering nothing is
 // worse than one that fails loudly, because it stops anybody looking.
+import { maskRecipients, scrubText } from '../utils/redact.js'
+
 export function emailTransportIsLive() {
   return Boolean(process.env.RESEND_API_KEY)
 }
@@ -86,29 +88,20 @@ export async function sendEmail({ to, subject, html, text, attachments, headers 
   }
 
   // ── Stub transport (no key configured) ──────────────────────────
-  // Logs the message in a way that's easy to spot in a noisy console.
-  console.log('\n┌─ [email:stub] ─────────────────────────────────────────────')
-  console.log(`│ FROM:    ${from}`)
-  console.log(`│ TO:      ${Array.isArray(to) ? to.join(', ') : to}`)
-  console.log(`│ SUBJECT: ${subject}`)
-  console.log('│')
-  if (text) {
-    console.log('│ TEXT:')
-    text.split('\n').forEach(line => console.log(`│   ${line}`))
+  // ARG-LEAK-2: the stub used to print the whole message (body, reset and
+  // invite links, headers) to stdout. In production that is a token leak
+  // into platform logs, and the mail is not delivered anyway, so refuse
+  // loudly there. Elsewhere log a masked envelope only: no body, no
+  // headers, no URLs or tokens.
+  if (process.env.NODE_ENV === 'production') {
+    console.error('[email] RESEND_API_KEY is not set in production; refusing to stub-send (message withheld)')
+    const e = new Error('Email transport not configured (RESEND_API_KEY unset in production)')
+    e.code = 'EMAIL_TRANSPORT_UNCONFIGURED'
+    throw e
   }
-  if (headers && Object.keys(headers).length) {
-    console.log('│ HEADERS:')
-    for (const [k, v] of Object.entries(headers)) console.log(`│   ${k}: ${v}`)
-  }
-  if (Array.isArray(attachments) && attachments.length) {
-    console.log('│ ATTACHMENTS:')
-    attachments.forEach(a => console.log(`│   ${a.filename} (${Math.round((a.content?.length ?? 0) * 3 / 4 / 1024)} KB)`))
-  }
-  if (html && !text) {
-    console.log('│ HTML (no text fallback provided):')
-    console.log(`│   ${html.slice(0, 200)}${html.length > 200 ? '…' : ''}`)
-  }
-  console.log('└────────────────────────────────────────────────────────────\n')
+  const nAtt = Array.isArray(attachments) ? attachments.length : 0
+  console.log(`[email:stub] to=${maskRecipients(to)} subject="${scrubText(subject)}" ` +
+    `text=${text ? text.length : 0}c html=${html ? html.length : 0}c attachments=${nAtt} (body not logged)`)
 
   return { ok: true, id: `stub-${Date.now()}` }
 }

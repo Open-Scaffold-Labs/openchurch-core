@@ -1,6 +1,15 @@
 import { useState } from 'react'
+import { Link } from 'react-router-dom'
 import { X } from 'lucide-react'
 import { initials } from '../utils/format'
+
+// Only a positive integer is a person we can open. A missing or garbled
+// id stays text — the chip still names them, and remove still works.
+export function assignedMemberHref(id) {
+  const n = typeof id === 'number' ? id : typeof id === 'string' && id.trim() !== '' ? Number(id) : NaN
+  if (!Number.isInteger(n) || n <= 0) return null
+  return `/clients/${n}`
+}
 
 // Multi-select member picker. Lifted out of Events.jsx so the Schedule
 // page can reuse the same UX without two implementations drifting.
@@ -15,7 +24,10 @@ import { initials } from '../utils/format'
 //              the member list had failed to load — the component
 //              contradicting the page. An empty roster and an unread roster
 //              are different sentences.
-export default function MemberPicker({ members, value, onChange, failed = false, placeholder = 'Search members to assign…' }) {
+//   linkProfiles — when true (Schedule drawer), a chip backed by a real
+//              client id opens /clients/:id. Groups and Events leave this
+//              off. Remove stays a separate control.
+export default function MemberPicker({ members, value, onChange, failed = false, placeholder = 'Search members to assign…', linkProfiles = false }) {
   const [q, setQ] = useState('')
   const selected = members.filter(m => value.some(id => String(id) === String(m.id)))
   const filtered = members.filter(m =>
@@ -33,17 +45,34 @@ export default function MemberPicker({ members, value, onChange, failed = false,
     <div className="space-y-2">
       {selected.length > 0 && (
         <div className="flex flex-wrap gap-1.5">
-          {selected.map(m => (
-            <span key={m.id} className="inline-flex items-center gap-1.5 text-xs font-medium pl-1 pr-2 py-0.5 rounded-full bg-church-50 dark:bg-ink-800 border border-church-200/60 dark:border-church-800/60 text-church-900 dark:text-parchment-100">
-              <span className="w-5 h-5 rounded-full bg-church-900 dark:bg-church-700 flex items-center justify-center text-parchment-50 text-[9px] font-bold">
-                {initials(m.name)}
+          {selected.map(m => {
+            const href = linkProfiles ? assignedMemberHref(m.id) : null
+            return (
+              <span key={m.id} className="inline-flex items-center gap-1.5 text-xs font-medium pl-1 pr-2 py-0.5 rounded-full bg-church-50 dark:bg-ink-800 border border-church-200/60 dark:border-church-800/60 text-church-900 dark:text-parchment-100">
+                {href ? (
+                  <Link
+                    to={href}
+                    className="inline-flex items-center gap-1.5 hover:underline"
+                  >
+                    <span className="w-5 h-5 rounded-full bg-church-900 dark:bg-church-700 flex items-center justify-center text-parchment-50 text-[9px] font-bold">
+                      {initials(m.name)}
+                    </span>
+                    {m.name}
+                  </Link>
+                ) : (
+                  <>
+                    <span className="w-5 h-5 rounded-full bg-church-900 dark:bg-church-700 flex items-center justify-center text-parchment-50 text-[9px] font-bold">
+                      {initials(m.name)}
+                    </span>
+                    {m.name}
+                  </>
+                )}
+                <button type="button" onClick={() => remove(m.id)} className="text-ink-400 hover:text-rose-500 transition-colors">
+                  <X size={11} />
+                </button>
               </span>
-              {m.name}
-              <button type="button" onClick={() => remove(m.id)} className="text-ink-400 hover:text-rose-500 transition-colors">
-                <X size={11} />
-              </button>
-            </span>
-          ))}
+            )
+          })}
         </div>
       )}
       <input

@@ -5,8 +5,8 @@
 // never restored from one. A backup nobody has restored is a rumour, and
 // "your data is backed up" is a sentence we were not entitled to say.
 //
-// This drill takes the SAME artifact the Saturday email carries — the
-// gzipped JSON that services/backupDigest.js attaches — and restores it
+// This drill takes the SAME artifact the Saturday run stores — the
+// gzipped JSON that services/backupDigest.js writes to `orgs/<orgId>/<date>.json.gz` — and restores it
 // into an isolated, empty database. It then checks the three things that
 // make a restore a restore rather than a file that decompressed:
 //
@@ -20,27 +20,38 @@
 // a number somebody made up.
 //
 // Usage:
-//   DATABASE_URL=<source>  RESTORE_URL=<empty, isolated db>  \
+//   OCHR_REHEARSAL=local \
+//   DATABASE_URL=<local source>  RESTORE_URL=<local, empty isolated db>  \
 //     node scripts/offsite-restore-drill.mjs [--org <id>]
 //
-// RESTORE_URL must point at a database you are willing to have emptied.
-// The drill refuses to run if it already holds parish data, and refuses
-// outright if it is the same database as the source — the most expensive
-// mistake available here is restoring a backup over the thing you were
-// backing up.
+// FAIL-CLOSED (RECOVERY-L3-05). Both URLs must be loopback (including
+// libpq ?host= / ?hostaddr= overrides). OCHR_REHEARSAL must be exactly
+// `local`. RESTORE_URL must be a database you are willing to have emptied;
+// the drill also refuses if it already holds parish data, and refuses if
+// the restore database name is the same as the source — including when
+// the URLs differ only by host alias (localhost vs 127.0.0.1),
+// credentials, or query decoration. An empty path is the database
+// node-pg opens (PGDATABASE, otherwise the user), not a ?dbname= decoy.
+// A missing or ambiguous name (conflicting ?dbname=, or a name that
+// contains /) is refused. Raw URL inequality is not identity.
+// The most expensive mistake available here is restoring a backup over
+// the thing you were backing up.
 //
 // WHAT THIS DRILL DOES NOT PROVE. The artifact is the LOGICAL layer:
 // per-parish records, credential columns stripped by design. It is not a
 // cluster restore, so it does not exercise Supabase point-in-time
 // recovery, and it deliberately cannot bring back password hashes or
 // tokens. Recovering a parish's records is not the same as recovering
-// their ability to log in, and the policy has to say both.
+// their ability to log in, and the policy has to say both. A green local
+// restore is not production DR.
 
 import { gzipSync, gunzipSync } from 'node:zlib'
-import pg from 'pg'
-import pool from '../server/src/db.js'
-import { buildOrgExport } from '../server/src/services/orgExport.js'
 import { dependencyOrder } from './dependency-order.mjs'
+import {
+  assertDistinctDatabaseUrls,
+  redactDatabaseUrl,
+  requireLocalRehearsal,
+} from './lib/db-target-guard.mjs'
 
 const argOrg = (() => {
   const i = process.argv.indexOf('--org')
@@ -48,14 +59,30 @@ const argOrg = (() => {
 })()
 
 const RESTORE_URL = process.env.RESTORE_URL
-if (!RESTORE_URL) {
-  console.error('RESTORE_URL is required — an isolated, empty database to restore into.')
-  process.exit(2)
+const gate = requireLocalRehearsal({
+  rehearsal: process.env.OCHR_REHEARSAL,
+  urls: [
+    { label: 'DATABASE_URL', url: process.env.DATABASE_URL },
+    { label: 'RESTORE_URL', url: RESTORE_URL },
+  ],
+})
+if (!gate.ok) {
+  console.error(`offsite-restore-drill: ${gate.reason}`)
+  process.exit(gate.code)
 }
-if (RESTORE_URL === process.env.DATABASE_URL) {
-  console.error('RESTORE_URL is the same database as DATABASE_URL. Refusing.')
-  process.exit(2)
+const distinct = assertDistinctDatabaseUrls(process.env.DATABASE_URL, RESTORE_URL)
+if (!distinct.ok) {
+  console.error(`offsite-restore-drill: ${distinct.reason}`)
+  process.exit(distinct.code)
 }
+console.log(`offsite-restore-drill: ${gate.reason}`)
+console.log(`  source  ${redactDatabaseUrl(process.env.DATABASE_URL)}`)
+console.log(`  restore ${redactDatabaseUrl(RESTORE_URL)}`)
+console.log('  LOCAL ONLY — logical parish restore ≠ PITR / hosted backup / prod rollback.\n')
+
+const { default: pg } = await import('pg')
+const { default: pool } = await import('../server/src/db.js')
+const { buildOrgExport } = await import('../server/src/services/orgExport.js')
 
 const checks = []
 const check = (name, ok, detail = '') => { checks.push({ name, ok, detail }); return ok }
@@ -256,6 +283,13 @@ try {
   check('credential columns are ABSENT from the restore, by design',
     !JSON.stringify(restored.tables.ochr_users ?? []).includes('password_hash'),
     'a restored parish cannot log in until passwords are reset — see the policy')
+
+  // Partial restore must fail the drill, not print a green "restored and
+  // verified" while rows sit in the skipped list. Completeness usually
+  // catches this; this check makes the honesty explicit (RECOVERY-L3-05).
+  check('no rows were left unrestored after both passes',
+    skipped.length === 0,
+    skipped.length ? `${skipped.length} row(s) still failing` : '')
 
   console.log('')
   for (const c of checks) console.log(`${c.ok ? '  ✓' : '  ✗'} ${c.name}${c.detail ? ` — ${c.detail}` : ''}`)

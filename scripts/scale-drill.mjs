@@ -12,20 +12,29 @@
 // eight years of giving behind it — restores it, and replaces the
 // sentence with a number.
 //
+//   OCHR_REHEARSAL=local \
 //   DATABASE_URL=<local source>  RESTORE_URL=<local, empty> \
 //     node scripts/scale-drill.mjs [--members 3000] [--keep]
 //
-// IT REFUSES TO RUN AGAINST ANYTHING BUT LOCALHOST, on both URLs. This
-// script INSERTS TENS OF THOUSANDS OF ROWS and then deletes the parish it
-// made; pointed at production that is not a drill, it is an incident. The
-// same guard the patch script grew for the same reason.
+// FAIL-CLOSED (RECOVERY-L3-05). OCHR_REHEARSAL=local and both URLs must
+// classify as loopback — including libpq ?host= / ?hostaddr= overrides
+// that a naive authority-host regex would miss. Source and restore must
+// resolve to different database names; host aliases, credentials, query
+// decoration, and an empty path (PGDATABASE or the user, not a ?dbname=
+// decoy) are not a different database. This script INSERTS TENS
+// OF THOUSANDS OF ROWS and then deletes the parish it made; pointed at
+// production that is not a drill, it is an incident.
 //
 // The seeded parish is removed at the end unless --keep. The removal is
 // a plain cascade delete of one organisation, which is also a small
 // second proof: a parish can be taken out cleanly.
 
 import { spawnSync } from 'node:child_process'
-import pool from '../server/src/db.js'
+import {
+  assertDistinctDatabaseUrls,
+  redactDatabaseUrl,
+  requireLocalRehearsal,
+} from './lib/db-target-guard.mjs'
 
 const arg = (name, dflt) => {
   const i = process.argv.indexOf(`--${name}`)
@@ -34,24 +43,31 @@ const arg = (name, dflt) => {
 const MEMBERS = arg('members', 3000)
 const KEEP = process.argv.includes('--keep')
 
-// ── the guard ────────────────────────────────────────────────────────────
-const localOnly = (url, label) => {
-  if (!url) { console.error(`${label} is required.`); process.exit(2) }
-  const ok = /^postgres(ql)?:\/\/[^/]*@(localhost|127\.0\.0\.1):\d+/i.test(url)
-  if (!ok) {
-    console.error(`REFUSING: ${label} does not point at a TCP localhost database.`)
-    console.error(`  host: ${String(url).replace(/.*@([^:/?]+).*/, '$1')}`)
-    console.error('  This script inserts tens of thousands of rows and then deletes')
-    console.error('  a parish. Against production that is an incident, not a drill.')
-    process.exit(2)
-  }
+// ── the guard (before any database driver import) ────────────────────────
+const gate = requireLocalRehearsal({
+  rehearsal: process.env.OCHR_REHEARSAL,
+  urls: [
+    { label: 'DATABASE_URL', url: process.env.DATABASE_URL },
+    { label: 'RESTORE_URL', url: process.env.RESTORE_URL },
+  ],
+})
+if (!gate.ok) {
+  console.error(`scale-drill: ${gate.reason}`)
+  console.error('  This script inserts tens of thousands of rows and then deletes')
+  console.error('  a parish. Against production that is an incident, not a drill.')
+  process.exit(gate.code)
 }
-localOnly(process.env.DATABASE_URL, 'DATABASE_URL')
-localOnly(process.env.RESTORE_URL, 'RESTORE_URL')
-if (process.env.RESTORE_URL === process.env.DATABASE_URL) {
-  console.error('RESTORE_URL is the same database as DATABASE_URL. Refusing.')
-  process.exit(2)
+const distinct = assertDistinctDatabaseUrls(process.env.DATABASE_URL, process.env.RESTORE_URL)
+if (!distinct.ok) {
+  console.error(`scale-drill: ${distinct.reason}`)
+  process.exit(distinct.code)
 }
+console.log(`scale-drill: ${gate.reason}`)
+console.log(`  source  ${redactDatabaseUrl(process.env.DATABASE_URL)}`)
+console.log(`  restore ${redactDatabaseUrl(process.env.RESTORE_URL)}`)
+console.log('  LOCAL ONLY — scale RTO ≠ PITR / hosted backup / production DR.\n')
+
+const { default: pool } = await import('../server/src/db.js')
 
 const ms = t => `${(t / 1000).toFixed(2)}s`
 const started = Date.now()

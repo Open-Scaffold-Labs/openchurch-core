@@ -57,10 +57,12 @@ const frequencyWord = (freq, lang) =>
 // nowhere even with a live mail provider — the final step of the escalation
 // reaching nobody. Same shape as the birthday digest: resolve admins, notify
 // each, so the message has somewhere to arrive.
-async function parishAdmins(organizationId) {
+export async function parishAdmins(organizationId) {
   const { rows } = await pool.query(
     `SELECT id, email FROM ochr_users
-      WHERE organization_id = $1 AND role = 'admin' AND email IS NOT NULL`,
+      WHERE organization_id = $1 AND role = 'admin' AND email IS NOT NULL
+        -- F-06 / ARG-PATCH-2-2: never a closed or deactivated admin
+        AND closed_at IS NULL AND deactivated_at IS NULL`,
     [organizationId])
   return rows
 }
@@ -123,6 +125,7 @@ export async function chargeDueRecurringGifts() {
       -- while due_date above stays the anniversary so the idempotency key
       -- names the billing period rather than the attempt. See migration 092.
       WHERE rg.status = 'active'
+        AND o.held_at IS NULL
         AND COALESCE(rg.retry_after, rg.next_charge_date) <= CURRENT_DATE
       ORDER BY COALESCE(rg.retry_after, rg.next_charge_date) ASC
       LIMIT 500`
@@ -138,6 +141,29 @@ export async function chargeDueRecurringGifts() {
     // retried Wednesday still maps to the Monday period.
     const dueDate = String(g.due_date).slice(0, 10)
     const idempotencyKey = `rg${g.id}-${dueDate}`
+
+    // Admission before money moves. The organization's KEY SHARE lock is
+    // held from the hold check through the donation insert, so a HOLD placed
+    // meanwhile waits for this gift to be charged AND recorded, and a gift
+    // whose parish is already held is never charged. (A held parish's writes
+    // are refused: charging first would move money with nowhere to record it.)
+    const client = await pool.connect()
+    let admitted = false
+    try {
+      await client.query('BEGIN')
+      const { rows: [org] } = await client.query(
+        'SELECT held_at FROM ochr_organizations WHERE id = $1 FOR KEY SHARE', [g.organization_id])
+      if (!org || org.held_at != null) {
+        await client.query('ROLLBACK')
+        client.release()
+        continue
+      }
+      admitted = true
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {})
+      client.release()
+      throw err
+    }
 
     try {
       const charge = await createCharge({
@@ -155,10 +181,7 @@ export async function chargeDueRecurringGifts() {
       // stays un-advanced, the retry re-charges under the same
       // idempotency key (no second movement of money), and both writes
       // land together on the second pass.
-      const client = await pool.connect()
       try {
-        await client.query('BEGIN')
-
         const category = g.fund_name || 'Recurring gift'
         // Idempotent on (org, payment_ref) via uq_donations_org_payment_ref
         // (050) — a retried period conflicts instead of double-posting.
@@ -194,16 +217,14 @@ export async function chargeDueRecurringGifts() {
         )
 
         await client.query('COMMIT')
+        admitted = false
         if (inserted.rowCount === 0) deduped++
         else charged++
         if (Number(g.failure_count) > 0) recovered++
-      } catch (err) {
-        await client.query('ROLLBACK').catch(() => {})
-        throw err
-      } finally {
-        client.release()
-      }
+      } finally { /* the outer handler rolls back and releases */ }
     } catch (err) {
+      if (admitted) await client.query('ROLLBACK').catch(() => {})
+      admitted = false
       failed++
       monitor.error('recurring.charge', err, { recurringGiftId: g.id, orgId: g.organization_id })
 
@@ -308,6 +329,8 @@ export async function chargeDueRecurringGifts() {
         monitor.error('recurring.failureBookkeeping', bookkeeping,
           { recurringGiftId: g.id, orgId: g.organization_id })
       }
+    } finally {
+      client.release()
     }
   }
 
