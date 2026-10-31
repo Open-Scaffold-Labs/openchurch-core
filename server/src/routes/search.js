@@ -4,6 +4,18 @@ import { monitor } from '../monitoring/index.js'
 
 const router = Router()
 
+// Folded so "Misa" and "misas" are the same lookup. These are search
+// words, not sentences on screen.
+const MASS_WORDS = new Set(['mass', 'masses', 'misa', 'misas'])
+const PLAN_WORDS = new Set([
+  'worship', 'liturgy', 'liturgia', 'plan', 'plans', 'service', 'services',
+  'mass', 'masses', 'misa', 'misas', 'celebracion',
+])
+
+function foldQuery(value) {
+  return String(value).trim().toLowerCase().normalize('NFD').replace(/\p{M}/gu, '')
+}
+
 // Each searchable table has a `search_vec` tsvector column maintained
 // by Postgres (GENERATED ALWAYS AS … STORED — see migration 009) and
 // backed by a GIN index. The previous implementation used
@@ -41,8 +53,17 @@ router.get('/', async (req, res) => {
     if (!q) return res.json([])
 
     const orgId = req.organizationId
+    const folded = foldQuery(q)
+    const like = `%${q.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`
+    // A word for the thing, not only a title that happens to contain it.
+    // "misa" finds Masses whose titles are "10:00". "plan" finds plans.
+    const massWord = MASS_WORDS.has(folded)
+    const planWord = PLAN_WORDS.has(folded)
+    const mayReadPlans = req.user?.role !== 'viewer'
+    // SP-185: Mass intentions are a staff/admin book (same gate as donations).
+    const mayReadIntentions = req.user?.role === 'admin' || req.user?.role === 'staff'
 
-    const [clients, events, tasks, staff, donations] = await Promise.all([
+    const [clients, events, tasks, staff, donations, plans, masses, intentions] = await Promise.all([
       searchScope('clients',
         `SELECT id, name, COALESCE(email,'') AS email,
                 COALESCE(role,'') AS role, COALESCE(status,'') AS status,
@@ -92,12 +113,66 @@ router.get('/', async (req, res) => {
           ORDER BY date DESC LIMIT 5`,
         [q, orgId]
       ),
+      mayReadPlans
+        ? searchScope('servicePlans',
+          `SELECT id, title, to_char(date, 'YYYY-MM-DD') AS date,
+                  'service_plan'::text AS type
+             FROM ochr_service_plans
+            WHERE organization_id = $2
+              AND (title ILIKE $1 ESCAPE '\\' OR $3::boolean)
+            ORDER BY (date < CURRENT_DATE),
+                     CASE WHEN date >= CURRENT_DATE THEN date END ASC,
+                     date DESC, id DESC
+            LIMIT 5`,
+          [like, orgId, planWord]
+        )
+        : Promise.resolve([]),
+      searchScope('masses',
+        `SELECT id, title, to_char(date, 'YYYY-MM-DD') AS date,
+                to_char(start_time, 'HH24:MI') AS start_time,
+                'mass'::text AS type
+           FROM ochr_calendar_events
+          WHERE organization_id = $2
+            AND lower(btrim(COALESCE(type, ''))) <> 'meeting'
+            AND (title ILIKE $1 ESCAPE '\\' OR $3::boolean)
+          ORDER BY (date < CURRENT_DATE),
+                   CASE WHEN date >= CURRENT_DATE THEN date END ASC,
+                   date DESC, id DESC
+          LIMIT 5`,
+        [like, orgId, massWord]
+      ),
+      // SP-185: ⌘K "Testwalker" must find Mass intentions by intention text
+      // or requester (same ILIKE fields as GET /api/mass-intentions?q=).
+      // Never returns stipend. Staff/admin only.
+      mayReadIntentions
+        ? searchScope('massIntentions',
+          `SELECT mi.id, mi.intention AS title,
+                  COALESCE(mi.requested_by, '') AS requested_by,
+                  to_char(COALESCE(mi.fulfilled_mass_date, mi.mass_date), 'YYYY-MM-DD') AS mass_date,
+                  mi.status,
+                  'mass_intention'::text AS type
+             FROM ochr_mass_intentions mi
+             LEFT JOIN ochr_clients c
+               ON c.id = mi.requested_by_client_id
+              AND c.organization_id = mi.organization_id
+            WHERE mi.organization_id = $2
+              AND (mi.intention ILIKE $1 ESCAPE '\\'
+                   OR COALESCE(mi.requested_by, '') ILIKE $1 ESCAPE '\\'
+                   OR COALESCE(c.name, '') ILIKE $1 ESCAPE '\\')
+            ORDER BY COALESCE(mi.fulfilled_mass_date, mi.mass_date) DESC NULLS LAST,
+                     mi.id DESC
+            LIMIT 5`,
+          [like, orgId]
+        )
+        : Promise.resolve([]),
     ])
 
-    // SP-014..022: a Viewer may search Members only (Help role table).
+    // SP-014..022: a Viewer may search Members, plus Masses on the Schedule
+    // they are allowed to open. Service plans and Mass intentions stay with
+    // staff and admins (SP-185).
     const results = req.user?.role === 'viewer'
-      ? [...clients]
-      : [...clients, ...events, ...tasks, ...staff, ...donations]
+      ? [...clients, ...masses]
+      : [...clients, ...events, ...tasks, ...staff, ...donations, ...plans, ...masses, ...intentions]
     res.json(results)
   } catch (err) {
     // The query is often a person's name. The log and the Sentry extra

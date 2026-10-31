@@ -24,7 +24,7 @@ import {
 import { apiUrl } from '../api'
 import { useLocale } from '../i18n'
 import { useAuth } from '../context/AuthContext'
-import PageWrapper from '../components/PageWrapper'
+import PageWrapper, { PageHeader } from '../components/PageWrapper'
 import EmptyState from '../components/EmptyState'
 import LoadFailure from '../components/LoadFailure'
 import { SkeletonRowList } from '../components/Skeleton'
@@ -112,14 +112,14 @@ const btnQuiet = 'inline-flex items-center justify-center gap-2 rounded-lg borde
 
 function Badge({ status, t }) {
   return (
-    <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-wider whitespace-nowrap ${STATUS_TONE[status] || STATUS_TONE.draft}`}>
+    <span className={`px-2 py-0.5 rounded-full text-[11px] font-semibold uppercase tracking-wider whitespace-nowrap ${STATUS_TONE[status] || STATUS_TONE.draft}`}>
       {t(`bil.status.${status}`)}
     </span>
   )
 }
 
 function FieldLabel({ children }) {
-  return <span className="block text-[10px] font-semibold uppercase tracking-widest text-ink-500 dark:text-parchment-300/70 mb-1">{children}</span>
+  return <span className="block text-[11px] font-semibold uppercase tracking-widest text-ink-500 dark:text-parchment-300/70 mb-1">{children}</span>
 }
 
 /* ── The composer: a new draft ─────────────────────────────────────────── */
@@ -432,7 +432,9 @@ function DetailSheet({ id, onClose, onChanged }) {
   const isDraft = inv?.status === 'draft'
   const canPay = inv && ['issued', 'partially_paid'].includes(inv.status)
   const canWaive = isAdmin && inv && ['draft', 'issued', 'partially_paid'].includes(inv.status)
-  const canCancel = inv && (isDraft || (inv.status === 'issued' && paidN === 0))
+  // Cancelling is admin-only (José, 2026-10-23); the server 403s staff.
+  const cancellable = inv && (isDraft || (inv.status === 'issued' && paidN === 0))
+  const canCancel = isAdmin && cancellable
 
   return (
     <div className={`${sheetOverlayCls} z-40`} onClick={onClose}>
@@ -516,7 +518,12 @@ function DetailSheet({ id, onClose, onChanged }) {
                           <span className="text-xs text-ink-500 dark:text-parchment-300/70"> · {new Date(p.received_at).toLocaleDateString(dateLocale, { month: 'short', day: 'numeric' })}</span>
                           {p.refunded_at && <span className="text-xs italic"> · {t('bil.refunded')}</span>}
                         </span>
-                        {isAdmin && !p.refunded_at && (
+                        {p.is_deposit && !p.refunded_at && (
+                          <Link to="/offerings/deposits" className="text-xs underline text-church-700 dark:text-brass-300 min-h-[32px]">
+                            {t('bil.depositManage')}
+                          </Link>
+                        )}
+                        {isAdmin && !p.refunded_at && !p.is_deposit && (
                           <button onClick={() => act('refund', `/payments/${p.id}/refund`, {}, {
                             title: t('bil.refundTitle'), body: t('bil.refundBody'), confirmLabel: t('bil.refundConfirm'),
                           })} disabled={!!busy}
@@ -579,6 +586,9 @@ function DetailSheet({ id, onClose, onChanged }) {
                     {busy === 'issue' && <Loader2 size={14} className="animate-spin" />} {t('bil.issue')}
                   </button>
                 </>
+              )}
+              {!isAdmin && cancellable && !isDraft && (
+                <p data-testid="invoice-admin-only-cancel" className="mr-auto self-center text-xs text-ink-500 dark:text-parchment-300/70">{t('bil.adminOnlyCancel')}</p>
               )}
               {canCancel && !isDraft && (
                 <button onClick={() => act('cancel', '/cancel', {}, {
@@ -821,12 +831,9 @@ export default function Offerings() {
   }, [])
 
   return (
-    <PageWrapper>
+    <PageWrapper type="list">
       <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
-        <div>
-          <h1 className="font-display text-2xl font-semibold text-church-900 dark:text-parchment-50">{t('bil.title')}</h1>
-          <p className="text-sm text-ink-500 dark:text-parchment-300/70 mt-0.5">{t('bil.subtitle')}</p>
-        </div>
+        <PageHeader title={t('bil.title')} subtitle={t('bil.subtitle')} />
         <div className="flex items-center gap-2">
           {tab === 'invoices' && (
             <>

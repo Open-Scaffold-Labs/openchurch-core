@@ -5,7 +5,7 @@ import { Plus, X, Loader2, Users2, Trash2, CalendarPlus, Check, UserPlus, Mail, 
 import { apiUrl } from '../api'
 import { loadList } from '../utils/format'
 import { useLocale } from '../i18n'
-import PageWrapper from '../components/PageWrapper'
+import PageWrapper, { PageHeader } from '../components/PageWrapper'
 import EmptyState from '../components/EmptyState'
 import MemberPicker from '../components/MemberPicker'
 import { useToast } from '../components/ToastProvider'
@@ -163,24 +163,17 @@ export default function Groups() {
   }
 
   return (
-    <PageWrapper>
+    <PageWrapper type="list">
       <div className="max-w-5xl mx-auto p-4 md:p-6 space-y-5">
         <div className="flex items-start justify-between gap-4 flex-wrap">
-          <div className="min-w-0">
-            <h1 className="text-2xl md:text-3xl font-display text-ink-900 dark:text-parchment-50">
-              Groups
-            </h1>
-            <p className="text-sm text-ink-500 dark:text-parchment-300/70 mt-1">
-              Ministries, life groups, small groups, and committees.
-            </p>
-          </div>
+          <PageHeader title={t('grp.title')} subtitle={t('grp.subtitle')} />
           <button
             type="button"
             onClick={onOpenCreate}
             className="inline-flex items-center gap-1.5 px-3 py-2 text-sm font-semibold rounded-lg bg-church-900 dark:bg-parchment-100 text-parchment-50 dark:text-church-900 hover:opacity-90 transition-opacity"
           >
             <Plus size={15} />
-            New group
+            {t('grp.new')}
           </button>
         </div>
 
@@ -198,7 +191,7 @@ export default function Groups() {
             <div className="flex items-center gap-2 mb-3">
               <UserPlus size={15} className="text-brass-700 dark:text-brass-300" />
               <h2 className="text-sm font-bold uppercase tracking-widest text-brass-700 dark:text-brass-300">
-                Connection requests
+                {t('grp.connectionRequests')}
               </h2>
               <span className="text-xs font-semibold text-ink-500 dark:text-parchment-300/70">({interests.length})</span>
             </div>
@@ -212,7 +205,7 @@ export default function Groups() {
                     <div className="flex items-center gap-2 flex-wrap">
                       <p className="text-sm font-bold text-ink-900 dark:text-parchment-50">{it.name}</p>
                       {it.group_name && (
-                        <span className="text-[10px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded-full bg-church-100 dark:bg-church-900/40 text-church-800 dark:text-brass-200">
+                        <span className="text-[11px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded-full bg-church-100 dark:bg-church-900/40 text-church-800 dark:text-brass-200">
                           {it.group_name}
                         </span>
                       )}
@@ -234,7 +227,7 @@ export default function Groups() {
                       disabled={busyId === it.id}
                       className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold rounded-lg bg-church-900 dark:bg-parchment-100 text-parchment-50 dark:text-church-900 hover:opacity-90 transition-opacity disabled:opacity-40"
                     >
-                      {busyId === it.id ? <Loader2 size={12} className="animate-spin" /> : <Check size={12} />} Approve
+                      {busyId === it.id ? <Loader2 size={12} className="animate-spin" /> : <Check size={12} />} {t('grp.approve')}
                     </button>
                     <button
                       type="button"
@@ -242,7 +235,7 @@ export default function Groups() {
                       disabled={busyId === it.id}
                       className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium rounded-lg border border-parchment-300/70 dark:border-brass-900/40 text-ink-500 dark:text-parchment-300/70 hover:text-rose-700 dark:hover:text-rose-300 transition-colors disabled:opacity-40"
                     >
-                      <X size={12} /> Decline
+                      <X size={12} /> {t('grp.decline')}
                     </button>
                   </div>
                 </li>
@@ -268,8 +261,8 @@ export default function Groups() {
         ) : groups.length === 0 ? (
           <EmptyState
             icon={Users2}
-            title="No groups yet"
-            body="Create your first ministry team, life group, small group, or committee."
+            title={t('grp.emptyTitle')}
+            body={t('grp.emptyBody')}
           />
         ) : (
           <div className="grid sm:grid-cols-2 gap-3">
@@ -294,7 +287,7 @@ export default function Groups() {
                         </p>
                       )}
                     </div>
-                    <span className={`text-[10px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded-full shrink-0 ${CAT_TONE[g.category] || ''}`}>
+                    <span className={`text-[11px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded-full shrink-0 ${CAT_TONE[g.category] || ''}`}>
                       {CAT_LABEL[g.category] || g.category}
                     </span>
                   </div>
@@ -316,7 +309,7 @@ export default function Groups() {
                     onClick={() => navigate(`/schedule?group=${g.id}&new=1`)}
                     className="inline-flex items-center gap-1.5 text-xs font-semibold text-church-800 dark:text-brass-300 hover:text-church-900 dark:hover:text-brass-200 transition-colors"
                   >
-                    <CalendarPlus size={13} /> Create event for this group
+                    <CalendarPlus size={13} /> {t('grp.createEvent')}
                   </button>
                 </div>
               </div>
@@ -410,7 +403,7 @@ function GroupModal({ group, members, membersFailed, onClose, onSaved }) {
           if (!r.ok && r.status !== 204) membershipOk = false
         }
         if (!membershipOk) {
-          toast.error('Group details saved, but some roster changes failed — reopen to retry.')
+          toast.error(t('grp.rosterPartial'))
           await onSaved()
           return
         }
@@ -419,7 +412,7 @@ function GroupModal({ group, members, membersFailed, onClose, onSaved }) {
       toast.success(isEdit ? 'Group saved' : 'Group created')
       await onSaved()
     } catch (err) {
-      toast.error("That didn't save — nothing was lost. Please try again.")
+      toast.error(t('grp.didntWork'))
     } finally {
       setBusy(false)
     }
@@ -428,9 +421,9 @@ function GroupModal({ group, members, membersFailed, onClose, onSaved }) {
   const handleDelete = async () => {
     if (!isEdit) return
     if (!(await ask({
-      title: `Remove “${group.name}”?`,
-      body: 'The roster for this group goes with it. Everyone on it stays on your parish roster.',
-      confirmLabel: 'Remove group',
+      title: t('grp.removeTitle', { name: group.name }),
+      body: t('grp.removeBody'),
+      confirmLabel: t('grp.removeConfirm'),
       recoverable: true,
     }))) return
     setBusy(true)
@@ -441,10 +434,10 @@ function GroupModal({ group, members, membersFailed, onClose, onSaved }) {
         toast.error(d.error || `Delete failed (${res.status})`)
         return
       }
-      toast.success('Group deleted')
+      toast.success(t('grp.deleted'))
       await onSaved()
     } catch (err) {
-      toast.error("That didn't save — nothing was lost. Please try again.")
+      toast.error(t('grp.didntWork'))
     } finally {
       setBusy(false)
     }
@@ -460,10 +453,10 @@ function GroupModal({ group, members, membersFailed, onClose, onSaved }) {
         className="w-full md:max-w-lg bg-parchment-50 dark:bg-ink-900 rounded-t-2xl md:rounded-2xl shadow-warm border border-parchment-300/60 dark:border-brass-900/30 max-h-[90vh] flex flex-col"
       >
         <div className="flex items-center justify-between px-5 py-4 border-b border-parchment-300/50 dark:border-brass-900/25">
-          <h2 className="font-bold text-ink-900 dark:text-parchment-50">
+          <h2 className="font-display text-2xl font-semibold text-ink-900 dark:text-parchment-50 leading-snug">
             {isEdit ? 'Edit group' : 'New group'}
           </h2>
-          <button onClick={onClose} className="-m-2 p-2 text-ink-400 hover:text-ink-700 dark:hover:text-parchment-50" aria-label="Close">
+          <button onClick={onClose} className="-m-2 p-2 text-ink-400 hover:text-ink-700 dark:hover:text-parchment-50" aria-label={t('grp.close')}>
             <X size={18} />
           </button>
         </div>
@@ -481,7 +474,7 @@ function GroupModal({ group, members, membersFailed, onClose, onSaved }) {
             <input
               value={form.name}
               onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
-              placeholder="e.g., Worship Team"
+              placeholder={t('grp.namePh')}
               className={inputCls}
             />
           </div>
@@ -489,7 +482,7 @@ function GroupModal({ group, members, membersFailed, onClose, onSaved }) {
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1.5">
-                Category
+                {t('grp.category')}
               </label>
               <select
                 value={form.category}
@@ -503,7 +496,7 @@ function GroupModal({ group, members, membersFailed, onClose, onSaved }) {
             </div>
             <div>
               <label className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1.5">
-                Leader
+                {t('grp.leader')}
               </label>
               <select
                 value={form.leader_client_id}
@@ -522,27 +515,27 @@ function GroupModal({ group, members, membersFailed, onClose, onSaved }) {
 
           <div>
             <label className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1.5">
-              Description
+              {t('grp.description')}
             </label>
             <textarea
               value={form.description}
               onChange={e => setForm(f => ({ ...f, description: e.target.value }))}
               rows={2}
-              placeholder="Optional — purpose, meeting cadence, anything."
+              placeholder={t('grp.descPh')}
               className={inputCls}
             />
           </div>
 
           <div>
             <label className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1.5">
-              Members
+              {t('grp.members')}
             </label>
             <MemberPicker
               failed={membersFailed}
               members={members}
               value={form.member_ids}
               onChange={ids => setForm(f => ({ ...f, member_ids: ids }))}
-              placeholder="Search members to add to the group…"
+              placeholder={t('grp.searchMembersPh')}
             />
           </div>
         </div>
@@ -556,7 +549,7 @@ function GroupModal({ group, members, membersFailed, onClose, onSaved }) {
                 disabled={busy}
                 className="text-xs font-medium text-rose-500 hover:text-rose-700 transition-colors flex items-center gap-1.5 disabled:opacity-40"
               >
-                <Trash2 size={13} /> Delete
+                <Trash2 size={13} /> {t('grp.delete')}
               </button>
             )}
           </div>
@@ -566,7 +559,7 @@ function GroupModal({ group, members, membersFailed, onClose, onSaved }) {
               onClick={onClose}
               className="text-sm text-ink-400 hover:text-ink-700 dark:hover:text-parchment-50 transition-colors px-3 py-1.5"
             >
-              Cancel
+              {t('grp.cancel')}
             </button>
             <button
               type="button"

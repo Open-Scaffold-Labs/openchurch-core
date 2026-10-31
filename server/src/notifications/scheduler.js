@@ -16,7 +16,7 @@
 import { sqlNormEmail } from '../utils/emailNorm.js'
 import { isHoldRefusal } from '../auth/organizationHold.js'
 import pool from '../db.js'
-import { notify } from './transport.js'
+import { notify, RECORD_ADDRESSED_TYPES } from './transport.js'
 
 // Insert a pending row. Caller decides the sendAt — usually computed
 // as "event date - 24h" or similar from the trigger context.
@@ -130,6 +130,9 @@ export async function processDueNotifications({ now = new Date(), batchSize = 50
   // a closed/deactivated login in the same org, are cancelled instead of
   // claimed. (Closure and deactivation also cancel up front; this is the
   // backstop for rows queued by any other path or racing the state change.)
+  // Ledger #430 P3-1: the ADDRESS match skips record-addressed types (mail
+  // to a member or donor record sharing the address), same rule as dispatch
+  // admission (transport.js by_address). The id match covers every type.
   // R286-2: same HOLD contract as the reapers above — a held parish's rows
   // are left exactly as they are (HOLD deactivates its users; migration 114
   // refuses the write), and a HOLD committing mid-statement is retried once.
@@ -146,10 +149,11 @@ export async function processDueNotifications({ now = new Date(), batchSize = 50
                 SELECT 1 FROM ochr_users u
                  WHERE u.organization_id = n.organization_id
                    AND ${sqlNormEmail('u.email')} = ${sqlNormEmail('n.recipient_email')}
-                   AND (u.closed_at IS NOT NULL OR u.deactivated_at IS NOT NULL)))
+                   AND (u.closed_at IS NOT NULL OR u.deactivated_at IS NOT NULL))
+              AND NOT (n.notification_type = ANY($2::text[])))
         )
         AND n.organization_id IN (SELECT id FROM ochr_organizations WHERE held_at IS NULL)`,
-    [now.toISOString()]
+    [now.toISOString(), [...RECORD_ADDRESSED_TYPES]]
   ))
 
   // Atomic claim: flip pending → 'processing' for up to batchSize

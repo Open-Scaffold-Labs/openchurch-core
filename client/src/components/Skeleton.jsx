@@ -4,6 +4,8 @@
 // the rows in once the fetch resolves).
 //
 // Tone: parchment-200 in light mode, ink-800 in dark — NOT slate/gray.
+// Motion: a slow parchment shimmer (index.css .skeleton-shimmer), never a
+// pulse — PHILOSOPHY §12: "parchment shimmer says 'one moment.'"
 // Keeps the warmth on first paint instead of dropping into a cold blank.
 
 export function SkeletonBlock({ className = '', width, height }) {
@@ -17,7 +19,7 @@ export function SkeletonBlock({ className = '', width, height }) {
     <div
       aria-hidden="true"
       style={style}
-      className={`animate-pulse rounded bg-parchment-200/70 dark:bg-ink-800/70 ${className}`}
+      className={`skeleton-shimmer rounded ${className}`}
     />
   )
 }

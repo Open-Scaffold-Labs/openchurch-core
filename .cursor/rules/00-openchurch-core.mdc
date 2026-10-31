@@ -18,7 +18,11 @@ conflict** rather than complying. Do not restate them — this file adds only wh
   sacramental, or financial data — not in code, tests, fixtures, logs, or messages. Use the
   seeded demo/local data only.
 - **No unauthorized production actions.** Never deploy, mutate production, run production
-  migrations, rotate credentials, or trigger live jobs without exact human authorization. Never
+  migrations, rotate credentials, or trigger live jobs without exact human authorization (only
+  exception: a routine main-tip deploy meeting every gate and no exclusion in
+  `.ai/protocols/L5-C-CLEARANCE.md`; never destructive migrations, RLS/grant loosening,
+  protected-domain weakening, non-main-tip dispatch or re-run, credential rotation,
+  config/secret changes or live jobs). Never
   bypass authorization, tenant isolation, audit logging, CI, integrity constraints, or branch
   protection. Never commit to `main`.
 - **Verify, then claim.** Back every claim with code you read, a test that ran, or command

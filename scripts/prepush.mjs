@@ -10,7 +10,7 @@
 // one of the dependency-free gates below, which fail here in about a second.
 //
 // WHAT RUNS.
-//   always   lint:honest (+ its regressions), lint:operator, lint:api-shape,
+//   always   lint:honest (+ its regressions), lint:operator, lint:typescale, lint:api-shape,
 //            scripts/ci-scope.test.mjs
 //   client/          lint:client-scope, lint:i18n-critical, and the client
 //                    tests RELATED to the changed client files
@@ -80,6 +80,7 @@ const SRC_EXT = /\.(m?[jt]sx?|cjs)$/
 run('Honest failure (lint:honest)', 'npm', ['run', '-s', 'lint:honest'])
 run('Honest failure regressions', 'node', ['--test', 'scripts/honest-failure.test.mjs'])
 run('OPERATOR lint', 'npm', ['run', '-s', 'lint:operator'])
+run('Type-scale lint', 'npm', ['run', '-s', 'lint:typescale'])
 run('API shape', 'npm', ['run', '-s', 'lint:api-shape'])
 run('CI scope regressions', 'node', ['--test', 'scripts/ci-scope.test.mjs'])
 

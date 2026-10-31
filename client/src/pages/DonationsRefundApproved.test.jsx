@@ -14,6 +14,7 @@ import { render, screen, waitFor, fireEvent, within } from '@testing-library/rea
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { MemoryRouter } from 'react-router-dom'
 import { LocaleProvider } from '../i18n'
+import { STRINGS } from '../i18n/strings'
 import { ToastProvider } from '../components/ToastProvider'
 import { ConfirmProvider } from '../components/ConfirmProvider'
 import Donations from './Donations'
@@ -36,7 +37,7 @@ const ok = (b) => ({ ok: true, status: 200, json: async () => b })
 const stubFetch = (refundBody) => {
   vi.stubGlobal('fetch', vi.fn(async (url, opts = {}) => {
     const u = String(url)
-    if (u.includes('/api/donations/501/refund')) return ok(refundBody)
+    if (u.includes('/api/donations/501/record-refund')) return ok(refundBody)
     if (u.includes('/api/donations/recurring')) return ok({ recurring: [] })
     if (u.includes('/api/donations/summary')) return ok({ summary: null })
     if (u.includes('/api/donations/by-fund')) return ok({ funds: [] })
@@ -53,13 +54,14 @@ const view = () => render(
 )
 
 async function clickRefund() {
-  const btn = await screen.findByLabelText('Refund this gift', {}, { timeout: 4000 })
+  const btn = await screen.findByLabelText(STRINGS.en['don.refundGift'], {}, { timeout: 4000 })
   fireEvent.click(btn)
-  const confirm = await screen.findByRole('button', { name: /refund gift/i }, { timeout: 4000 })
+  fireEvent.change(await screen.findByLabelText(STRINGS.en['don.reasonLabel'] || 'Reason'), { target: { value: 'Paid twice' } })
+  const confirm = await screen.findByRole('button', { name: STRINGS.en['don.refundConfirm'] }, { timeout: 4000 })
   fireEvent.click(confirm)
 }
 
-beforeEach(() => { vi.unstubAllGlobals() })
+beforeEach(() => { vi.unstubAllGlobals(); localStorage.clear() })
 
 describe('refunding a gift that sits in an approved period', () => {
   it('CONTROL: an ordinary refund shows no approved-period notice', async () => {

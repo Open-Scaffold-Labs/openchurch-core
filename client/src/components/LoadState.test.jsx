@@ -33,6 +33,16 @@ describe('the branch each state reaches', () => {
     show(make({ state: 'failed', data: null, error: 'Failed (500)' }))
     expect(screen.getByText(/didn'?t load/i)).toBeInTheDocument()
     expect(screen.queryByText('EMPTY BRANCH')).not.toBeInTheDocument()
+    // Quiet craft 2: the status code is present for support, but closed
+    // behind Details — not inlined in the plain words (OPERATOR.md).
+    const status = screen.getByRole('status')
+    const details = screen.getByText(/^Details$/i).closest('details')
+    expect(details).not.toHaveAttribute('open')
+    expect(details).toHaveTextContent('Failed (500)')
+    // The body paragraph (before Details) must not carry the code inline.
+    const body = [...status.querySelectorAll('p')].find((el) => /dash is missing|guion falta|couldn.?t reach|comunicarnos/i.test(el.textContent || ''))
+    expect(body).toBeTruthy()
+    expect(body.textContent).not.toMatch(/Failed \(500\)/)
   })
 
   it('empty shows the empty branch', () => {

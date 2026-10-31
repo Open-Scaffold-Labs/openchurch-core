@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { X, GripVertical, ArrowUp, ArrowDown } from 'lucide-react'
 import { initials } from '../utils/format'
+import { useOptionalLocale } from '../i18n'
 
 // Ordered, multi-select member picker for the rotation auto-fill UI
 // (VS.1b). Differs from MemberPicker on two points:
@@ -17,7 +18,8 @@ import { initials } from '../utils/format'
 //   value    — array of selected member ids, ORDERED
 //   onChange — (orderedIds: number[]) => void
 //   placeholder — search input placeholder
-export default function OrderedMemberPicker({ members, value, onChange, placeholder = 'Search members to add to rotation…' }) {
+export default function OrderedMemberPicker({ members, value, onChange, placeholder }) {
+  const { t } = useOptionalLocale()
   const [q, setQ] = useState('')
   const [dragFrom, setDragFrom] = useState(null)
 
@@ -77,10 +79,10 @@ export default function OrderedMemberPicker({ members, value, onChange, placehol
                 size={14}
                 className="text-ink-400 dark:text-parchment-300/40 cursor-grab shrink-0 hidden md:block"
               />
-              <span className="w-5 h-5 rounded-full bg-church-900 dark:bg-church-700 flex items-center justify-center text-parchment-50 text-[10px] font-bold shrink-0">
+              <span className="w-5 h-5 rounded-full bg-church-900 dark:bg-church-700 flex items-center justify-center text-parchment-50 text-[11px] font-bold shrink-0">
                 {i + 1}
               </span>
-              <span className="w-6 h-6 rounded-full bg-church-900/80 dark:bg-church-700/80 flex items-center justify-center text-parchment-50 text-[9px] font-bold shrink-0">
+              <span className="w-6 h-6 rounded-full bg-church-900/80 dark:bg-church-700/80 flex items-center justify-center text-parchment-50 text-[11px] font-bold shrink-0">
                 {initials(m.name)}
               </span>
               <span className="text-sm text-ink-900 dark:text-parchment-50 truncate flex-1">
@@ -91,8 +93,8 @@ export default function OrderedMemberPicker({ members, value, onChange, placehol
                 onClick={() => swap(i, i - 1)}
                 disabled={i === 0}
                 className="p-1 text-ink-400 hover:text-ink-700 dark:hover:text-parchment-50 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-                title="Move up"
-                aria-label="Move up"
+                title={t('picker.moveUp')}
+                aria-label={t('picker.moveUpNamed', { name: m.name })}
               >
                 <ArrowUp size={13} />
               </button>
@@ -101,8 +103,8 @@ export default function OrderedMemberPicker({ members, value, onChange, placehol
                 onClick={() => swap(i, i + 1)}
                 disabled={i === selected.length - 1}
                 className="p-1 text-ink-400 hover:text-ink-700 dark:hover:text-parchment-50 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-                title="Move down"
-                aria-label="Move down"
+                title={t('picker.moveDown')}
+                aria-label={t('picker.moveDownNamed', { name: m.name })}
               >
                 <ArrowDown size={13} />
               </button>
@@ -110,8 +112,8 @@ export default function OrderedMemberPicker({ members, value, onChange, placehol
                 type="button"
                 onClick={() => remove(m.id)}
                 className="p-1 text-ink-400 hover:text-rose-500 transition-colors"
-                title="Remove"
-                aria-label="Remove from rotation"
+                title={t('picker.remove')}
+                aria-label={t('picker.removeFromRotation', { name: m.name })}
               >
                 <X size={13} />
               </button>
@@ -122,14 +124,15 @@ export default function OrderedMemberPicker({ members, value, onChange, placehol
       <input
         value={q}
         onChange={e => setQ(e.target.value)}
-        placeholder={placeholder}
+        placeholder={placeholder ?? t('picker.searchRotation')}
+        aria-label={placeholder ?? t('picker.searchRotation')}
         className="w-full px-3 py-2 text-sm rounded-lg border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-100 dark:bg-ink-800 text-ink-900 dark:text-parchment-50 focus:outline-none focus:ring-2 focus:ring-church-500"
       />
       {q && (
         <ul className="max-h-40 overflow-y-auto rounded-lg border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-50 dark:bg-ink-900 divide-y divide-parchment-200/60 dark:divide-brass-900/25">
           {filtered.length === 0 && (
             <li className="px-3 py-2 text-xs text-ink-500 dark:text-parchment-300/70">
-              No matching members
+              {t('picker.noMatch')}
             </li>
           )}
           {filtered.map(m => (
@@ -139,12 +142,12 @@ export default function OrderedMemberPicker({ members, value, onChange, placehol
                 onClick={() => { add(m.id); setQ('') }}
                 className="flex items-center gap-3 w-full px-3 py-2 text-left hover:bg-parchment-100 dark:hover:bg-ink-800/60 transition-colors"
               >
-                <div className="w-6 h-6 rounded-full bg-church-900 dark:bg-church-700 flex items-center justify-center text-parchment-50 text-[9px] font-bold shrink-0">
+                <div className="w-6 h-6 rounded-full bg-church-900 dark:bg-church-700 flex items-center justify-center text-parchment-50 text-[11px] font-bold shrink-0">
                   {initials(m.name)}
                 </div>
                 <div className="min-w-0">
                   <p className="text-sm font-medium text-ink-900 dark:text-parchment-50 truncate">{m.name}</p>
-                  <p className="text-xs text-ink-500 dark:text-parchment-300/70">{m.role ?? 'Member'}</p>
+                  <p className="text-xs text-ink-500 dark:text-parchment-300/70">{m.role ?? t('picker.member')}</p>
                 </div>
               </button>
             </li>

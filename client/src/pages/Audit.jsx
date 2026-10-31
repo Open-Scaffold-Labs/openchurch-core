@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import { ScrollText, Loader2, Shield, RotateCcw, Download, X } from 'lucide-react'
-import PageWrapper from '../components/PageWrapper'
+import PageWrapper, { PageHeader } from '../components/PageWrapper'
 import EmptyState from '../components/EmptyState'
 import LoadFailure from '../components/LoadFailure'
 import { SkeletonRowList } from '../components/Skeleton'
@@ -314,7 +314,7 @@ export default function Audit() {
   // helpful message rather than a blank table.
   if (forbidden) {
     return (
-      <PageWrapper>
+      <PageWrapper type="list">
         <div className="max-w-2xl mx-auto py-16">
           <EmptyState
             icon={Shield}
@@ -327,16 +327,11 @@ export default function Audit() {
   }
 
   return (
-    <PageWrapper>
+    <PageWrapper type="list">
       <div className="max-w-5xl mx-auto space-y-6">
         {/* Header */}
         <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} className="flex items-start justify-between gap-4 flex-wrap">
-          <div>
-            <h1 className="font-display text-3xl font-semibold text-ink-900 dark:text-parchment-50 tracking-tight">{t('audit.title')}</h1>
-            <p className="text-sm text-ink-500 dark:text-parchment-300/70 mt-1">
-              {t('audit.subtitle')}
-            </p>
-          </div>
+          <PageHeader title={t('audit.title')} subtitle={t('audit.subtitle')} />
           <button
             type="button"
             onClick={exportCsv}
@@ -467,7 +462,7 @@ export default function Audit() {
                     </td>
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-2 min-w-0">
-                        <span className="w-7 h-7 rounded-full bg-church-900 dark:bg-church-700 flex items-center justify-center text-parchment-50 text-[10px] font-bold shrink-0">
+                        <span className="w-7 h-7 rounded-full bg-church-900 dark:bg-church-700 flex items-center justify-center text-parchment-50 text-[11px] font-bold shrink-0">
                           {initials(r.actor_closed ? t('audit.formerOperator') : (r.user_name || r.user_email || '?'))}
                         </span>
                         <div className="min-w-0">
@@ -478,7 +473,7 @@ export default function Audit() {
                     </td>
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-2 flex-wrap">
-                        <span className={`text-[10px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded ${ACTION_BADGE[r.action] ?? 'bg-parchment-200 text-ink-700'}`}>
+                        <span className={`text-[11px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded ${ACTION_BADGE[r.action] ?? 'bg-parchment-200 text-ink-700'}`}>
                           {badgeLabel[r.action] ?? r.action}
                         </span>
                         <span className="text-ink-700 dark:text-parchment-200">{summaryFor(r, t)}</span>

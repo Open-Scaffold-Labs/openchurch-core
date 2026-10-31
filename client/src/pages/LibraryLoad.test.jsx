@@ -29,7 +29,7 @@ const ROW = {
 const ok = (body) => ({ ok: true, status: 200, json: async () => body })
 const refused = () => ({ ok: false, status: 500, json: async () => ({ error: 'no' }) })
 
-const EMPTY_TITLE = 'Your library is empty'
+const EMPTY_TITLE = STRINGS.en['lib.emptyTitle']
 
 function stub({ history = ok({ rows: [], total: 0 }), locale } = {}) {
   if (locale) localStorage.setItem('ochr_locale', locale)
@@ -64,7 +64,7 @@ describe('library when the archive did not load', () => {
     expect(screen.getByText(en['load.failedBody'])).toBeInTheDocument()
     expect(screen.getByRole('button', { name: en['load.retry'] })).toBeInTheDocument()
     expect(screen.queryByText(EMPTY_TITLE)).not.toBeInTheDocument()
-    expect(screen.queryByText('No matching generations')).not.toBeInTheDocument()
+    expect(screen.queryByText(STRINGS.en['lib.noMatchTitle'])).not.toBeInTheDocument()
   })
 
   it('does not call a dropped connection an empty library', async () => {

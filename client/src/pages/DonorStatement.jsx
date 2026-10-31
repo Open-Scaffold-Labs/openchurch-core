@@ -107,6 +107,7 @@ function renderAddress(addr) {
 // what's missing and links to Settings → Org details (Y.4). Hidden on
 // print so the donor never sees the admin note.
 function LetterheadBanner({ org }) {
+  const { t } = useLocale()
   const missing = []
   if (!org.address)         missing.push('mailing address')
   if (!org.tax_id)          missing.push('EIN / tax ID')
@@ -116,7 +117,7 @@ function LetterheadBanner({ org }) {
     <div className="print:hidden mb-6 rounded-lg border border-amber-200/70 dark:border-amber-800/30 bg-amber-50 dark:bg-amber-900/20 px-4 py-3 text-xs text-amber-800 dark:text-amber-200 flex items-start gap-2">
       <AlertTriangle size={14} className="shrink-0 mt-0.5" />
       <div>
-        <p className="font-semibold">Letterhead incomplete</p>
+        <p className="font-semibold">{t('dst.letterheadIncomplete')}</p>
         <p className="mt-0.5">
           Missing: {missing.join(', ')}. The receipt prints with
           placeholders until you fill these in.{' '}
@@ -168,7 +169,7 @@ export default function DonorStatement() {
       .then(async r => {
         if (r.status === 404) throw new Error('That issued statement is not on this church\u2019s register.')
         if (r.status === 403) throw new Error('admin-only')
-        if (!r.ok) throw new Error("Couldn't load the issued statement. Nothing was lost \u2014 please retry.")
+        if (!r.ok) throw new Error(t('stmt.loadIssuedFailed'))
         return r.json()
       })
       .then(({ statement }) => {
@@ -209,7 +210,7 @@ export default function DonorStatement() {
         }),
       })
       const body = await res.json().catch(() => ({}))
-      if (!res.ok) throw new Error(body.error || "Couldn't issue the statement.")
+      if (!res.ok) throw new Error(body.error || t('stmt.issueFailed'))
       // Confirmed — whether this response minted the claim or replayed one that
       // already existed, the attempt is resolved and the key is spent.
       issueKeyRef.current = null
@@ -217,7 +218,7 @@ export default function DonorStatement() {
     } catch (e) {
       // The key is deliberately NOT cleared: this attempt is unresolved, and
       // the next click must ask about the same claim.
-      setIssueErr(e.message || "Couldn't issue the statement.")
+      setIssueErr(e.message || t('stmt.issueFailed'))
     } finally { setIssuing(false) }
   }
 
@@ -248,9 +249,9 @@ export default function DonorStatement() {
     return (
       <div className="max-w-2xl mx-auto py-16 px-4 text-center">
         <AlertTriangle size={28} className="mx-auto text-amber-600 dark:text-amber-300 mb-3" />
-        <h1 className="font-display text-2xl font-semibold text-ink-900 dark:text-parchment-50">Admins only</h1>
+        <h1 className="font-display text-2xl font-semibold text-ink-900 dark:text-parchment-50">{t('dst.adminsOnly')}</h1>
         <p className="text-sm text-ink-500 dark:text-parchment-300/70 mt-2">
-          Donor statements are restricted to admins.
+          {t('dst.adminsOnlyBody')}
         </p>
       </div>
     )
@@ -268,10 +269,10 @@ export default function DonorStatement() {
     return (
       <div className="max-w-2xl mx-auto py-16 px-4 text-center">
         <AlertTriangle size={28} className="mx-auto text-rose-700 dark:text-rose-300 mb-3" />
-        <h1 className="font-display text-2xl font-semibold text-ink-900 dark:text-parchment-50">Couldn't load statement</h1>
+        <h1 className="font-display text-2xl font-semibold text-ink-900 dark:text-parchment-50">{t('dst.loadFailed')}</h1>
         <p className="text-sm text-ink-500 dark:text-parchment-300/70 mt-2">{err}</p>
         <Link to="/donations/statements" className="inline-flex items-center gap-1.5 mt-6 text-sm font-semibold text-church-700 dark:text-brass-300 hover:underline">
-          <ChevronLeft size={14} /> Back to statements
+          <ChevronLeft size={14} /> {t('dst.back')}
         </Link>
       </div>
     )
@@ -288,7 +289,7 @@ export default function DonorStatement() {
           to="/donations/statements"
           className="inline-flex items-center gap-1.5 text-sm font-semibold text-church-700 dark:text-brass-300 hover:underline"
         >
-          <ChevronLeft size={15} /> Back to statements
+          <ChevronLeft size={15} /> {t('dst.back')}
         </Link>
         <div className="flex items-center gap-2">
           {!issuedId && (
@@ -311,7 +312,7 @@ export default function DonorStatement() {
             onClick={() => window.print()}
             className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-church-900 dark:bg-church-700 text-parchment-50 text-sm font-semibold shadow-warm hover:bg-church-800 dark:hover:bg-church-600 transition-colors"
           >
-            <Printer size={15} /> Print / Save as PDF
+            <Printer size={15} /> {t('dst.printPdf')}
           </button>
         </div>
       </div>
@@ -325,7 +326,7 @@ export default function DonorStatement() {
           <div data-testid="statement-issued-banner" className="mb-4 rounded-lg border border-brass-600/50 bg-brass-50 dark:bg-brass-900/20 px-4 py-2 text-xs text-brass-900 dark:text-brass-200">
             {/* Print keeps the frozen-claim marker. Screen must also say
                 the claim was not emailed — Issued ≠ delivered (STMT-01). */}
-            <span className="font-semibold uppercase tracking-wider hidden print:inline">Issued statement</span>
+            <span className="font-semibold uppercase tracking-wider hidden print:inline">{t('dst.issued')}</span>
             <span className="font-semibold uppercase tracking-wider print:hidden">{t('stmt.issuedNotSent')}</span>
             {issuedMeta && <> · No. {issuedMeta.statement_no} · issued {new Date(issuedMeta.issued_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
               {issuedMeta.issued_by_name ? ` by ${issuedMeta.issued_by_name}` : ''}</>}
@@ -355,9 +356,9 @@ export default function DonorStatement() {
           </div>
         ) : (
           <div data-testid="statement-preview-banner" className="mb-4 rounded-lg border border-ink-300/60 dark:border-parchment-300/20 bg-parchment-100 dark:bg-ink-800 px-4 py-2 text-xs text-ink-700 dark:text-parchment-200">
-            <span className="font-semibold uppercase tracking-wider">Preview — not issued</span>
+            <span className="font-semibold uppercase tracking-wider">{t('dst.preview')}</span>
             <span className="block mt-1 text-ink-500 dark:text-parchment-300/70">
-              Figures follow the parish's live giving and will change if a gift is refunded or edited. Issue the statement to freeze what you send.
+              {t('dst.previewNote')}
             </span>
           </div>
         )}
@@ -369,7 +370,7 @@ export default function DonorStatement() {
           <div data-testid="statement-issue-error" role="status" className="print:hidden mb-4 rounded-lg border border-amber-300/70 dark:border-amber-800/40 bg-amber-50 dark:bg-amber-900/20 px-4 py-2 text-xs text-amber-900 dark:text-amber-200">
             <span className="font-semibold">{issueErr}</span>
             <span className="block mt-1">
-              Nothing was lost. Press Issue statement again — if it already went through, you will be taken to that statement rather than a second one.
+              {t('dst.issueRetry')}
             </span>
           </div>
         )}
@@ -404,7 +405,7 @@ export default function DonorStatement() {
         {/* Date + donor mailing block */}
         <div className="flex flex-col sm:flex-row sm:justify-between gap-6 mb-8 text-sm">
           <div>
-            <p className="font-semibold text-ink-700">Statement for</p>
+            <p className="font-semibold text-ink-700">{t('dst.statementFor')}</p>
             <p className="mt-1 font-display text-lg font-semibold">{donor.name}</p>
             {donor.address && (
               <p className="mt-1 leading-snug text-ink-700">{renderAddress(donor.address)}</p>
@@ -414,9 +415,9 @@ export default function DonorStatement() {
             )}
           </div>
           <div className="text-right">
-            <p className="font-semibold text-ink-700">Tax year</p>
+            <p className="font-semibold text-ink-700">{t('dst.taxYear')}</p>
             <p className="mt-1 font-display text-2xl font-semibold">{y}</p>
-            <p className="mt-3 text-xs uppercase tracking-widest text-ink-600">Issued</p>
+            <p className="mt-3 text-xs uppercase tracking-widest text-ink-600">{t('dst.issuedOn')}</p>
             <p className="text-sm">{todayLong()}</p>
           </div>
         </div>
@@ -435,10 +436,10 @@ export default function DonorStatement() {
         <table className="w-full text-sm mb-6 border-collapse">
           <thead>
             <tr className="border-b-2 border-ink-300 print:border-ink-500 text-left text-xs uppercase tracking-wider text-ink-600">
-              <th className="py-2 pr-2 font-semibold">Date</th>
-              <th className="py-2 px-2 font-semibold">Category</th>
-              <th className="py-2 px-2 font-semibold">Method</th>
-              <th className="py-2 pl-2 font-semibold text-right">Amount</th>
+              <th className="py-2 pr-2 font-semibold">{t('dst.colDate')}</th>
+              <th className="py-2 px-2 font-semibold">{t('dst.colCategory')}</th>
+              <th className="py-2 px-2 font-semibold">{t('dst.colMethod')}</th>
+              <th className="py-2 pl-2 font-semibold text-right">{t('dst.colAmount')}</th>
             </tr>
           </thead>
           <tbody>
@@ -477,7 +478,7 @@ export default function DonorStatement() {
 
         {/* Signatory block */}
         <div className="mt-10">
-          <p className="text-sm leading-relaxed mb-8">With gratitude,</p>
+          <p className="text-sm leading-relaxed mb-8">{t('dst.withGratitude')}</p>
           <p className="font-display text-lg font-semibold">
             {org.signatory_name ?? '[Signatory Name]'}
           </p>

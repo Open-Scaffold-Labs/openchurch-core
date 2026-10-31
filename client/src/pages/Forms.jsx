@@ -5,7 +5,7 @@ import {
   FileText, Plus, X, Pencil, Trash2, AlertTriangle, ChevronUp, ChevronDown,
   Copy, ExternalLink, Eye, EyeOff,
 } from 'lucide-react'
-import PageWrapper from '../components/PageWrapper'
+import PageWrapper, { PageHeader } from '../components/PageWrapper'
 import EmptyState from '../components/EmptyState'
 import { SkeletonRowList } from '../components/Skeleton'
 import TextField from '../components/TextField'
@@ -16,6 +16,7 @@ import { useAuth } from '../context/AuthContext'
 import { useLocale } from '../i18n'
 import { apiUrl } from '../api'
 import { useConfirm } from '../components/ConfirmProvider'
+import { dialogMotionNow } from '../utils/motion'
 
 // Forms admin page (Sprint Forms / F.2). List + create/edit modal +
 // FieldBuilder. Admin-only — both this route and /api/forms gate on
@@ -73,15 +74,15 @@ function generateFieldId() {
 // Running this client-side catches the obvious cases (missing label,
 // duplicate keys, empty options) before the round trip so the admin
 // gets immediate feedback instead of a toast after Save.
-function validateFieldsClient(fields) {
-  if (fields.length === 0) return 'Add at least one field.'
+function validateFieldsClient(fields, t) {
+  if (fields.length === 0) return t('forms.needField')
   const seenIds = new Set()
   const seenLabels = new Set()
   for (const f of fields) {
-    if (!f.id?.trim())    return 'Every field needs a key.'
+    if (!f.id?.trim())    return t('forms.needKey')
     if (seenIds.has(f.id)) return `Duplicate field key: ${f.id}`
     seenIds.add(f.id)
-    if (!f.label?.trim()) return 'Every field needs a label.'
+    if (!f.label?.trim()) return t('forms.needLabel')
     const labelKey = f.label.trim().toLowerCase()
     if (seenLabels.has(labelKey)) return `Duplicate field label: ${f.label}`
     seenLabels.add(labelKey)
@@ -101,19 +102,20 @@ function validateFieldsClient(fields) {
 }
 
 function FieldRow({ field, first, last, onChange, onRemove, onMoveUp, onMoveDown }) {
+  const { t } = useLocale()
   const typeMeta = FIELD_TYPE_MAP.get(field.type) ?? FIELD_TYPE_OPTIONS[0]
   return (
     <div className="rounded-xl border border-parchment-300/60 dark:border-brass-900/30 bg-parchment-100/40 dark:bg-ink-900/60 p-3 space-y-3">
       <div className="flex items-start gap-2">
         <div className="flex-1 grid grid-cols-1 sm:grid-cols-[1fr,140px] gap-2">
           <TextField
-            label="Label"
+            label={t('forms.label')}
             value={field.label}
             onChange={(e) => onChange({ label: e.target.value })}
-            placeholder="e.g. Your name"
+            placeholder={t('forms.labelPh')}
           />
           <div>
-            <label className="block text-xs font-semibold text-ink-600 dark:text-parchment-200 mb-1.5">Type</label>
+            <label className="block text-xs font-semibold text-ink-600 dark:text-parchment-200 mb-1.5">{t('forms.type')}</label>
             <select
               value={field.type}
               onChange={(e) => {
@@ -127,7 +129,7 @@ function FieldRow({ field, first, last, onChange, onRemove, onMoveUp, onMoveDown
               }}
               className="w-full px-3 py-2.5 text-sm rounded-lg bg-parchment-50 dark:bg-ink-800 border border-parchment-300/70 dark:border-brass-900/40 text-ink-900 dark:text-parchment-50 focus:outline-none focus:ring-2 focus:ring-brass-400"
             >
-              {FIELD_TYPE_OPTIONS.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+              {FIELD_TYPE_OPTIONS.map(ft => <option key={ft.value} value={ft.value}>{t('forms.ft.' + ft.value)}</option>)}
             </select>
           </div>
         </div>
@@ -136,7 +138,7 @@ function FieldRow({ field, first, last, onChange, onRemove, onMoveUp, onMoveDown
             type="button"
             onClick={onMoveUp}
             disabled={first}
-            aria-label="Move field up"
+            aria-label={t('forms.moveUp')}
             className="p-1.5 rounded text-ink-400 hover:text-church-700 dark:hover:text-brass-200 hover:bg-parchment-200 dark:hover:bg-ink-800 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
           >
             <ChevronUp size={14} />
@@ -145,7 +147,7 @@ function FieldRow({ field, first, last, onChange, onRemove, onMoveUp, onMoveDown
             type="button"
             onClick={onMoveDown}
             disabled={last}
-            aria-label="Move field down"
+            aria-label={t('forms.moveDown')}
             className="p-1.5 rounded text-ink-400 hover:text-church-700 dark:hover:text-brass-200 hover:bg-parchment-200 dark:hover:bg-ink-800 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
           >
             <ChevronDown size={14} />
@@ -154,7 +156,7 @@ function FieldRow({ field, first, last, onChange, onRemove, onMoveUp, onMoveDown
         <button
           type="button"
           onClick={onRemove}
-          aria-label="Remove field"
+          aria-label={t('forms.removeField')}
           className="shrink-0 p-1.5 mt-6 rounded text-ink-400 hover:text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-900/20 transition-colors"
         >
           <Trash2 size={14} />
@@ -163,32 +165,32 @@ function FieldRow({ field, first, last, onChange, onRemove, onMoveUp, onMoveDown
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
         <TextField
-          label="Key"
+          label={t('forms.key')}
           value={field.id}
           onChange={(e) => onChange({ id: e.target.value })}
-          placeholder="snake_case_key"
+          placeholder={t('forms.keyPh')}
           hint="Stored on the response as answers[key]."
         />
         <TextField
-          label="Help text"
+          label={t('forms.helpText')}
           value={field.help_text ?? ''}
           onChange={(e) => onChange({ help_text: e.target.value })}
-          placeholder="Optional"
+          placeholder={t('forms.optional')}
         />
       </div>
 
       {typeMeta.needsOptions && (
         <div>
-          <label className="block text-xs font-semibold text-ink-600 dark:text-parchment-200 mb-1.5">Options</label>
+          <label className="block text-xs font-semibold text-ink-600 dark:text-parchment-200 mb-1.5">{t('forms.options')}</label>
           <textarea
             value={(field.options ?? []).join('\n')}
             onChange={(e) => onChange({ options: e.target.value.split('\n') })}
             rows={4}
-            placeholder={'One option per line\nYes\nNo\nMaybe'}
+            placeholder={t('forms.optionsPh')}
             className="w-full px-3 py-2.5 text-sm rounded-lg bg-parchment-50 dark:bg-ink-800 border border-parchment-300/70 dark:border-brass-900/40 text-ink-900 dark:text-parchment-50 placeholder-ink-400 dark:placeholder-parchment-400/50 focus:outline-none focus:ring-2 focus:ring-brass-400 resize-none font-mono"
           />
           <p className="mt-1 text-[11px] text-ink-500 dark:text-parchment-300/70">
-            One option per line. Blank lines are ignored on save.
+            {t('forms.optionsHelp')}
           </p>
         </div>
       )}
@@ -200,13 +202,14 @@ function FieldRow({ field, first, last, onChange, onRemove, onMoveUp, onMoveDown
           onChange={(e) => onChange({ required: e.target.checked })}
           className="rounded border-parchment-400 text-brass-600 focus:ring-brass-400"
         />
-        Required
+        {t('forms.required')}
       </label>
     </div>
   )
 }
 
 function FieldBuilder({ fields, onChange }) {
+  const { t } = useLocale()
   function update(i, patch) {
     onChange(fields.map((f, idx) => idx === i ? { ...f, ...patch } : f))
   }
@@ -237,12 +240,12 @@ function FieldBuilder({ fields, onChange }) {
           onClick={add}
           className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-parchment-100 dark:bg-ink-800 hover:bg-parchment-200 dark:hover:bg-ink-700 text-xs font-semibold text-ink-700 dark:text-parchment-100 transition-colors"
         >
-          <Plus size={12} /> Add field
+          <Plus size={12} /> {t('forms.add_field')}
         </button>
       </div>
       {fields.length === 0 ? (
         <p className="text-sm text-ink-500 dark:text-parchment-300/70 text-center py-6 rounded-xl border border-dashed border-parchment-300 dark:border-brass-900/30">
-          No fields yet. Add one to get started.
+          {t('forms.no_fields_yet_add_one')}
         </p>
       ) : (
         fields.map((f, i) => (
@@ -263,6 +266,7 @@ function FieldBuilder({ fields, onChange }) {
 }
 
 function FormModal({ form, orgSlug, onClose, onSaved }) {
+  const { t } = useLocale()
   const isEdit = !!form
   const toast = useToast()
   const ask = useConfirm()
@@ -317,7 +321,7 @@ function FormModal({ form, orgSlug, onClose, onSaved }) {
   }
 
   const { status: saveStatus, run: save } = useSaveStatus(async () => {
-    if (!draft.title.trim()) throw new Error('Title is required.')
+    if (!draft.title.trim()) throw new Error(t('forms.titleRequired'))
     // Normalize options: trim each, drop blanks. Pre-flight match the
     // shape the server expects so a successful round trip writes the
     // same data the admin saw.
@@ -331,7 +335,7 @@ function FormModal({ form, orgSlug, onClose, onSaved }) {
         ? { options: (f.options || []).map(o => o.trim()).filter(Boolean) }
         : {}),
     }))
-    const validationError = validateFieldsClient(cleanedFields)
+    const validationError = validateFieldsClient(cleanedFields, t)
     // Open + empty fields is allowed by the validator for drafts, but
     // the server rejects it for status='open'. Surface the rule here
     // so the admin doesn't have to discover it from a 400.
@@ -356,7 +360,7 @@ function FormModal({ form, orgSlug, onClose, onSaved }) {
     })
     if (!res.ok) {
       const data = await res.json().catch(() => ({}))
-      throw new Error(data.error || "That didn't save — nothing was lost. Please try again.")
+      throw new Error(data.error || t('forms.saveFailed'))
     }
     return res.json()
   }, {
@@ -365,17 +369,13 @@ function FormModal({ form, orgSlug, onClose, onSaved }) {
 
   return (
     <div className={sheetOverlayCls}>
-      <motion.div
-        initial={{ opacity: 0, scale: 0.96, y: 8 }}
-        animate={{ opacity: 1, scale: 1, y: 0 }}
-        exit={{ opacity: 0, scale: 0.96, y: 8 }}
-        transition={{ duration: 0.18 }}
+      <motion.div {...dialogMotionNow()}
         className={sheetPanelCls}
       >
         <MobileSheetGrip />
         <div className="flex items-center justify-between px-6 py-4 border-b border-parchment-300/60 dark:border-brass-900/30">
           <h2 className="font-display text-lg font-semibold text-ink-900 dark:text-parchment-50">
-            {isEdit ? 'Edit form' : 'New form'}
+            {isEdit ? t('forms.edit') : t('forms.new')}
           </h2>
           <button type="button" onClick={onClose} className="-m-2 p-2 text-ink-400 hover:text-ink-700 dark:hover:text-parchment-50 transition-colors">
             <X size={18} />
@@ -387,30 +387,30 @@ function FormModal({ form, orgSlug, onClose, onSaved }) {
           className="p-6 space-y-5 overflow-y-auto"
         >
           <TextField
-            label="Title"
+            label={t('forms.formTitle')}
             required
             value={draft.title}
             onChange={setTitle}
-            placeholder="Sunday picnic RSVP"
+            placeholder={t('forms.formTitlePh')}
           />
 
           <div>
-            <label className="block text-xs font-semibold text-ink-600 dark:text-parchment-200 mb-1.5">Description</label>
+            <label className="block text-xs font-semibold text-ink-600 dark:text-parchment-200 mb-1.5">{t('forms.description')}</label>
             <textarea
               value={draft.description}
               onChange={(e) => setDraft(prev => ({ ...prev, description: e.target.value }))}
               rows={2}
-              placeholder="Optional intro shown above the form."
+              placeholder={t('forms.introPh')}
               className="w-full px-3 py-2.5 text-sm rounded-lg bg-parchment-50 dark:bg-ink-800 border border-parchment-300/70 dark:border-brass-900/40 text-ink-900 dark:text-parchment-50 placeholder-ink-400 dark:placeholder-parchment-400/50 focus:outline-none focus:ring-2 focus:ring-brass-400 resize-none"
             />
           </div>
 
           <div>
             <TextField
-              label="URL slug"
+              label={t('forms.slug')}
               value={draft.slug}
               onChange={setSlug}
-              placeholder="sunday-picnic-rsvp"
+              placeholder={t('forms.slugPh')}
               hint="Auto-derived from the title until you edit it."
             />
             {publicUrl && (
@@ -424,19 +424,19 @@ function FormModal({ form, orgSlug, onClose, onSaved }) {
 
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="block text-xs font-semibold text-ink-600 dark:text-parchment-200 mb-1.5">Status</label>
+              <label className="block text-xs font-semibold text-ink-600 dark:text-parchment-200 mb-1.5">{t('forms.status')}</label>
               <select
                 value={draft.status}
                 onChange={(e) => setDraft(prev => ({ ...prev, status: e.target.value }))}
                 className="w-full px-3 py-2.5 text-sm rounded-lg bg-parchment-50 dark:bg-ink-800 border border-parchment-300/70 dark:border-brass-900/40 text-ink-900 dark:text-parchment-50 focus:outline-none focus:ring-2 focus:ring-brass-400"
               >
-                <option value="draft">Draft</option>
-                <option value="open">Open</option>
-                <option value="closed">Closed</option>
+                <option value="draft">{t('forms.draft')}</option>
+                <option value="open">{t('forms.open')}</option>
+                <option value="closed">{t('forms.closed')}</option>
               </select>
             </div>
             <label className="flex flex-col gap-1.5">
-              <span className="text-xs font-semibold text-ink-600 dark:text-parchment-200">Visibility</span>
+              <span className="text-xs font-semibold text-ink-600 dark:text-parchment-200">{t('forms.visibility')}</span>
               <span className="flex items-center gap-2 px-3 py-2.5 rounded-lg bg-parchment-50 dark:bg-ink-800 border border-parchment-300/70 dark:border-brass-900/40 cursor-pointer">
                 <input
                   type="checkbox"
@@ -444,7 +444,7 @@ function FormModal({ form, orgSlug, onClose, onSaved }) {
                   onChange={(e) => setDraft(prev => ({ ...prev, is_public: e.target.checked }))}
                   className="rounded border-parchment-400 text-brass-600 focus:ring-brass-400"
                 />
-                <span className="text-sm text-ink-900 dark:text-parchment-50">Public</span>
+                <span className="text-sm text-ink-900 dark:text-parchment-50">{t('forms.public')}</span>
               </span>
             </label>
           </div>
@@ -456,9 +456,9 @@ function FormModal({ form, orgSlug, onClose, onSaved }) {
 
           <div className="flex items-center justify-end gap-3 pt-2 border-t border-parchment-300/60 dark:border-brass-900/25">
             <button type="button" onClick={onClose} className="text-sm text-ink-600 dark:text-parchment-300 hover:text-ink-900 dark:hover:text-parchment-50 px-3 py-2">
-              Cancel
+              {t('forms.cancel')}
             </button>
-            <SaveButton status={saveStatus}>{isEdit ? 'Save form' : 'Create form'}</SaveButton>
+            <SaveButton status={saveStatus}>{isEdit ? t('forms.save') : t('forms.create')}</SaveButton>
           </div>
         </form>
       </motion.div>
@@ -502,16 +502,16 @@ export default function Forms() {
       // person about to click is exactly who needs to know that.
       title: `Remove “${f.title}”?`,
       body: `The ${f.response_count} response${f.response_count === 1 ? '' : 's'} people have sent come off the form with it.`,
-      confirmLabel: 'Remove form',
+      confirmLabel: t('forms.remove'),
       recoverable: true,
     }))) return
     try {
       const res = await fetch(apiUrl(`/api/forms/${f.id}`), { method: 'DELETE' })
       if (!res.ok) throw new Error(`Delete failed (${res.status})`)
-      toast.info('Form deleted')
+      toast.info(t('forms.deleted'))
       load()
     } catch (e) {
-      toast.error("That didn't delete — nothing was changed. Please try again.")
+      toast.error(t('forms.deleteFailed'))
     }
   }
 
@@ -525,9 +525,9 @@ export default function Forms() {
     if (!url) return
     try {
       await navigator.clipboard.writeText(url)
-      toast.info('Public link copied')
+      toast.info(t('forms.copied'))
     } catch {
-      toast.error('Could not copy link')
+      toast.error(t('forms.copyFailed'))
     }
   }
 
@@ -542,12 +542,13 @@ export default function Forms() {
 
   if (!isAdmin) {
     return (
-      <PageWrapper>
-        <div className="max-w-2xl mx-auto py-16">
+      <PageWrapper type="list">
+        <div className="max-w-2xl mx-auto space-y-6 py-8">
+          <PageHeader title={t('forms.title')} subtitle={t('forms.subtitle')} />
           <EmptyState
             icon={AlertTriangle}
-            title="Admins only"
-            body="Forms are restricted to admins — they manage the public-facing intake pages."
+            title={t('forms.adminsOnly')}
+            body={t('forms.adminsOnlyBody')}
           />
         </div>
       </PageWrapper>
@@ -555,7 +556,7 @@ export default function Forms() {
   }
 
   return (
-    <PageWrapper>
+    <PageWrapper type="list">
       <div className="max-w-5xl mx-auto space-y-6">
         {/* Header */}
         <motion.div
@@ -563,20 +564,13 @@ export default function Forms() {
           animate={{ opacity: 1, y: 0 }}
           className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4"
         >
-          <div>
-            <h1 className="font-display text-3xl font-semibold text-ink-900 dark:text-parchment-50 tracking-tight">
-              Forms
-            </h1>
-            <p className="text-sm text-ink-500 dark:text-parchment-300/70 mt-1">
-              Build a form, share the public link, collect responses in the inbox.
-            </p>
-          </div>
+          <PageHeader title={t('forms.title')} subtitle={t('forms.subtitle')} />
           <button
             type="button"
             onClick={() => setModal('new')}
             className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-church-900 hover:bg-church-800 text-parchment-50 text-sm font-semibold shadow-sm transition-colors"
           >
-            <Plus size={16} /> New form
+            <Plus size={16} /> {t('forms.new')}
           </button>
         </motion.div>
 
@@ -589,15 +583,15 @@ export default function Forms() {
             className="rounded-2xl border border-parchment-300/60 dark:border-brass-900/30 bg-parchment-50 dark:bg-ink-900 shadow-warm p-5 grid grid-cols-3 gap-4 sm:max-w-2xl"
           >
             <div>
-              <p className="text-[11px] font-semibold uppercase tracking-wider text-brass-700 dark:text-brass-300">Total</p>
+              <p className="text-[11px] font-semibold uppercase tracking-wider text-brass-700 dark:text-brass-300">{t('forms.total')}</p>
               <p className="font-display text-2xl font-semibold text-ink-900 dark:text-parchment-50 mt-1">{totals.total}</p>
             </div>
             <div>
-              <p className="text-[11px] font-semibold uppercase tracking-wider text-brass-700 dark:text-brass-300">Live</p>
+              <p className="text-[11px] font-semibold uppercase tracking-wider text-brass-700 dark:text-brass-300">{t('forms.live')}</p>
               <p className="font-display text-2xl font-semibold text-ink-900 dark:text-parchment-50 mt-1">{totals.live}</p>
             </div>
             <div>
-              <p className="text-[11px] font-semibold uppercase tracking-wider text-brass-700 dark:text-brass-300">Responses</p>
+              <p className="text-[11px] font-semibold uppercase tracking-wider text-brass-700 dark:text-brass-300">{t('forms.responses')}</p>
               <p className="font-display text-2xl font-semibold text-ink-900 dark:text-parchment-50 mt-1">{totals.responses}</p>
             </div>
           </motion.div>
@@ -616,9 +610,9 @@ export default function Forms() {
         ) : (forms?.length ?? 0) === 0 ? (
           <EmptyState
             icon={FileText}
-            title="No forms yet"
-            body="Build your first form — RSVPs, ministry signups, prayer requests, anything."
-            action={{ label: 'New form', onClick: () => setModal('new') }}
+            title={t('forms.emptyTitle')}
+            body={t('forms.emptyBody')}
+            action={{ label: t('forms.new'), onClick: () => setModal('new') }}
           />
         ) : (
           <motion.div
@@ -638,13 +632,13 @@ export default function Forms() {
                         <p className="text-sm font-semibold text-ink-900 dark:text-parchment-50 truncate">
                           {f.title}
                         </p>
-                        <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${STATUS_PILL[f.status]}`}>
+                        <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${STATUS_PILL[f.status]}`}>
                           {f.status}
                         </span>
-                        <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full inline-flex items-center gap-1 bg-parchment-100 text-ink-600 dark:bg-ink-800/40 dark:text-parchment-200">
+                        <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full inline-flex items-center gap-1 bg-parchment-100 text-ink-600 dark:bg-ink-800/40 dark:text-parchment-200">
                           {f.is_public
                             ? <><Eye size={10} /> Public</>
-                            : <><EyeOff size={10} /> Private</>}
+                            : <><EyeOff size={10} /> {t('forms.private')}</>}
                         </span>
                       </div>
                       <p className="text-xs text-ink-500 dark:text-parchment-300/70 mt-0.5 truncate">
@@ -662,8 +656,8 @@ export default function Forms() {
                         <button
                           type="button"
                           onClick={() => copyLink(f)}
-                          aria-label="Copy public link"
-                          title="Copy public link"
+                          aria-label={t('forms.copyLink')}
+                          title={t('forms.copy_public_link')}
                           className="p-2 rounded-lg text-ink-400 hover:text-church-700 dark:hover:text-brass-200 hover:bg-parchment-200 dark:hover:bg-ink-800 transition-colors"
                         >
                           <Copy size={14} />
@@ -672,8 +666,8 @@ export default function Forms() {
                           href={url}
                           target="_blank"
                           rel="noopener noreferrer"
-                          aria-label="Open public form in new tab"
-                          title="Open public form in new tab"
+                          aria-label={t('forms.openTab')}
+                          title={t('forms.open_public_form_in_new')}
                           className="p-2 rounded-lg text-ink-400 hover:text-church-700 dark:hover:text-brass-200 hover:bg-parchment-200 dark:hover:bg-ink-800 transition-colors"
                         >
                           <ExternalLink size={14} />
@@ -684,7 +678,7 @@ export default function Forms() {
                       <button
                         type="button"
                         onClick={() => setModal(f)}
-                        aria-label="Edit form"
+                        aria-label={t('forms.edit')}
                         className="p-2 rounded-lg text-ink-400 hover:text-church-700 dark:hover:text-brass-200 hover:bg-parchment-200 dark:hover:bg-ink-800 transition-colors"
                       >
                         <Pencil size={14} />
@@ -692,7 +686,7 @@ export default function Forms() {
                       <button
                         type="button"
                         onClick={() => removeForm(f)}
-                        aria-label="Delete form"
+                        aria-label={t('forms.delete')}
                         className="p-2 rounded-lg text-ink-400 hover:text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-900/20 transition-colors"
                       >
                         <Trash2 size={14} />

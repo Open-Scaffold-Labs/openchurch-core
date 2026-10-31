@@ -2,13 +2,13 @@ import { useEffect, useId, useRef, useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import {
-  ChevronLeft, Mail, Phone, Building2, Calendar, CalendarOff,
+  ChevronLeft, Mail, Phone, Building2, MapPin, Calendar, CalendarOff,
   Activity, Heart, AlertTriangle, Loader2, Target, Plus, X, UserCheck, History, Church, Pencil,
 } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
 import { useLoad } from '../hooks/useLoad'
 import { useLocale } from '../i18n'
-import PageWrapper from '../components/PageWrapper'
+import PageWrapper, { PageHeader } from '../components/PageWrapper'
 import EmptyState from '../components/EmptyState'
 import LoadFailure from '../components/LoadFailure'
 import CalendarSync from '../components/CalendarSync'
@@ -16,6 +16,7 @@ import { apiUrl } from '../api'
 import { formatStoredDate } from '../utils/dates'
 import { initials } from '../utils/format'
 import { LIT_COLOR_DOT, LIT_COLOR_TEXT } from '../utils/liturgicalColors'
+import { formatMailingAddress, hasMailingAddress } from '../utils/memberAddress'
 
 // Full-route member profile (Sprint M / M.2). The Clients page slide-
 // over remains for quick-view; "Open full profile" links here when an
@@ -24,7 +25,9 @@ import { LIT_COLOR_DOT, LIT_COLOR_TEXT } from '../utils/liturgicalColors'
 //
 // Data sources:
 //   - GET /api/clients/:id          → member core record
-//   - GET /api/clients/:id/donations → matched-by-email donation list
+//   - GET /api/clients/:id/donations → email gifts plus a same-org
+//     name-only gift when no other active member claims that name.
+//     The header total mixes both. The note names the name-only part.
 //   - GET /api/liturgical?date=birth → feast-day overlap (same logic
 //                                      as the slide-over from L.2)
 // All three fire in parallel on mount. /api/liturgical is private-
@@ -71,6 +74,30 @@ function fmtKnownCurrency(n, unavailable) {
   const v = knownNumber(n)
   if (v == null) return unavailable
   return v.toLocaleString(undefined, { style: 'currency', currency: 'USD' })
+}
+
+// A blank donor email is the name-only link. Those lines are part of
+// the profile total. The note names that part. It does not say what a
+// statement will count: a statement grouped by name includes them.
+function donorEmailBlank(email) {
+  return email == null || (typeof email === 'string' && email.trim() === '')
+}
+
+function nameMatchedPortion(donations) {
+  const lines = donations?.lines
+  if (!donations || donations.failed || !Array.isArray(lines)) return null
+  let total = 0
+  let count = 0
+  for (const line of lines) {
+    if (!line || typeof line !== 'object' || !donorEmailBlank(line.donor_email)) continue
+    const raw = line.live_amount != null && line.live_amount !== '' ? line.live_amount : line.amount
+    const n = knownNumber(raw)
+    if (n == null) continue
+    total += n
+    count += 1
+  }
+  if (count === 0) return null
+  return { count, total: Number(total.toFixed(2)) }
 }
 
 function isPledgeRow(row) {
@@ -184,14 +211,13 @@ function SwapLinkSection({ clientId, clientName }) {
             </button>
           </div>
           <p className="text-[11px] text-amber-700 dark:text-amber-300">
-            Save this somewhere — the link won&apos;t be shown again after you
-            leave the page. Rotating any time produces a fresh one.
+            {t('mem.linkOnce')}
           </p>
         </div>
       )}
       {!token && !busy && (
         <p className="text-[11px] text-ink-500 dark:text-parchment-300/70">
-          No link generated this session.
+          {t('mem.noLinkSession')}
         </p>
       )}
       {error && (
@@ -459,7 +485,7 @@ function AvailabilitySection({ clientId, clientName }) {
         />
       ) : list.length === 0 ? (
         <p className="text-[11px] text-ink-500 dark:text-parchment-300/70">
-          No blackout dates.
+          {t('mem.noBlackouts')}
         </p>
       ) : (
         <ul className="space-y-2">
@@ -479,7 +505,7 @@ function AvailabilitySection({ clientId, clientName }) {
               <button
                 type="button"
                 onClick={() => onRemove(u.id)}
-                aria-label="Remove blackout date"
+                aria-label={t('mem.removeBlackout')}
                 className="shrink-0 -m-1 p-1 text-ink-400 hover:text-rose-700 dark:hover:text-rose-300 transition-colors"
               >
                 <X size={14} />
@@ -492,7 +518,7 @@ function AvailabilitySection({ clientId, clientName }) {
       <form onSubmit={onAdd} className="space-y-2 pt-1 border-t border-parchment-300/50 dark:border-brass-900/25">
         <div className="grid grid-cols-2 gap-2 pt-2">
           <div>
-            <label className="block text-[11px] font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">From</label>
+            <label className="block text-[11px] font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">{t('mem.from')}</label>
             <input
               type="date"
               value={form.start_date}
@@ -517,7 +543,7 @@ function AvailabilitySection({ clientId, clientName }) {
           type="text"
           value={form.reason}
           onChange={e => setForm(f => ({ ...f, reason: e.target.value }))}
-          placeholder="Reason (optional) — e.g. Vacation"
+          placeholder={t('mem.blackoutReasonPh')}
           className={inputCls}
         />
         <button
@@ -829,12 +855,12 @@ function SacramentsSection({ clientId, clientName }) {
             </div>
             <div>
               <label htmlFor={`${formId}-minister`} className="block text-[11px] font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">{t('register.minister')}</label>
-              <input id={`${formId}-minister`} type="text" value={form.minister} placeholder="Fr. …"
+              <input id={`${formId}-minister`} type="text" value={form.minister} placeholder={t('mem.celebrantPh')}
                 onChange={e => setForm(f => ({ ...f, minister: e.target.value }))} className={inputCls} />
             </div>
             <div>
               <label htmlFor={`${formId}-place`} className="block text-[11px] font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">{t('register.place')}</label>
-              <input id={`${formId}-place`} type="text" value={form.place} placeholder="Parish / church"
+              <input id={`${formId}-place`} type="text" value={form.place} placeholder={t('mem.parishPh')}
                 onChange={e => setForm(f => ({ ...f, place: e.target.value }))} className={inputCls} />
             </div>
             <div>
@@ -844,7 +870,7 @@ function SacramentsSection({ clientId, clientName }) {
             </div>
             <div className="col-span-2">
               <label htmlFor={`${formId}-notes`} className="block text-[11px] font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">{t('record.f.notes')}</label>
-              <input id={`${formId}-notes`} type="text" value={form.notes} placeholder="Sponsor, godparents, etc."
+              <input id={`${formId}-notes`} type="text" value={form.notes} placeholder={t('mem.sponsorsPh')}
                 onChange={e => setForm(f => ({ ...f, notes: e.target.value }))} className={inputCls} />
             </div>
 
@@ -857,14 +883,14 @@ function SacramentsSection({ clientId, clientName }) {
             {editingId != null && (
               <div className="col-span-2">
                 <label htmlFor={`${formId}-reason`} className="block text-[11px] font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">
-                  Reason for this correction
+                  {t('mem.correctionReason')}
                 </label>
                 <input id={`${formId}-reason`} type="text" value={reason} required minLength={3}
                   aria-describedby={`${formId}-reason-hint`}
-                  placeholder="e.g. minister's name was misspelled in the original entry"
+                  placeholder={t('mem.correctionReasonPh')}
                   onChange={e => setReason(e.target.value)} className={inputCls} />
-                <p id={`${formId}-reason-hint`} className="mt-1 text-[10px] text-ink-500 dark:text-parchment-300/70">
-                  Kept with the entry, dated and attributed, so the register shows what changed and why.
+                <p id={`${formId}-reason-hint`} className="mt-1 text-[11px] text-ink-500 dark:text-parchment-300/70">
+                  {t('mem.correctionKept')}
                 </p>
               </div>
             )}
@@ -1073,7 +1099,7 @@ export default function MemberDetail() {
 
   if (loading || (!memberHere && !errHere)) {
     return (
-      <PageWrapper>
+      <PageWrapper type="record">
         <div className="flex items-center justify-center py-24">
           <Loader2 size={20} className="animate-spin text-church-700 dark:text-brass-300" />
         </div>
@@ -1088,7 +1114,7 @@ export default function MemberDetail() {
   // a member who was there the whole time. (C5)
   if (errHere === 'not-found') {
     return (
-      <PageWrapper>
+      <PageWrapper type="record">
         <div className="max-w-2xl mx-auto py-16 space-y-4">
           <EmptyState
             icon={AlertTriangle}
@@ -1107,7 +1133,7 @@ export default function MemberDetail() {
   }
   if (errHere || !memberHere) {
     return (
-      <PageWrapper>
+      <PageWrapper type="record">
         <div className="max-w-2xl mx-auto py-10 space-y-4">
           <LoadFailure body={t('member.loadFailedBody')} cause={errHere || undefined} onRetry={retry} />
           <Link to={home.to} className="tap inline-flex items-center gap-1 text-sm text-church-700 dark:text-brass-300 hover:underline">
@@ -1119,9 +1145,10 @@ export default function MemberDetail() {
   }
 
   const tags = member.tags ? member.tags.split(',').filter(Boolean) : []
+  const nameMatched = nameMatchedPortion(donations)
 
   return (
-    <PageWrapper>
+    <PageWrapper type="record">
       <div className="max-w-4xl mx-auto space-y-6">
         {/* Back link + (admin) this member's audit trail (AUD.3) */}
         <div className="flex items-center justify-between gap-3">
@@ -1160,9 +1187,7 @@ export default function MemberDetail() {
             </div>
           )}
           <div className="flex-1 min-w-0">
-            <h1 className="font-display text-3xl font-semibold text-ink-900 dark:text-parchment-50 tracking-tight">
-              {member.name}
-            </h1>
+            <PageHeader title={member.name} />
             {member.company && (
               <p className="text-sm text-ink-500 dark:text-parchment-300/70 mt-0.5">{member.company}</p>
             )}
@@ -1187,8 +1212,8 @@ export default function MemberDetail() {
             transition={{ delay: 0.05 }}
             className="md:col-span-1 space-y-6"
           >
-            {/* Contact */}
-            <section className="bg-parchment-50 dark:bg-ink-900 rounded-2xl border border-parchment-300/60 dark:border-brass-900/30 shadow-warm p-5 space-y-3">
+            {/* Contact — mailing address same visibility as email/phone (SP-264); print sees this block */}
+            <section className="bg-parchment-50 dark:bg-ink-900 rounded-2xl border border-parchment-300/60 dark:border-brass-900/30 shadow-warm p-5 space-y-3" data-testid="member-profile-contact">
               <p className="text-xs font-bold uppercase tracking-widest text-brass-700 dark:text-brass-300">{t('mem.contact')}</p>
               {[
                 { icon: Mail,      val: member.email,   label: 'email' },
@@ -1200,18 +1225,24 @@ export default function MemberDetail() {
                   <span className="text-ink-700 dark:text-parchment-200 break-all">{val}</span>
                 </div>
               ) : null)}
-              {!member.email && !member.phone && !member.company && (
+              {formatMailingAddress(member) && (
+                <div className="flex items-start gap-3 text-sm" data-testid="member-mailing-address">
+                  <MapPin size={14} className="text-ink-400 shrink-0 mt-0.5" />
+                  <span className="text-ink-700 dark:text-parchment-200 whitespace-pre-line break-words">{formatMailingAddress(member)}</span>
+                </div>
+              )}
+              {!member.email && !member.phone && !member.company && !hasMailingAddress(member) && (
                 <p className="text-xs text-ink-500 dark:text-parchment-300/70 italic">{t('member.noContact')}</p>
               )}
             </section>
 
             {/* Birthday + feast overlap (mirrors slide-over from L.2) */}
-            {member.birth_date && (
+            {(member.birth_date || member.birth_month_day) && (
               <section className="bg-parchment-50 dark:bg-ink-900 rounded-2xl border border-parchment-300/60 dark:border-brass-900/30 shadow-warm p-5 space-y-2">
                 <p className="text-xs font-bold uppercase tracking-widest text-brass-700 dark:text-brass-300">{t('mem.birthday')}</p>
                 <div className="flex items-center gap-2 text-sm text-ink-700 dark:text-parchment-200">
                   <Calendar size={13} className="text-ink-400 shrink-0" />
-                  <span>{fmtBirthMonthDay(member.birth_date)}</span>
+                  <span>{fmtBirthMonthDay(member.birth_date ? String(member.birth_date).slice(0, 10) : `2000-${member.birth_month_day}`)}</span>
                 </div>
                 {birthFeast?.feast_name && (
                   <div className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-md border text-[11px] font-medium ${LIT_COLOR_TEXT[birthFeast.color] ?? LIT_COLOR_TEXT.White}`}>
@@ -1276,6 +1307,13 @@ export default function MemberDetail() {
                   </p>
                 )}
               </div>
+              {nameMatched && (
+                <p className="text-xs text-ink-600 dark:text-parchment-200/80 mb-3" data-testid="name-matched-gifts">
+                  {t('member.giftsNameMatchedNote', {
+                    amount: fmtKnownCurrency(nameMatched.total, t('money.unavailable')),
+                  })}
+                </p>
+              )}
               {/* Three answers, not two. Unread (null, or a failed read) is
                   its own branch — "No gifts recorded" is a claim about a
                   parishioner's giving and is reachable only from a
@@ -1374,8 +1412,8 @@ export default function MemberDetail() {
               </section>
             )}
 
-            {/* Notes */}
-            {member.notes && (
+            {/* Notes — SP-176: staff-only (the API omits them for Viewers). */}
+            {!isViewer && member.notes && (
               <section className="bg-parchment-50 dark:bg-ink-900 rounded-2xl border border-parchment-300/60 dark:border-brass-900/30 shadow-warm p-5 space-y-2">
                 <p className="text-xs font-bold uppercase tracking-widest text-brass-700 dark:text-brass-300">{t('mem.notes')}</p>
                 <p className="text-sm text-ink-700 dark:text-parchment-200 leading-relaxed whitespace-pre-wrap">

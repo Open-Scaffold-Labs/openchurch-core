@@ -1,10 +1,12 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useLayoutEffect, useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { ChevronLeft, Printer, Loader2 } from 'lucide-react'
+import { motion } from 'framer-motion'
 import { useAuth } from '../context/AuthContext'
 import { useLocale } from '../i18n'
 import { apiUrl } from '../api'
 import { formatLocalDate, formatStoredDate, todayLocalISO } from '../utils/dates'
+import { paperLiftMotion } from '../utils/motion'
 
 // Sacramental certificate (SAC.3) — a formal, printable certificate for a
 // single record. Rendered in-app (the App sidebar is print:hidden, like the
@@ -25,6 +27,34 @@ const CERT_TYPES = ['baptism', 'reconciliation', 'first_communion', 'confirmatio
 // member. A missing or unlinked client_id stays on the register: we do
 // not invent a person from the historical name on the certificate.
 const REGISTER_HOME = { to: '/register', labelKey: 'cert.back' }
+
+
+// Designed missing/incomplete certificate state: announced alert, page
+// title, serif h1, calm body, one way back (Quiet Craft 5 / Beacon B-458).
+function CertMissingState({ title, body, backLabel, backTo, testId = 'cert-not-found' }) {
+  // useLayoutEffect: title must be set before the browser paints and before
+  // tests assert it. useEffect left a race where CI saw "" after the missing
+  // state was already in the DOM (Gate 40921110048).
+  useLayoutEffect(() => {
+    const prev = document.title
+    document.title = title
+    return () => { document.title = prev }
+  }, [title])
+  return (
+    <div
+      role="alert"
+      className="max-w-xl mx-auto py-16 text-center space-y-3"
+      data-testid={testId}
+    >
+      <h1 className="font-display text-xl text-church-800 dark:text-brass-200">{title}</h1>
+      <p className="text-sm text-ink-600 dark:text-parchment-300">{body}</p>
+      <Link to={backTo} className="inline-block text-sm font-semibold text-church-700 dark:text-brass-300 hover:underline">
+        ← {backLabel}
+      </Link>
+    </div>
+  )
+}
+
 
 export function certificateReturnHome(from, record) {
   const id = Number(record?.client_id)
@@ -81,11 +111,15 @@ export default function SacramentCertificate() {
     return <div className="flex justify-center py-24"><Loader2 size={24} className="animate-spin text-brass-600" /></div>
   }
   if (error || !record) {
+    // Quiet Craft 5: designed missing state — serif h1, role=alert,
+    // document.title, one way back (Beacon B-458-1/3).
     return (
-      <div className="max-w-xl mx-auto py-16 text-center">
-        <p className="text-sm text-rose-700 dark:text-rose-300 mb-4">{error || t('cert.recordMissing')}</p>
-        <Link to="/register" className="text-sm text-church-700 dark:text-brass-300 hover:underline">← {t('cert.backRegister')}</Link>
-      </div>
+      <CertMissingState
+        title={error || t('cert.recordMissing')}
+        body={t('cert.goneBody')}
+        backLabel={t('cert.backRegister')}
+        backTo="/register"
+      />
     )
   }
 
@@ -106,13 +140,13 @@ export default function SacramentCertificate() {
   const isText = v => typeof v === 'string' && v.trim().length > 0
   if (record.id == null || !isText(record.type) || !isText(record.member_name)) {
     return (
-      <div className="max-w-xl mx-auto py-16 text-center space-y-3">
-        <p className="font-display text-xl text-church-800 dark:text-brass-200">{t('cert.incompleteTitle')}</p>
-        <p className="text-sm text-ink-600 dark:text-parchment-300">{t('cert.incompleteBody')}</p>
-        <Link to={home.to} className="inline-block text-sm text-church-700 dark:text-brass-300 hover:underline">
-          ← {backLabel}
-        </Link>
-      </div>
+      <CertMissingState
+        title={t('cert.incompleteTitle')}
+        body={t('cert.incompleteBody')}
+        backLabel={backLabel}
+        backTo={home.to}
+        testId="cert-incomplete"
+      />
     )
   }
 
@@ -188,7 +222,12 @@ export default function SacramentCertificate() {
           the exact screen a secretary is most likely to print from. The ratio
           now applies from sm: up and on print, where it is page shape; below
           that the box grows to hold the document. */}
-      <article className="relative bg-white text-ink-900 mx-auto p-6 sm:p-14 shadow-warm-lg print:shadow-none sm:aspect-[1/1.294] print:aspect-[1/1.294]">
+      {/* The sheet lifts onto the screen like a page set on the desk (V1.2).
+          Print is unaffected: the animation ends at transform: none. */}
+      <motion.article
+        {...paperLiftMotion}
+        className="relative bg-white text-ink-900 mx-auto p-6 sm:p-14 shadow-warm-lg print:shadow-none sm:aspect-[1/1.294] print:aspect-[1/1.294]"
+      >
         {/* Double ornamental border */}
         <div className="absolute inset-3 border-2 border-brass-700/70 pointer-events-none" />
         <div className="absolute inset-5 border border-brass-700/40 pointer-events-none" />
@@ -200,11 +239,14 @@ export default function SacramentCertificate() {
           <h1 className="font-display text-3xl sm:text-4xl font-bold text-church-900">{title}</h1>
 
           <div className="flex-1 flex flex-col items-center justify-center gap-5 max-w-xl">
-            <p className="text-sm sm:text-base text-ink-600 italic">{t('cert.certify')}</p>
-            <p className="font-display text-4xl sm:text-5xl font-semibold text-ink-900 leading-tight border-b border-brass-700/30 px-6 pb-2">
+            {/* The whole document speaks in the certificate's serif; balanced
+                line breaks keep a lone word (a minister's surname) from
+                sitting on the last line by itself (polish 3). */}
+            <p className="font-display text-lg sm:text-xl text-ink-600 italic">{t('cert.certify')}</p>
+            <p className="font-display text-4xl sm:text-5xl font-semibold text-ink-900 leading-tight border-b border-brass-700/30 px-6 pb-2 [text-wrap:balance]">
               {name}
             </p>
-            <p className="text-base sm:text-lg text-ink-700 leading-relaxed">
+            <p className="font-display text-xl sm:text-2xl text-ink-800 leading-relaxed [text-wrap:balance]">
               {phrase}{clauses.length ? ' ' + clauses.join(', ') : ''}, {t('cert.rites')}{record.minister ? `, ${t('cert.administeredBy')} ${record.minister}` : ''}.
             </p>
 
@@ -240,7 +282,7 @@ export default function SacramentCertificate() {
             </div>
           </div>
         </div>
-      </article>
+      </motion.article>
     </div>
   )
 }

@@ -16,8 +16,13 @@ const shape = async () => (await pool.query(
     WHERE table_name = 'ochr_closed_address_suppressions' ORDER BY ordinal_position`)).rows
 
 describe('119-closed-address-suppression', () => {
-  it('is the expected migration, directly after 118; 116-118 unchanged', () => {
-    expect(EXPECTED_MIGRATION).toBe('119-closed-address-suppression')
+  it('is in the chain directly after 118; 116-118 unchanged', () => {
+    // 120 follows 119. 133 (parish hall) is the head; 132 (effective-dated
+    // mappings, from main) precedes it.
+    expect(EXPECTED_MIGRATION).toBe('144-online-giving-clearing')
+    expect(MIGRATION_NAMES[MIGRATION_NAMES.indexOf('119-closed-address-suppression') + 1]).toBe('120-mass-intention-corrections')
+    expect(MIGRATION_NAMES[MIGRATION_NAMES.indexOf('120-mass-intention-corrections') + 1]).toBe('121-mass-intention-mark-said')
+    expect(MIGRATION_NAMES[MIGRATION_NAMES.indexOf('121-mass-intention-mark-said') + 1]).toBe('122-mass-intention-book-revision')
     const i = MIGRATION_NAMES.indexOf('119-closed-address-suppression')
     expect(MIGRATION_NAMES.slice(i - 3, i)).toEqual([
       '116-stage7-ai-stop-and-plaintext-guard', '117-neutralize-demo-admin', '118-views-security-invoker'])

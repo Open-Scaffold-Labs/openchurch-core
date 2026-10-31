@@ -32,6 +32,7 @@ vi.mock('@anthropic-ai/sdk', () => ({
   },
 }))
 
+import { randomUUID } from 'node:crypto'
 import request from 'supertest'
 import pool from '../src/db.js'
 import {
@@ -40,6 +41,7 @@ import {
 } from '../src/ai/ledger.js'
 import { recordAiEvent, AuditError } from '../src/ai/audit.js'
 import { CAPABILITIES } from '../src/ai/policy.js'
+import { dispatch, refusalBody } from '../src/ai/gate.js'
 import { encryptApiKey } from '../src/ai/orgProvider.js'
 import { RUN_ID, bindServer, closeServer, migrateOnce } from './support/harness.js'
 import { createOrg } from './support/provision.js'
@@ -358,8 +360,29 @@ describe('audit: metadata only, and a failed write is an error', () => {
 })
 
 // ------------------------------------------------- the assistant, wired --
-describe('the assistant on the managed route: reserve, recheck, send, settle', () => {
-  const ask = (o = orgA, body = { question: QUESTION }) => request(server).post('/api/assistant').set(auth(o.token)).set('X-Forwarded-For', nextIp()).send(body)
+// D-01 (R334-1): the assistant is BYOK-only, so it can no longer reach the
+// managed route. The accounting orchestration in gate.js is kept and still
+// tested, through a synthetic managed capability registered by this test
+// file only (no production capability or bypass is added).
+const MANAGED_TEST_CAP = 'test_managed_accounting_v1'
+describe('the managed accounting path (synthetic managed capability): reserve, recheck, send, settle', () => {
+  beforeAll(() => {
+    const { byokOnly, managed, ...rest } = CAPABILITIES.parish_assistant_v1
+    CAPABILITIES[MANAGED_TEST_CAP] = { ...rest, byokProviders: ['anthropic'], managed: true }
+  })
+  afterAll(() => { delete CAPABILITIES[MANAGED_TEST_CAP] })
+  const ask = async (o = orgA) => {
+    try {
+      const out = await dispatch({ orgId: o.id, capabilityId: MANAGED_TEST_CAP, system: 'synthetic',
+        messages: [{ role: 'user', content: QUESTION }], maxTokens: 700,
+        accounting: { requestId: randomUUID(), actorId: o.userId } })
+      return { status: 200, body: { answer: out.text } }
+    } catch (err) {
+      const r = refusalBody(err)
+      return r ? { status: r.status, body: r.body } : { status: 500, body: { code: 'ai_failed' } }
+    }
+  }
+  const askHttp = (o = orgA, body = { question: QUESTION }) => request(server).post('/api/assistant').set(auth(o.token)).set('X-Forwarded-For', nextIp()).send(body)
   const ledgerRows = o => pool.query(`SELECT * FROM ochr_ai_ledger WHERE organization_id = $1 AND environment = 'test' ORDER BY created_at`, [o.id]).then(r => r.rows)
   const auditRows = o => pool.query(`SELECT * FROM ochr_ai_audit WHERE organization_id = $1 AND environment = 'test' ORDER BY id`, [o.id]).then(r => r.rows)
   const clear = async () => {
@@ -385,8 +408,8 @@ describe('the assistant on the managed route: reserve, recheck, send, settle', (
     const [l, ...more] = await ledgerRows(orgA)
     expect(more).toHaveLength(0)
     expect(l.outcome).toBe('success')
-    expect(l.capability).toBe('parish_assistant_v1')
-    expect(Number(l.reserved_micros)).toBe(CAPABILITIES.parish_assistant_v1.reservationUsd)
+    expect(l.capability).toBe(MANAGED_TEST_CAP)
+    expect(Number(l.reserved_micros)).toBe(CAPABILITIES[MANAGED_TEST_CAP].reservationUsd)
     expect(l.settled_micros).toBeNull()
     expect([Number(l.input_tokens), Number(l.output_tokens)]).toEqual([321, 54])
     const a = await auditRows(orgA)
@@ -437,7 +460,7 @@ describe('the assistant on the managed route: reserve, recheck, send, settle', (
     expect(l.outcome).toBe('failed')
     expect(l.settled_micros).toBeNull()
     expect((await committed({ application: 'openchurch', environment: 'test', tenantId: String(orgA.id) })).tenantMicros)
-      .toBe(CAPABILITIES.parish_assistant_v1.reservationUsd)
+      .toBe(CAPABILITIES[MANAGED_TEST_CAP].reservationUsd)
     const a = await auditRows(orgA)
     expect(a.map(x => [x.event, x.error_code])).toEqual([['started', null], ['failed', 'provider_failed']])
     expect(JSON.stringify(a)).not.toContain('SYNTH-UPSTREAM-BODY')
@@ -499,15 +522,30 @@ describe('the assistant on the managed route: reserve, recheck, send, settle', (
     delete process.env.ANTHROPIC_API_KEY
     const r = await ask()
     expect(r.status).toBe(503)
+    expect(r.body.code).toBe('ai_unavailable')
     expect(await ledgerRows(orgA)).toHaveLength(0)
     expect(await auditRows(orgA)).toHaveLength(0)
+  })
+
+  // R334-1: the real assistant, with a stray platform key PRESENT.
+  it('D-01: the assistant with no parish key and a platform key set: 409 ai_key_required, zero SDK calls, zero ledger/audit rows, status not available', async () => {
+    expect(process.env.ANTHROPIC_API_KEY).toBe('synthetic-platform-anthropic')
+    const r = await askHttp()
+    expect(r.status).toBe(409)
+    expect(r.body.code).toBe('ai_key_required')
+    expect(cap.anthropic).toHaveLength(0)
+    expect(await ledgerRows(orgA)).toHaveLength(0)
+    expect(await auditRows(orgA)).toHaveLength(0)
+    const st = await request(server).get('/api/assistant/status').set(auth(orgA.token))
+    expect(st.body).toEqual({ available: false, code: 'ai_key_required' })
   })
 
   it("a parish's own Anthropic key is not accounted (unchanged)", async () => {
     await pool.query('UPDATE ochr_organizations SET ai_provider = $2, ai_api_key_enc = $3 WHERE id = $1', [orgB.id, 'anthropic', encryptApiKey('synthetic-org-key')])
     try {
-      const r = await ask(orgB)
+      const r = await askHttp(orgB)
       expect(r.status).toBe(200)
+      expect(cap.anthropic).toHaveLength(1)
       expect(cap.anthropic[0].opts.apiKey).toBe('synthetic-org-key')
     } finally {
       await pool.query('UPDATE ochr_organizations SET ai_provider = NULL, ai_api_key_enc = NULL WHERE id = $1', [orgB.id])

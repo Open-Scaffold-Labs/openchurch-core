@@ -138,7 +138,7 @@ const view = (path) => render(
   </MemoryRouter>,
 )
 
-const titleInput = () => document.querySelector('input[aria-label="Event title"]')
+const titleInput = () => document.querySelector('input[placeholder="Event title"]')
 const dateInput = () => document.querySelector('input[type="date"]')
 const timeInputs = () => [...document.querySelectorAll('input[type="time"]')]
 

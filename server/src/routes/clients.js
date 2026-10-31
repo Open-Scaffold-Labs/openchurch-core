@@ -46,7 +46,32 @@ const CLIENT_PUBLIC_COLUMNS = [
   'id', 'organization_id', 'name', 'company', 'email', 'phone', 'notes',
   'status', 'role', 'tags', 'preferred_language', 'birth_date', 'joined_date',
   'avatar', 'reminders_opt_out', 'created_at', 'updated_at', 'deidentified_at',
+  'mailing_address_line1', 'mailing_address_line2', 'mailing_city',
+  'mailing_state', 'mailing_postal',
 ].join(', ')
+
+// SP-176 (Saint MEM-23): roles below staff read the roster without a
+// member's private notes or birth year. Viewers keep month and day as
+// birth_month_day (birthday lists), never birth_date. Decided on the LIVE
+// role (requireAuth sets req.user.role from the database), so a demotion
+// applies on the next request. Allowlist of full readers, so a new role
+// starts redacted.
+const FULL_MEMBER_READERS = new Set(['admin', 'staff'])
+function monthDay(v) {
+  if (v == null) return null
+  if (v instanceof Date) {
+    const m = String(v.getMonth() + 1).padStart(2, '0')
+    const d = String(v.getDate()).padStart(2, '0')
+    return `${m}-${d}`
+  }
+  const m = /^\d{4}-(\d{2})-(\d{2})/.exec(String(v))
+  return m ? `${m[1]}-${m[2]}` : null
+}
+export function projectMemberForRole(row, role) {
+  if (!row || FULL_MEMBER_READERS.has(role)) return row
+  const { notes: _notes, birth_date, ...rest } = row
+  return { ...rest, birth_month_day: monthDay(birth_date) }
+}
 
 // Every query in this router filters by `organization_id = $orgId` so the
 // signed-in user only ever sees their own church's members. The FK cascade
@@ -100,36 +125,84 @@ router.get('/', async (req, res) => {
     params.push(limit, offset)
     const sql = `SELECT ${CLIENT_PUBLIC_COLUMNS} FROM ochr_clients WHERE ${where.join(' AND ')} ORDER BY name LIMIT $${params.length - 1} OFFSET $${params.length}`
     const { rows } = await pool.query(sql, params)
-    res.json(rows)
+    res.json(rows.map(r => projectMemberForRole(r, req.user?.role)))
   } catch (err) {
     console.error(err)
     res.status(500).json({ error: 'Failed to load clients' })
   }
 })
 
-// GET /api/clients/picker?search=&limit=  (SP-052 / R285-2)
-// Names-only lookup for pickers (Mass intention requester link). Fixed
-// projection {id, name}: no contact, note, birth date or capability field,
-// and no caller-chosen columns. Session organization only. Name match only.
-// Bounded: limit 1..25 (default 10). Same auth as the roster it replaces.
+// GET /api/clients/picker?search=&limit=&include_inactive=1  (SP-052 / R285-2)
+// Lookup for the Mass-intention requester link. Fixed projection
+// {id, name, status}: no contact, note, birth date or capability field,
+// and no caller-chosen columns. status is membership standing only.
+// Inactive members are omitted unless include_inactive is exactly "1".
+// Session organization only. Name match only. Bounded: limit 1..25
+// (default 10). Same auth as the roster it replaces.
 router.get('/picker', async (req, res) => {
   try {
     const raw = typeof req.query.search === 'string' ? req.query.search.trim().slice(0, 100) : ''
     const n = Number.parseInt(String(req.query.limit ?? '10'), 10)
     const limit = Number.isInteger(n) ? Math.min(Math.max(n, 1), 25) : 10
+    const includeInactive = req.query.include_inactive === '1'
     const params = [req.organizationId]
     let where = 'organization_id = $1'
+    if (!includeInactive) where += ` AND status IS DISTINCT FROM 'inactive'`
     if (raw) {
       params.push(`%${raw.replace(/[\\%_]/g, m => '\\' + m)}%`)
       where += ` AND name ILIKE $${params.length}`
     }
     params.push(limit)
     const { rows } = await pool.query(
-      `SELECT id, name FROM ochr_clients WHERE ${where} ORDER BY name, id LIMIT $${params.length}`, params)
-    res.json(rows.map(r => ({ id: r.id, name: r.name })))
+      `SELECT id, name, status FROM ochr_clients WHERE ${where} ORDER BY name, id LIMIT $${params.length}`, params)
+    res.json(rows.map(r => ({ id: r.id, name: r.name, status: r.status })))
   } catch (err) {
     console.error('clients picker failed:', err)
     res.status(500).json({ error: 'Failed to load members' })
+  }
+})
+
+// GET /api/clients/duplicate-check?email=&name=  (Saint SP-255)
+// Soft hint for Add/Edit Member. Returns up to 5 matches in this org whose
+// email equals (case-insensitive) or name equals (case-insensitive trim).
+// Does not block create — the UI warns; CSV import still skips by email.
+// Fixed projection {id, name, email, status}. No notes/birth/tokens.
+router.get('/duplicate-check', async (req, res) => {
+  try {
+    const emailRaw = typeof req.query.email === 'string' ? req.query.email.trim() : ''
+    const nameRaw  = typeof req.query.name  === 'string' ? req.query.name.trim()  : ''
+    const email = emailRaw ? (normalizeDonorEmail(emailRaw) ?? emailRaw.toLowerCase()) : ''
+    const name  = nameRaw.slice(0, 120)
+    if (!email && !name) return res.json({ matches: [] })
+
+    const params = [req.organizationId]
+    const clauses = []
+    if (email) {
+      params.push(email)
+      clauses.push(`(email IS NOT NULL AND LOWER(email) = LOWER($${params.length}))`)
+    }
+    if (name) {
+      params.push(name)
+      clauses.push(`(LOWER(BTRIM(name)) = LOWER($${params.length}))`)
+    }
+    // exclude_id is AND'd outside the match OR-group so it cannot widen results.
+    let excludeSql = ''
+    const ex = Number.parseInt(String(req.query.exclude_id ?? ''), 10)
+    if (Number.isInteger(ex) && ex > 0) {
+      params.push(ex)
+      excludeSql = ` AND id <> $${params.length}`
+    }
+    params.push(5)
+    const { rows } = await pool.query(
+      `SELECT id, name, email, status FROM ochr_clients
+        WHERE organization_id = $1 AND (${clauses.join(' OR ')})${excludeSql}
+        ORDER BY name, id LIMIT $${params.length}`,
+      params,
+    )
+    res.json({ matches: rows })
+  } catch (err) {
+    console.error('clients duplicate-check failed:', err)
+    res.status(500).json({ error: 'Failed to check for duplicates' })
   }
 })
 
@@ -142,24 +215,50 @@ router.get('/:id', async (req, res) => {
       [id, req.organizationId]
     )
     if (!rows.length) return res.status(404).json({ error: 'Not found' })
-    res.json(rows[0])
+    res.json(projectMemberForRole(rows[0], req.user?.role))
   } catch (err) {
     console.error(err)
     res.status(500).json({ error: 'Failed to load client' })
   }
 })
 
+// The signup sample stores the member as "[Sample] Maria Garcia" and the
+// gift as donor_name "Maria Garcia". The marker is a row tag, not part of
+// the donor's name — donor_name is kept clean on purpose. One leading
+// marker only; this is not a substring or fuzzy match.
+const SAMPLE_MARKER = '[Sample] '
+
+function donorNamesForMember(name) {
+  if (typeof name !== 'string' || name.length === 0) return []
+  const names = [name]
+  if (name.startsWith(SAMPLE_MARKER)) {
+    const stripped = name.slice(SAMPLE_MARKER.length).trim()
+    if (stripped) names.push(stripped)
+  }
+  return names
+}
+
 // GET /api/clients/:id/donations
-// Sprint M / M.1 — full member profile page shows donation history.
-// Matches by email (preferred — reliable identity) and falls back to
-// donor_name equality when the member has no email or their gifts
-// were logged as walk-ins.
+// The profile is addressed by member id. That id, inside the caller's
+// org, is who this read is about. Gifts have no member foreign key, so
+// the link is derived and stays inside this org:
+//
+//   1. Canonical donor key — normalised email, when the member has one.
+//      Case-insensitive, same rule as migration 095 / F5.
+//   2. Name, only for a gift that carries no email, and only when
+//      this member claims that donor_name and no other surviving
+//      member of this org claims it. Her own status is not a filter:
+//      a unique inactive or de-identified member still sees those
+//      gifts. Any other row with that name blocks the link, active
+//      or inactive, de-identified or not. Status and de-identification
+//      must not move a historical name-only gift onto someone else,
+//      and the same gift must not appear on two profiles. Another
+//      parish's gift never matches. A gift that already has a
+//      different email is a different donor. The sample marker is
+//      still the same claim: "[Sample] Maria Garcia" and "Maria Garcia"
+//      block each other.
 //
 // Returns: { lines: [...], total, gift_count, by: 'email'|'name' }
-//
-// Tenant scoping is double: the member must belong to the caller's
-// org (404 otherwise), and the donations query also filters by
-// organization_id. Two locks beats one for a sensitive read.
 router.get('/:id/donations', async (req, res) => {
   const id = requireIntParam(req, res); if (id === null) return
   try {
@@ -170,37 +269,44 @@ router.get('/:id/donations', async (req, res) => {
     if (!memberQ.rows.length) return res.status(404).json({ error: 'Member not found' })
     const member = memberQ.rows[0]
 
-    // Prefer the email match — it's the giving-statements grouping
-    // key and survives donor_name typos. Name match is the fallback
-    // for members without an email on file.
-    const useEmail = Boolean(member.email)
-    // Case-insensitive on email — the same identity rule members are matched
-    // by everywhere else (migration 095's lower(email) index). Exact-match
-    // here dropped a member's own gifts recorded under a different casing of
-    // their address from their lifetime history (F5).
-    const filter = useEmail
-      ? 'lower(donor_email) = lower($2)'
-      : 'donor_name  = $2 AND donor_email IS NULL'
-    // The member's own address is normalised too: a member recorded as
-    // Jose@example.com would otherwise not match their own gifts.
-    const matchKey = useEmail ? normalizeDonorEmail(member.email) : member.name
+    const emailKey = normalizeDonorEmail(member.email)
+    const donorNames = donorNamesForMember(member.name)
 
     const { rows } = await pool.query(
-      `SELECT id, donor_name, donor_email, donor_address,
-              amount, refunded_total, live_amount, category, method, date, notes
-         FROM ochr_donation_live
-        WHERE organization_id = $1
-          AND ${filter}
-        ORDER BY date DESC, id DESC
+      `SELECT d.id, d.donor_name, d.donor_email, d.donor_address,
+              d.amount, d.refunded_total, d.live_amount, d.category, d.method, d.date, d.notes
+         FROM ochr_donation_live d
+        WHERE d.organization_id = $1
+          AND (
+            ($2::text IS NOT NULL AND lower(d.donor_email) = lower($2))
+            OR (
+              $3::text[] IS NOT NULL
+              AND d.donor_email IS NULL
+              AND d.donor_name = ANY($3::text[])
+              AND (
+                SELECT COUNT(*)::int FROM ochr_clients c
+                 WHERE c.organization_id = $1
+                   AND c.id <> $4
+                   AND (c.name = d.donor_name OR c.name = ('[Sample] ' || d.donor_name))
+              ) = 0
+              AND EXISTS (
+                SELECT 1 FROM ochr_clients self
+                 WHERE self.organization_id = $1
+                   AND self.id = $4
+                   AND (self.name = d.donor_name OR self.name = ('[Sample] ' || d.donor_name))
+              )
+            )
+          )
+        ORDER BY d.date DESC, d.id DESC
         LIMIT 200`,
-      [req.organizationId, matchKey]
+      [req.organizationId, emailKey, donorNames.length ? donorNames : null, id]
     )
 
     const total = rows.reduce((sum, r) => sum + Number(r.live_amount), 0)
     res.set('Cache-Control', 'private, max-age=30')
     res.json({
-      by:         useEmail ? 'email' : 'name',
-      match_key:  matchKey,
+      by:         emailKey ? 'email' : 'name',
+      match_key:  emailKey || member.name,
       lines:      rows,
       total:      Number(total.toFixed(2)),
       gift_count: rows.length,
@@ -248,14 +354,23 @@ router.get('/:id/checkins', async (req, res) => {
 // POST /api/clients
 router.post('/', async (req, res) => {
   try {
-    const { name, company, email, phone, notes, status, role, tags, birth_date, joined_date, avatar } = req.body
+    const {
+      name, company, email, phone, notes, status, role, tags, birth_date, joined_date, avatar,
+      mailing_address_line1, mailing_address_line2, mailing_city, mailing_state, mailing_postal,
+    } = req.body
     if (!name?.trim()) return res.status(400).json({ error: 'Name is required' })
+    const clip = (v, n) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, n) : null)
     const { rows } = await pool.query(
-      `INSERT INTO ochr_clients (organization_id, name, company, email, phone, notes, status, role, tags, birth_date, joined_date, avatar)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+      `INSERT INTO ochr_clients (
+         organization_id, name, company, email, phone, notes, status, role, tags,
+         birth_date, joined_date, avatar,
+         mailing_address_line1, mailing_address_line2, mailing_city, mailing_state, mailing_postal
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
        RETURNING ${CLIENT_PUBLIC_COLUMNS}`,
       [req.organizationId, name, company, email, phone, notes, status || 'active', role || 'Member', tags,
-       birth_date || null, joined_date || null, avatar || null]
+       birth_date || null, joined_date || null, avatar || null,
+       clip(mailing_address_line1, 200), clip(mailing_address_line2, 200),
+       clip(mailing_city, 100), clip(mailing_state, 40), clip(mailing_postal, 20)]
     )
     res.status(201).json(rows[0])
   } catch (err) {
@@ -371,7 +486,7 @@ router.post('/:id/deidentify', requireRole('admin'), async (req, res) => {
       const { rows: [profile] } = await client.query('SELECT id, deidentified_at FROM ochr_clients WHERE id = $1 AND organization_id = $2 FOR UPDATE', [id, req.organizationId])
       if (!profile) return { status: 404, body: { error: 'Member not found' } }
       await client.query(`INSERT INTO ochr_profile_minimizations (organization_id, client_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [req.organizationId, id])
-      await client.query(`UPDATE ochr_clients SET email = NULL, phone = NULL, notes = NULL, avatar = NULL, birth_date = NULL, calendar_token = NULL, swap_token = NULL, status = 'inactive', deidentified_at = COALESCE(deidentified_at, NOW()), updated_at = NOW() WHERE id = $1 AND organization_id = $2`, [id, req.organizationId])
+      await client.query(`UPDATE ochr_clients SET email = NULL, phone = NULL, notes = NULL, avatar = NULL, birth_date = NULL, calendar_token = NULL, swap_token = NULL, mailing_address_line1 = NULL, mailing_address_line2 = NULL, mailing_city = NULL, mailing_state = NULL, mailing_postal = NULL, status = 'inactive', deidentified_at = COALESCE(deidentified_at, NOW()), updated_at = NOW() WHERE id = $1 AND organization_id = $2`, [id, req.organizationId])
       // Audit rows about this member keep the request bodies that created or
       // edited it. Drop the contact keys there too (names stay, by design);
       // the 114 trigger covers rows written later.
@@ -420,7 +535,7 @@ router.patch('/:id', async (req, res) => {
     // body are written — a one-field PATCH no longer nulls the rest of
     // the member's record. Allowlist is hardcoded; nothing from the
     // request reaches the SQL text.
-    const PATCHABLE = ['name', 'company', 'email', 'phone', 'notes', 'status', 'role', 'tags', 'birth_date', 'joined_date', 'avatar']
+    const PATCHABLE = ['name', 'company', 'email', 'phone', 'notes', 'status', 'role', 'tags', 'birth_date', 'joined_date', 'avatar', 'mailing_address_line1', 'mailing_address_line2', 'mailing_city', 'mailing_state', 'mailing_postal']
     // A present name must be a non-blank string, stored trimmed — the same
     // rule POST and CSV import already apply. Before, '' became NULL and
     // hit the NOT NULL constraint (500), and '   ' was saved as a blank

@@ -153,7 +153,8 @@ describe('MassIntentionAssign', () => {
     fireEvent.click(offer)
     expect(assigns).toBe(1)
     await act(async () => { releaseAssign() })
-    await waitFor(() => expect(screen.getByText('Offered at this Mass.')).toBeInTheDocument())
+    // SP-078: open → scheduled is now named in the confirmation.
+    await waitFor(() => expect(screen.getByText('Offered at this Mass. Status: Scheduled.')).toBeInTheDocument())
   })
 })
 

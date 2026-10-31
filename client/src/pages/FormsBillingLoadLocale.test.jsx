@@ -110,7 +110,9 @@ describe('forms and billing load failures speak the parish language', () => {
     spanish()
     vi.stubGlobal('fetch', vi.fn(async () => ok({ forms: [] })))
     mount(<Forms />)
-    expect(await screen.findByText(/No forms yet/)).toBeInTheDocument()
+    // Empty chrome follows locale (Saint ES audit): Spanish office sees Spanish empty copy.
+    expect(await screen.findByText(es['forms.emptyTitle'])).toBeInTheDocument()
+    expect(screen.queryByText(en['forms.emptyTitle'])).toBeNull()
     expect(screen.queryByText(es['form.loadFailTitle'])).toBeNull()
     expect(screen.queryByText(es['form.loadFailBody'])).toBeNull()
   })
@@ -169,7 +171,9 @@ describe('forms and billing load failures speak the parish language', () => {
         </Routes>
       </MemoryRouter>,
     )
-    expect(await screen.findByText(/No responses yet/)).toBeInTheDocument()
+    // Empty chrome follows locale (same as forms list above).
+    expect(await screen.findByText(es['forms.resp.no_responses_yet'])).toBeInTheDocument()
+    expect(screen.queryByText(en['forms.resp.no_responses_yet'])).toBeNull()
     expect(screen.getByRole('heading', { name: 'Volunteer' })).toBeInTheDocument()
     expect(screen.queryByText(es['form.loadFailTitle'])).toBeNull()
   })
@@ -215,13 +219,14 @@ describe('forms and billing load failures speak the parish language', () => {
     expect(screen.queryByText(en['load.failedBody'])).toBeNull()
     expect(screen.queryByText(/Couldn't load billing/)).toBeNull()
     expect(screen.queryByText(/Billing & plan/)).toBeNull()
+    expect(screen.queryByText(/Facturación y plan/)).toBeNull()
   })
 
   it('a loaded plan is not a load failure', async () => {
     spanish()
     vi.stubGlobal('fetch', vi.fn(async () => ok(PLAN)))
     mount(<Billing />)
-    expect(await screen.findByRole('heading', { name: /Billing & plan/ })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: es['bill.title'] })).toBeInTheDocument()
     expect(screen.queryByText(es['load.failedTitle'])).toBeNull()
     expect(screen.queryByText(es['load.failedBody'])).toBeNull()
   })

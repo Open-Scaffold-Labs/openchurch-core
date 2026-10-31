@@ -17,6 +17,7 @@
 //   5. EN/ES printHonesty / Print label leave the sheet chrome
 
 import { ToastProvider } from '../components/ToastProvider'
+import { ConfirmProvider } from '../components/ConfirmProvider'
 import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
@@ -48,7 +49,7 @@ function renderJourney() {
     <MemoryRouter initialEntries={['/mass-intentions']}>
       <LocaleProvider>
         <Routes>
-          <Route path="/mass-intentions" element={<ToastProvider><MassIntentions /></ToastProvider>} />
+          <Route path="/mass-intentions" element={<ToastProvider><ConfirmProvider><MassIntentions /></ConfirmProvider></ToastProvider>} />
           <Route path="/mass-intentions/print" element={<SacristySheet />} />
         </Routes>
       </LocaleProvider>

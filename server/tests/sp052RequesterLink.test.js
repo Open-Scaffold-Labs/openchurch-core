@@ -127,8 +127,8 @@ describe('R285-2 GET /api/clients/picker', () => {
     await pool.query("UPDATE ochr_clients SET email='synthetic.contact@example.com', phone='5550100', notes='Synthetic note' WHERE id=$1", [memberA])
     const r = await request(server).get('/api/clients/picker?search=Synthetic%20Requester').set(auth(A.token))
     expect(r.status).toBe(200)
-    expect(r.body).toEqual([{ id: memberA, name: 'Synthetic Requester A' }])
-    for (const row of r.body) expect(Object.keys(row).sort()).toEqual(['id', 'name'])
+    expect(r.body).toEqual([{ id: memberA, name: 'Synthetic Requester A', status: 'active' }])
+    for (const row of r.body) expect(Object.keys(row).sort()).toEqual(['id', 'name', 'status'])
     expect(JSON.stringify(r.body)).not.toMatch(/example\.com|5550100|Synthetic note|Requester B/)
     const byEmail = await request(server).get('/api/clients/picker?search=synthetic.contact').set(auth(A.token))
     expect(byEmail.body).toEqual([])
@@ -136,9 +136,9 @@ describe('R285-2 GET /api/clients/picker', () => {
     expect(wild.status).toBe(200); expect(wild.body).toEqual([])
     const big = await request(server).get('/api/clients/picker?limit=100000&columns=email').set(auth(A.token))
     expect(big.status).toBe(200); expect(big.body.length).toBeLessThanOrEqual(25)
-    for (const row of big.body) expect(Object.keys(row).sort()).toEqual(['id', 'name'])
+    for (const row of big.body) expect(Object.keys(row).sort()).toEqual(['id', 'name', 'status'])
     const other = await request(server).get('/api/clients/picker?search=Requester').set(auth(B.token))
-    expect(other.body).toEqual([{ id: memberB, name: 'Synthetic Requester B' }])
+    expect(other.body).toEqual([{ id: memberB, name: 'Synthetic Requester B', status: 'active' }])
   })
   it('requires a session', async () => {
     expect((await request(server).get('/api/clients/picker')).status).toBe(401)
@@ -204,22 +204,24 @@ describe('R285-F1/F2 audit names what changed, truthfully', () => {
   }
   const settle = () => new Promise(r => setTimeout(r, 120))
 
-  it('F1: stipend edit on a fulfilled intention records the field and numeric before/after; text edits record names only', async () => {
+  // Decision 8 (2026-10-19): a fulfilled row is no longer edited by plain
+  // PATCH, so the edits run while scheduled and fulfil comes last.
+  it('F1: stipend edit records the field and numeric before/after; text edits record names only', async () => {
     const mass = await request(server).post('/api/calendar').set(auth(A.token)).send({ title: `Sunday Mass F1 ${RUN_ID}`, date: '2027-06-13', start_time: '10:00', end_time: '11:00', type: 'service' })
     expect(mass.status).toBe(201)
     const c = await post(A, { intention: 'For Synthetic Bruno', requested_by: 'Synthetic Bruno', stipend: 15 })
     expect(c.status).toBe(201)
     const id = Number(c.body.id)
     expect((await request(server).post(`/api/mass-intentions/${id}/assign`).set(auth(A.token)).send({ calendar_event_id: mass.body.id })).status).toBe(200)
-    expect((await patch(id, { status: 'fulfilled' })).status).toBe(200); await settle()
     expect((await patch(id, { stipend: 99 })).status).toBe(200); await settle()
     expect((await patch(id, { intention: 'For Synthetic Bruno (edited)' })).status).toBe(200); await settle()
-    expect((await patch(id, { note: 'Synthetic Bruno note' })).status).toBe(200)
+    expect((await patch(id, { note: 'Synthetic Bruno note' })).status).toBe(200); await settle()
+    expect((await patch(id, { status: 'fulfilled' })).status).toBe(200)
     const rows = await updates(id, 4)
     expect(rows).toHaveLength(4)
-    const [fulfil, stip, text, note] = rows
+    const [stip, text, note, fulfil] = rows
     expect(fulfil.changed).toEqual(['status'])
-    expect(stip).toMatchObject({ changed: ['stipend'], stipend_before: 15, stipend_after: 99, status: 'fulfilled' })
+    expect(stip).toMatchObject({ changed: ['stipend'], stipend_before: 15, stipend_after: 99, status: 'scheduled' })
     expect(text.changed).toEqual(['intention'])
     expect(note.changed).toEqual(['note'])
     for (const m of [fulfil, text, note]) { expect(m).not.toHaveProperty('stipend_before'); expect(m).not.toHaveProperty('stipend_after'); expect(m).not.toHaveProperty('link') }

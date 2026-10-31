@@ -11,7 +11,7 @@ import { useLocale } from '../i18n'
 // GET /api/sacraments/anniversaries?days=N.
 
 export default function SacramentAnniversaries({ days = 30, max = 6 }) {
-  const { t } = useLocale()
+  const { t, dateLocale } = useLocale()
   const [list, setList] = useState(null) // null = loading/unknown
   const [failed, setFailed] = useState(false)
   // Sacrament names come from the shared sac.* dictionary so the register
@@ -77,7 +77,7 @@ export default function SacramentAnniversaries({ days = 30, max = 6 }) {
               {' — '}{t(a.years === 1 ? 'anniv.since1' : 'anniv.sinceN', { n: a.years, type: typeLabel(a.type) })}
             </span>
             <span className="block text-[11px] text-ink-500 dark:text-parchment-300/70">
-              {formatStoredDate(a.next_date, { weekday: 'short', month: 'short', day: 'numeric' })}
+              {formatStoredDate(a.next_date, { weekday: 'short', month: 'short', day: 'numeric' }, dateLocale)}
             </span>
           </li>
           )

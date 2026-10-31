@@ -6,7 +6,7 @@ import {
 } from 'recharts'
 import { Users, DollarSign, Feather, TrendingUp, AlertTriangle, Loader2, UserCheck, Heart, UserX } from 'lucide-react'
 import { Link } from 'react-router-dom'
-import PageWrapper from '../components/PageWrapper'
+import PageWrapper, { PageHeader } from '../components/PageWrapper'
 import EmptyState from '../components/EmptyState'
 import { apiUrl } from '../api'
 import { useAuth } from '../context/AuthContext'
@@ -150,7 +150,7 @@ export default function Insights() {
 
   if (!isAdmin || err === 'admin-only') {
     return (
-      <PageWrapper>
+      <PageWrapper type="list">
         <div className="max-w-2xl mx-auto py-16">
           <EmptyState
             icon={AlertTriangle}
@@ -164,7 +164,7 @@ export default function Insights() {
 
   if (loading) {
     return (
-      <PageWrapper>
+      <PageWrapper type="list">
         <div className="flex items-center justify-center py-24">
           <Loader2 size={20} className="animate-spin text-church-700 dark:text-brass-300" />
         </div>
@@ -174,7 +174,7 @@ export default function Insights() {
 
   if (err) {
     return (
-      <PageWrapper>
+      <PageWrapper type="list">
         <div className="max-w-2xl mx-auto py-16">
           <EmptyState icon={AlertTriangle} title={t('ins.loadError')} body={err} />
         </div>
@@ -193,13 +193,11 @@ export default function Insights() {
     : t('ins.vsLast', { d: `${aiDelta > 0 ? '+' : ''}${aiDelta}` })
 
   return (
-    <PageWrapper>
+    <PageWrapper type="list">
       <div className="max-w-5xl mx-auto space-y-6">
         {/* Header */}
         <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }}>
-          <h1 className="font-display text-3xl font-semibold text-ink-900 dark:text-parchment-50 tracking-tight">
-            {t('ins.title')}
-          </h1>
+          <PageHeader title={t('ins.title')} />
           <p className="text-sm text-ink-500 dark:text-parchment-300/70 mt-1">
             {t('ins.sub')}
           </p>

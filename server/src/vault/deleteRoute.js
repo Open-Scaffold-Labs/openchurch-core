@@ -16,7 +16,10 @@ import { monitor } from '../monitoring/index.js'
 import { captureAndDelete, VaultError, vaultErrorPayload } from './index.js'
 import { PROTECTED } from './registry.js'
 
-export function protectedDelete(kind, { notFound, failure, before = null } = {}) {
+// Test seam: runs between `before` and the vault transaction. Null in production.
+export const deleteRouteTestHooks = { afterBefore: null }
+
+export function protectedDelete(kind, { notFound, failure, before = null, underLock = null } = {}) {
   const spec = PROTECTED[kind]
   if (!spec) throw new Error(`protectedDelete: ${kind} is not in the vault registry`)
 
@@ -26,12 +29,16 @@ export function protectedDelete(kind, { notFound, failure, before = null } = {})
       // Some deletes have work that must happen while the row's id still
       // resolves — cancelling queued reminders, for instance.
       if (before) await before(req, id)
+      if (deleteRouteTestHooks.afterBefore) await deleteRouteTestHooks.afterBefore({ kind, id })
 
       const result = await captureAndDelete({
         kind, id,
         orgId: req.organizationId,
         user: req.user,
         reason: typeof req.query.reason === 'string' ? req.query.reason.slice(0, 500) : null,
+        // Refusals that must hold against concurrent writers run here, on
+        // the vault connection, under the root's FOR UPDATE lock.
+        underLock: underLock ? (conn, roots) => underLock(req, conn, roots) : null,
       })
       if (!result) return res.status(404).json({ error: notFound || 'Not found' })
       res.status(204).end()

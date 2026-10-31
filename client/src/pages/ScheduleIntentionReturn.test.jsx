@@ -25,7 +25,8 @@ function stubFetch() {
     const u = String(url)
     if (opts.method === 'POST' && u.includes('/api/calendar')) {
       const body = JSON.parse(opts.body)
-      return ok({ id: 80, title: body.title, date: body.date, start_time: body.start_time, end_time: body.end_time })
+      // Create is a 201. A 200 must not be treated as the new Mass.
+      return { ok: true, status: 201, json: async () => ({ id: 80, title: body.title, date: body.date, start_time: body.start_time, end_time: body.end_time }) }
     }
     if (u.includes('/api/calendar/conflicts')) return ok({ conflicts: [] })
     if (u.includes('/api/calendar')) return ok([])
@@ -77,7 +78,7 @@ describe('Schedule create returns to the intention', () => {
     const back = screen.getByTestId('back-to-intention')
     expect(back.getAttribute('href')).toBe(`/mass-intentions?date=2026-10-04&resume=${nonce}`)
 
-    fireEvent.change(screen.getByLabelText(/event title/i), { target: { value: 'Sunday Mass' } })
+    fireEvent.change(screen.getByLabelText(/^Title/), { target: { value: 'Sunday Mass' } })
     const times = [...document.querySelectorAll('input[type="time"]')]
     fireEvent.change(times[0], { target: { value: '10:00' } })
     fireEvent.change(times[1], { target: { value: '11:00' } })
@@ -116,7 +117,7 @@ describe('Schedule create returns to the intention', () => {
       expect(screen.getByTestId('loc').textContent).not.toMatch(/mass-intentions/)
     })
 
-    fireEvent.change(screen.getByLabelText(/event title/i), { target: { value: 'Parish council' } })
+    fireEvent.change(screen.getByLabelText(/^Title/), { target: { value: 'Parish council' } })
     fireEvent.change(document.querySelector('input[type="date"]'), { target: { value: '2026-10-04' } })
     const times = [...document.querySelectorAll('input[type="time"]')]
     fireEvent.change(times[0], { target: { value: '10:00' } })

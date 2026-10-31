@@ -11,8 +11,10 @@ import {
   signupLimiter,
   forgotPasswordAccountLimiter, forgotPasswordIpLimiter,
   changePasswordLimiter,
+  resetPasswordLimiter, acceptInviteLimiter,
 } from '../middleware/rateLimit.js'
 import { seedSampleData } from '../onboarding/sampleSeed.js'
+import { deletionRequestStatus, createDeletionRequest, confirmDeletionRequest, withdrawDeletionRequest } from '../auth/deletionRequest.js'
 import { sendEmail } from '../email/send.js'
 import { welcomeEmail, passwordResetEmail } from '../email/templates.js'
 // Used by the accept-invite catch block. Its absence made that handler's
@@ -384,6 +386,52 @@ router.post('/close', requireAuth, auditLog('user'), async (req, res) => {
   }
 })
 
+// Account deletion (C3). A confirmed request deletes this login's
+// personal data in the same call. The register and the financial ledger
+// stay. The only active admin is refused.
+router.get('/deletion-request', requireAuth, async (req, res) => {
+  try {
+    const r = await deletionRequestStatus({ organizationId: req.organizationId, userId: req.user.id })
+    res.status(r.status).json(r.body)
+  } catch (err) {
+    console.error('deletion-request status failed:', err)
+    res.status(500).json({ error: 'Could not read the deletion request.' })
+  }
+})
+
+router.post('/deletion-request', requireAuth, async (req, res) => {
+  try {
+    const r = await createDeletionRequest({ organizationId: req.organizationId, userId: req.user.id })
+    res.status(r.status).json(r.body)
+  } catch (err) {
+    console.error('deletion-request create failed:', err)
+    res.status(500).json({ error: 'Could not record the deletion request.' })
+  }
+})
+
+router.post('/deletion-request/confirm', requireAuth, changePasswordLimiter, async (req, res) => {
+  try {
+    const r = await confirmDeletionRequest({
+      organizationId: req.organizationId, userId: req.user.id, password: req.body?.password,
+    })
+    if (r.status < 400 && r.body?.personal_login_deleted === true) clearSessionCookie(res)
+    res.status(r.status).json(r.body)
+  } catch (err) {
+    console.error('deletion-request confirm failed:', err)
+    res.status(500).json({ error: 'Could not confirm the deletion request.' })
+  }
+})
+
+router.post('/deletion-request/withdraw', requireAuth, async (req, res) => {
+  try {
+    const r = await withdrawDeletionRequest({ organizationId: req.organizationId, userId: req.user.id })
+    res.status(r.status).json(r.body)
+  } catch (err) {
+    console.error('deletion-request withdraw failed:', err)
+    res.status(500).json({ error: 'Could not withdraw the deletion request.' })
+  }
+})
+
 // PATCH /api/auth/password
 // Change your own password while signed in.
 //
@@ -597,7 +645,7 @@ async function admitTokenOrganization(client, tokenHash) {
   return org?.held_at ?? null
 }
 
-router.post('/reset-password', async (req, res) => {
+router.post('/reset-password', resetPasswordLimiter, async (req, res) => {
   const { token, password } = req.body ?? {}
   if (typeof token !== 'string' || !token.trim()) {
     return res.status(400).json({ error: 'Reset token is required' })
@@ -684,7 +732,7 @@ router.post('/reset-password', async (req, res) => {
 // different things to the person on the other end, one of them marks an
 // invitation accepted, and collapsing them would mean a reset silently
 // counting as an acceptance.
-router.post('/accept-invite', async (req, res) => {
+router.post('/accept-invite', acceptInviteLimiter, async (req, res) => {
   const { token, password } = req.body ?? {}
   if (typeof token !== 'string' || !token.trim()) {
     return res.status(400).json({ error: 'An invitation link is required' })

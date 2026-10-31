@@ -23,9 +23,30 @@ import {
   ChevronDown, ChevronRight, Check, Minus, Send, Loader2,
 } from 'lucide-react'
 import { apiUrl } from '../api'
+import { nativeAiFetchInit } from '../native/nativeAiCeiling'
 import { useLocale } from '../i18n'
+import { STRINGS } from '../i18n/strings'
 import { scrimCls } from './MobileSheet'
 import { MODULE_HELP, ROLE_TABLE, TIPS, FAQ, buildSearchIndex } from '../data/helpContent'
+import { AI_ROLE_AREA, aiSurfacesClosed, helpFaqVisible, helpModuleVisible, helpSearchRowVisible } from '../native/aiGate'
+import { helpFaqOfferedInShell, helpModuleOfferedInShell, helpSearchRowOfferedInShell } from '../native/planPurchase'
+import { isNativeShell } from '../native/nativeShell'
+import { useNativeAi } from '../native/NativeAiContext'
+
+// Module names reuse the sidebar's nav.* strings so Help and the sidebar
+// never disagree. The guide bodies stay English-first (see header).
+export function moduleName(t, name) {
+  const key = `nav.${name}`
+  const s = t(key)
+  return s === key ? name : s
+}
+// Tips and role rows are translated by position, but only while the
+// English source still matches what was translated — an edited English
+// line shows as English rather than as a stale translation.
+export function localizedByIndex(t, prefix, i, english) {
+  const key = `${prefix}.${i}`
+  return STRINGS.en[key] === english ? t(key) : english
+}
 
 const GROUP_ORDER = ['General', 'Pastoral', 'Stewardship', 'Studio', 'Admin', 'You']
 
@@ -88,7 +109,7 @@ function ModuleCard({ id, mod, openId, setOpenId }) {
     <div className="rounded-xl border border-parchment-300/70 dark:border-brass-900/30 bg-white/60 dark:bg-ink-800/60">
       <button onClick={() => setOpenId(open ? null : id)}
         className="w-full flex items-center justify-between px-4 py-3 text-left">
-        <span className="font-medium text-ink-800 dark:text-parchment-100">{mod.name}</span>
+        <span className="font-medium text-ink-800 dark:text-parchment-100">{moduleName(t, mod.name)}</span>
         {open ? <ChevronDown size={16} className="text-ink-400" /> : <ChevronRight size={16} className="text-ink-400" />}
       </button>
       {open && (
@@ -108,6 +129,15 @@ function ModuleCard({ id, mod, openId, setOpenId }) {
                 type: 'text',
                 title: t('help.miFulfillHowTitle'),
                 content: t('help.miFulfillHowBody'),
+              }} />
+            </div>
+          )}
+          {id === 'worship' && (
+            <div data-testid="help-packet-entry">
+              <SectionBlock section={{
+                type: 'text',
+                title: t('help.packetTitle'),
+                content: t('help.packetBody'),
               }} />
             </div>
           )}
@@ -149,7 +179,7 @@ function ReportTab() {
   useEffect(() => {
     let cancelled = false
     setMineFailed(false)
-    fetch(apiUrl('/api/support-tickets/mine?limit=10'))
+    fetch(apiUrl('/api/support-tickets/mine?limit=10'), nativeAiFetchInit())
       .then(r => {
         if (!r.ok) throw new Error('unread')
         return r.json()
@@ -167,7 +197,7 @@ function ReportTab() {
     if (description.trim().length < 10) { setError(t('sup.tooShort')); return }
     setBusy(true); setError('')
     try {
-      const res = await fetch(apiUrl('/api/support-tickets'), {
+      const res = await fetch(apiUrl('/api/support-tickets'), nativeAiFetchInit({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -179,7 +209,7 @@ function ReportTab() {
             language: navigator.language,
           },
         }),
-      })
+      }))
       const data = await res.json().catch(() => ({}))
       if (!res.ok) throw new Error(data.error || t('sup.failed'))
       setDone(data)
@@ -237,7 +267,7 @@ function ReportTab() {
             {mine.map(r => (
               <li key={r.id} className="rounded-xl border border-parchment-300/70 dark:border-brass-900/30 bg-white/60 dark:bg-ink-800/60 px-3.5 py-2.5">
                 <div className="flex items-center justify-between gap-3">
-                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-wider ${STATUS_TONE[r.status] || STATUS_TONE.new}`}>
+                  <span className={`px-2 py-0.5 rounded-full text-[11px] font-semibold uppercase tracking-wider ${STATUS_TONE[r.status] || STATUS_TONE.new}`}>
                     {t(`sup.status.${r.status}`)}
                   </span>
                   <span className="text-[11px] text-ink-500 dark:text-parchment-300/70">
@@ -259,19 +289,45 @@ function ReportTab() {
 
 export default function HelpPanel({ open, onClose }) {
   const { t } = useLocale()
+  const { kind: nativeAiKind } = useNativeAi()
+  const aiClosed = aiSurfacesClosed(nativeAiKind)
+  // C2: no plan or cost help inside the free iOS companion app.
+  const native = nativeAiKind !== 'web' || isNativeShell()
   const [tab, setTab] = useState('guide')
   const [query, setQuery] = useState('')
   const [openId, setOpenId] = useState(null)
   const index = useMemo(() => {
-    const rows = buildSearchIndex()
+    const rows = buildSearchIndex().filter(r => helpSearchRowVisible(r, nativeAiKind) && helpSearchRowOfferedInShell(r, native))
     rows.push({
       kind: 'section',
       id: 'intentions',
       title: t('help.miFulfillHowTitle'),
       text: t('help.miFulfillHowBody'),
     })
+    // MIN-37: "weekly sheet" found nothing; the topic used other words.
+    rows.push({
+      kind: 'section',
+      id: 'intentions',
+      title: t('help.miWeeklySheetTitle'),
+      text: t('help.miWeeklySheetBody'),
+    })
+    // SP-253: "weekday Mass" / "Misa de entre semana" found nothing.
+    rows.push({
+      kind: 'section',
+      id: 'intentions',
+      title: t('help.miWeekdayMassTitle'),
+      text: t('help.miWeekdayMassBody'),
+    })
+    // SP-081: "packet" / "paquete" found nothing. The Worship guide is
+    // English-only module copy; this row follows the active language.
+    rows.push({
+      kind: 'section',
+      id: 'worship',
+      title: t('help.packetTitle'),
+      text: t('help.packetBody'),
+    })
     return rows
-  }, [t])
+  }, [t, nativeAiKind, native])
 
   // Portaled to <body> (the FeedbackModal pattern), with the app shell
   // made inert while open: the page behind the scrim is genuinely
@@ -303,7 +359,7 @@ export default function HelpPanel({ open, onClose }) {
 
   const groups = GROUP_ORDER.map(g => ({
     group: g,
-    items: Object.entries(MODULE_HELP).filter(([, m]) => m.group === g),
+    items: Object.entries(MODULE_HELP).filter(([id, m]) => m.group === g && helpModuleVisible(id, nativeAiKind) && helpModuleOfferedInShell(id, native)),
   })).filter(g => g.items.length)
 
   return createPortal(
@@ -379,7 +435,7 @@ export default function HelpPanel({ open, onClose }) {
                   {t('help.goodToKnow')}
                 </div>
                 <ul className="mt-1.5 space-y-1">
-                  {TIPS.map((tip, i) => <li key={i} className="text-xs text-ink-600 dark:text-parchment-300/80">✦ {tip}</li>)}
+                  {TIPS.map((tip, i) => <li key={i} className="text-xs text-ink-600 dark:text-parchment-300/80">✦ {localizedByIndex(t, 'help.tip', i, tip)}</li>)}
                 </ul>
               </div>
             </div>
@@ -388,7 +444,9 @@ export default function HelpPanel({ open, onClose }) {
           {!results && tab === 'faq' && (
             <div className="space-y-2">
               <FaqItem q={t('help.miFulfillHowTitle')} a={t('help.miFulfillHowBody')} />
-              {FAQ.map((f, i) => <FaqItem key={i} q={f.q} a={f.a} />)}
+              <FaqItem q={t('help.miWeekdayMassTitle')} a={t('help.miWeekdayMassBody')} />
+              <FaqItem q={t('help.packetTitle')} a={t('help.packetBody')} />
+              {FAQ.filter(f => helpFaqVisible(f.q, nativeAiKind) && helpFaqOfferedInShell(f.q, native)).map((f, i) => <FaqItem key={i} q={f.q} a={f.a} />)}
             </div>
           )}
 
@@ -406,7 +464,7 @@ export default function HelpPanel({ open, onClose }) {
                 <tbody>
                   {ROLE_TABLE.map((r, i) => (
                     <tr key={i} className={i % 2 ? 'bg-white/50 dark:bg-ink-800/40' : ''}>
-                      <td className="px-3 py-2 text-ink-600 dark:text-parchment-300/80">{r.area}</td>
+                      <td className="px-3 py-2 text-ink-600 dark:text-parchment-300/80">{r.area === AI_ROLE_AREA && aiClosed ? t('help.roleReportOnly') : localizedByIndex(t, 'help.role', i, r.area)}</td>
                       <td className="px-2 py-2"><YesNo yes={r.admin} /></td>
                       <td className="px-2 py-2"><YesNo yes={r.staff} /></td>
                       <td className="px-2 py-2"><YesNo yes={r.viewer} /></td>

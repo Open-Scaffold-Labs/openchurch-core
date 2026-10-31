@@ -21,13 +21,19 @@ import { getOrgProvider } from './orgProvider.js'
 import { LEDGER_APPLICATION, ledgerEnvironment, reserve, settle, voidReservation } from './ledger.js'
 import { recordAiEvent } from './audit.js'
 import { monitor } from '../monitoring/index.js'
+import { configuredNativeAiMode, effectiveNativeAiMode } from './nativeAiMode.js'
+import { hasActiveNativeAiConsent } from './nativeAiConsent.js'
 
 const STATUS = {
   ai_disabled: 403,
   ai_forbidden: 403,
   ai_unsupported_provider: 403,
+  ai_key_required: 409,
   ai_input_too_large: 413,
   ai_unavailable: 503,
+  ai_excluded: 403,
+  ai_consent_required: 403,
+  ai_consent_unknown: 503,
 }
 
 export function aiRefusal(code) {
@@ -43,8 +49,12 @@ const ENGLISH = {
   ai_disabled: 'AI features are paused for everyone right now.',
   ai_forbidden: 'This AI request is not allowed.',
   ai_unsupported_provider: "This feature isn't available with your parish's AI provider.",
+  ai_key_required: "Your parish hasn't added an AI key yet. An admin can add your parish's Anthropic or OpenAI API key in Settings.",
   ai_input_too_large: 'That is too much text for one AI request.',
   ai_unavailable: 'AI is not available right now.',
+  ai_excluded: 'AI is not part of this app. Nothing was sent.',
+  ai_consent_required: 'AI stays off until you agree. Nothing was sent.',
+  ai_consent_unknown: 'We could not confirm your AI agreement, so nothing was sent.',
 }
 export function refusalBody(err) {
   if (err?.refusal) return { status: err.httpStatus, body: { code: err.code, error: ENGLISH[err.code] ?? ENGLISH.ai_unavailable } }
@@ -67,6 +77,30 @@ export async function assertAiRunning() {
   if (await aiStopped()) throw aiRefusal('ai_disabled')
 }
 
+// Native shell admission. Separate from the platform stop above: a stopped
+// platform refuses everyone; this refuses only a call marked as coming from
+// the iOS shell. Web calls pass nativeShell false and skip it. A consent
+// lookup failure refuses (nothing is sent). The platform stop remains the
+// last check before the provider call.
+async function assertNativeShellAdmission(nativeShell, orgId, actorUserId, nativeCeiling = 'excluded') {
+  if (nativeShell !== true) return
+  if (effectiveNativeAiMode(configuredNativeAiMode(), nativeCeiling) !== 'consent-required') {
+    throw aiRefusal('ai_excluded')
+  }
+  const uid = Number(actorUserId)
+  const oid = Number(orgId)
+  if (!Number.isInteger(uid) || uid <= 0 || !Number.isInteger(oid) || oid <= 0) {
+    throw aiRefusal('ai_consent_required')
+  }
+  let active
+  try {
+    active = await hasActiveNativeAiConsent(oid, uid)
+  } catch {
+    throw aiRefusal('ai_consent_unknown')
+  }
+  if (!active) throw aiRefusal('ai_consent_required')
+}
+
 // Explicit routing. Returns { routeId, provider, apiKey, model }.
 export async function resolveRoute(orgId, capabilityId) {
   const cap = CAPABILITIES[capabilityId]
@@ -86,6 +120,9 @@ export async function resolveRoute(orgId, capabilityId) {
     }
     return { routeId, provider: org.provider, apiKey: org.apiKey, model: org.model || ROUTES[routeId].model, label: `${org.provider} (org key)` }
   }
+  // D-01 (R334-1): a BYOK-only capability has no platform route at all.
+  // No parish key is a setup step, not an outage, whatever the env holds.
+  if (cap.byokOnly) throw aiRefusal('ai_key_required')
   if (cap.managed === false) throw aiRefusal('ai_unsupported_provider')
   if (!process.env.ANTHROPIC_API_KEY) throw aiRefusal('ai_unavailable')
   return { routeId: cap.routeId, provider: ROUTES[cap.routeId].provider, apiKey: undefined, model: ROUTES[cap.routeId].model, label: 'anthropic' }
@@ -102,6 +139,7 @@ function assertClasses(routeId, cap) {
 // the caller can tell "never left" from "left and failed".
 async function callProvider(route, { system, messages, max_tokens, opts }, sent) {
   if (route.provider === 'openai') {
+    if (!route.apiKey) throw aiRefusal('ai_unavailable')
     let completion
     try {
       const client = new OpenAI({ apiKey: route.apiKey })
@@ -116,6 +154,9 @@ async function callProvider(route, { system, messages, max_tokens, opts }, sent)
     throw providerFailure(route.label, null)
   }
 
+  // Only the managed route may build a client from the environment; a
+  // parish route with no key of its own never falls back to it (R334-1).
+  if (!route.apiKey && ROUTES[route.routeId]?.credentialMode !== 'managed') throw aiRefusal('ai_unavailable')
   let message
   try {
     const client = route.apiKey ? new Anthropic({ apiKey: route.apiKey }) : new Anthropic()
@@ -138,8 +179,9 @@ async function callProvider(route, { system, messages, max_tokens, opts }, sent)
 // it is sent and audited in ochr_ai_audit (ai/ledger.js, ai/audit.js). Only
 // the in-app assistant passes it today (OSL AI plan P1). A parish's own key
 // (BYOK) is their bill and stays unaccounted, as before.
-export async function dispatch({ orgId, capabilityId, system, messages, maxTokens, accounting }) {
+export async function dispatch({ orgId, capabilityId, system, messages, maxTokens, accounting, nativeShell = false, actorUserId = null, nativeCeiling = 'excluded' }) {
   await assertAiRunning()
+  await assertNativeShellAdmission(nativeShell, orgId, actorUserId, nativeCeiling)
   const cap = CAPABILITIES[capabilityId]
   if (!cap) throw aiRefusal('ai_forbidden')
   const bytes = messages.reduce((n, m) => n + Buffer.byteLength(String(m.content ?? ''), 'utf8'), 0)
@@ -150,7 +192,7 @@ export async function dispatch({ orgId, capabilityId, system, messages, maxToken
   const opts = { timeout: cap.timeoutMs, maxRetries: 0 }
   const accounted = accounting && ROUTES[route.routeId]?.credentialMode === 'managed'
   if (accounted) {
-    return accountedCall({ orgId, capabilityId, cap, route, accounting, call: { system, messages, max_tokens, opts } })
+    return accountedCall({ orgId, capabilityId, cap, route, accounting, call: { system, messages, max_tokens, opts }, nativeShell, actorUserId, nativeCeiling })
   }
   // S7-F6 admission boundary. The early check above is a cheap fail-closed
   // short-circuit; THIS recheck is authoritative. It runs after every
@@ -159,7 +201,9 @@ export async function dispatch({ orgId, capabilityId, system, messages, maxToken
   // call. A stop committed after it cannot recall a request already sent:
   // the switch governs admission, not in-flight calls (bounded by the
   // capability timeout, maxRetries 0). No connection or lock is held
-  // across the network call.
+  // across the network call. The native-shell recheck is the await before
+  // that stop recheck; the platform stop stays last.
+  await assertNativeShellAdmission(nativeShell, orgId, actorUserId, nativeCeiling)
   await assertAiRunning()
   return callProvider(route, { system, messages, max_tokens, opts }, { value: false })
 }
@@ -176,7 +220,7 @@ export async function dispatch({ orgId, capabilityId, system, messages, maxToken
 // Any accounting or audit failure refuses (ai_unavailable) and is logged by
 // code only; a reservation that could not be finalised stays held, which is
 // the conservative direction.
-async function accountedCall({ orgId, capabilityId, cap, route, accounting, call }) {
+async function accountedCall({ orgId, capabilityId, cap, route, accounting, call, nativeShell, actorUserId, nativeCeiling }) {
   const scope = { application: LEDGER_APPLICATION, environment: ledgerEnvironment(), tenantId: String(orgId) }
   const meta = {
     application: scope.application, environment: scope.environment, tenantId: scope.tenantId,
@@ -201,6 +245,20 @@ async function accountedCall({ orgId, capabilityId, cap, route, accounting, call
   } catch (err) {
     try { await finish('denied', err?.code ?? 'ACCOUNTING_UNAVAILABLE') } catch (auditErr) { throw unavailable('audit_denied', auditErr) }
     throw unavailable('reserve', err)
+  }
+
+  // Native-shell recheck before the platform stop. A refusal voids the
+  // reservation (known zero). The platform stop below stays the last
+  // await before the send.
+  try {
+    await assertNativeShellAdmission(nativeShell, orgId, actorUserId, nativeCeiling)
+  } catch (err) {
+    if (!err?.refusal) throw err
+    try {
+      await voidReservation({ scope, id })
+      await finish('denied', err.code)
+    } catch (voidErr) { throw unavailable('void', voidErr) }
+    throw err
   }
 
   // Authoritative admission check. Nothing awaited between it and the send.
@@ -240,11 +298,17 @@ async function accountedCall({ orgId, capabilityId, cap, route, accounting, call
 
 // For availability probes: same decision as dispatch, no provider call.
 export async function available(orgId, capabilityId) {
+  return (await availability(orgId, capabilityId)).available
+}
+
+// Same, with the refusal code when unavailable, so a surface can tell
+// "add your parish's key" (ai_key_required) apart from paused or broken.
+export async function availability(orgId, capabilityId) {
   try {
     await assertAiRunning()
     await resolveRoute(orgId, capabilityId)
-    return true
-  } catch {
-    return false
+    return { available: true, code: null }
+  } catch (err) {
+    return { available: false, code: err?.refusal ? err.code : 'ai_unavailable' }
   }
 }

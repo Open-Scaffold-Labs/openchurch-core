@@ -163,12 +163,14 @@ describe('PATCH /api/mass-intentions/:id stipend', () => {
     expect(await storedStipend(id)).toBe('10.00')
   })
 
-  it('clears the offering when the stipend is JSON null', async () => {
+  // SP-133 (2026-10-23): a recorded offering is no longer cleared by an
+  // ordinary edit — that re-opened hard delete. Admin correction may.
+  it('refuses to clear a recorded offering with JSON null on an ordinary edit', async () => {
     const id = await withAmount(10, 'patch null')
     const res = await patch(id, { stipend: null })
-    expect(res.status).toBe(200)
-    expect(res.body.stipend).toBeNull()
-    expect(await storedStipend(id)).toBeNull()
+    expect(res.status).toBe(409)
+    expect(res.body.code).toBe('offering_clear_refused')
+    expect(await storedStipend(id)).toBe('10.00')
   })
 
   it('keeps the offering when the stipend is omitted', async () => {

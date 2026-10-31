@@ -100,6 +100,18 @@ test('pull_request: unreferenced doc only -> docs-only', () =>
 test('pull_request: new unreferenced top-level .md -> docs-only', () =>
   expectScope('pull_request', (root) => put(root, 'ZZFIX-TOP-LEVEL-NOTE.md', 'x\n'), 'docs-only'))
 
+test('pull_request: unreferenced .cursor/ file only -> docs-only', () =>
+  expectScope('pull_request', (root) => put(root, '.cursor/rules/zzfix-rule.mdc', 'x\n'), 'docs-only'))
+
+test('pull_request: .cursor/ file + code -> full', () =>
+  expectScope('pull_request', (root) => {
+    put(root, '.cursor/rules/zzfix-rule.mdc', 'x\n')
+    put(root, 'server/src/app.js', 'export default 2\n')
+  }, 'full'))
+
+test('pull_request: .ai/ file only -> full (not on the allowlist)', () =>
+  expectScope('pull_request', (root) => put(root, '.ai/zzfix-note.md', 'x\n'), 'full'))
+
 test('pull_request: doc a test reads -> full', () =>
   expectScope('pull_request', (root) => put(root, 'docs/ZZFIX-READ-BY-TEST.md', '# edited\n'), 'full'))
 

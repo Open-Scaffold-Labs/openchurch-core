@@ -10,7 +10,7 @@
 //   POST   /api/invoices/:id/waive           → forgive some/all of the balance (ADMIN — pastor discretion)
 //   POST   /api/invoices/:id/payments        → record money in (deposit or balance)
 //   POST   /api/invoices/:id/payments/:paymentId/refund → mark a payment refunded (ADMIN)
-//   POST   /api/invoices/:id/cancel          → cancel (draft, or issued with no payments)
+//   POST   /api/invoices/:id/cancel          → cancel (draft, or issued with no payments) — admin
 //   DELETE /api/invoices/:id                 → delete (draft only — issued invoices are history)
 //
 // Mount (app.js), after funds:
@@ -169,15 +169,32 @@ async function normalizeLines(db, rawLines, orgId, { parishioner = false } = {})
 // caller's transaction; the row must already be locked (FOR UPDATE) by the
 // caller. Terminal states (waived, cancelled, draft) keep their status —
 // only issued/partially_paid/paid float with the payment sum.
-async function recomputePaid(db, invoiceId, orgId) {
+export async function recomputePaid(db, invoiceId, orgId) {
   const { rows: [inv] } = await db.query(
     `SELECT status, total FROM ochr_invoices WHERE id = $1 AND organization_id = $2`,
     [invoiceId, orgId]
   )
   const { rows: [sum] } = await db.query(
-    `SELECT COALESCE(SUM(amount), 0) AS paid
-       FROM ochr_invoice_payments
-      WHERE invoice_id = $1 AND organization_id = $2 AND refunded_at IS NULL`,
+    // Paid = payments − append-only refund records (130). Deposits: a
+    // refunded deposit is no longer paid; a forfeited one stays paid; a
+    // reversed receipt was never paid (Ledger P2-1).
+    `SELECT COALESCE(SUM(p.amount), 0)
+            - COALESCE((SELECT SUM(r.amount) FROM ochr_invoice_payment_refunds r
+                         WHERE r.invoice_id = $1 AND r.organization_id = $2), 0)
+            - COALESCE((SELECT SUM(CASE WHEN f.kind = 'reversal' THEN -f.amount ELSE f.amount END)
+                          FROM ochr_deposit_facts f
+                          LEFT JOIN ochr_deposit_facts o
+                                 ON o.id = f.reverses_fact_id AND o.organization_id = f.organization_id
+                         WHERE f.invoice_id = $1 AND f.organization_id = $2
+                           AND COALESCE(o.kind, f.kind) = 'refunded'), 0)
+            - COALESCE((SELECT SUM(f.amount)
+                          FROM ochr_deposit_facts f
+                          JOIN ochr_deposit_facts o
+                            ON o.id = f.reverses_fact_id AND o.organization_id = f.organization_id
+                         WHERE f.invoice_id = $1 AND f.organization_id = $2
+                           AND f.kind = 'reversal' AND o.kind = 'received'), 0) AS paid
+       FROM ochr_invoice_payments p
+      WHERE p.invoice_id = $1 AND p.organization_id = $2`,
     [invoiceId, orgId]
   )
   const paidCents = toCents(sum.paid) ?? 0
@@ -279,11 +296,28 @@ router.get('/:id', async (req, res) => {
         [id, req.organizationId]
       ),
       pool.query(
-        `SELECT id, amount, method, payment_ref, is_deposit, received_at,
-                received_by, refunded_at, refund_ref, notes
-           FROM ochr_invoice_payments
-          WHERE invoice_id = $1 AND organization_id = $2
-          ORDER BY received_at, id`,
+        // refunded_at / refund_ref come from the append-only records (130);
+        // a deposit reads as refunded only once it is fully refunded.
+        `SELECT p.id, p.amount, p.method, p.payment_ref, p.is_deposit, p.received_at,
+                p.received_by, p.notes,
+                COALESCE(r.refunded_at, d.refunded_at) AS refunded_at,
+                r.refund_ref,
+                d.refunded AS deposit_refunded
+           FROM ochr_invoice_payments p
+           LEFT JOIN ochr_invoice_payment_refunds r
+                  ON r.payment_id = p.id AND r.organization_id = p.organization_id
+           LEFT JOIN LATERAL (
+             SELECT SUM(CASE WHEN f.kind = 'reversal' THEN -f.amount ELSE f.amount END) AS refunded,
+                    CASE WHEN SUM(CASE WHEN f.kind = 'reversal' THEN -f.amount ELSE f.amount END) >= p.amount
+                         THEN MAX(f.created_at) END AS refunded_at
+               FROM ochr_deposit_facts f
+               LEFT JOIN ochr_deposit_facts o
+                      ON o.id = f.reverses_fact_id AND o.organization_id = f.organization_id
+              WHERE f.payment_id = p.id AND f.organization_id = p.organization_id
+                AND COALESCE(o.kind, f.kind) = 'refunded'
+           ) d ON p.is_deposit
+          WHERE p.invoice_id = $1 AND p.organization_id = $2
+          ORDER BY p.received_at, p.id`,
         [id, req.organizationId]
       ),
     ])
@@ -638,6 +672,19 @@ router.post('/:id/payments', async (req, res) => {
        Boolean(b.is_deposit), req.user.id,
        (typeof b.notes === 'string' && b.notes.trim()) || null]
     )
+    // A deposit is held in 2300 from the day it arrives (130). Same
+    // transaction, deterministic key: one received fact per payment.
+    if (b.is_deposit) {
+      await client.query(
+        `INSERT INTO ochr_deposit_facts
+           (organization_id, invoice_id, payment_id, kind, amount, account_code, effective_date,
+            recorded_by_user_id, idempotency_key)
+         SELECT $1, $2, $3::bigint, 'received', $4, '2300', p.received_at::date, u.id, 'payment:' || $3::bigint::text
+           FROM ochr_invoice_payments p
+           LEFT JOIN ochr_users u ON u.id = $5 AND u.organization_id = $1
+          WHERE p.id = $3::bigint`,
+        [req.organizationId, id, payment.id, fromCents(amountCents), req.user.id])
+    }
     const { status } = await recomputePaid(client, id, req.organizationId)
     await client.query('COMMIT')
     res.status(201).json({ id: payment.id, status })
@@ -662,12 +709,31 @@ router.post('/:id/payments/:paymentId/refund', requireRole('admin'), async (req,
       `SELECT 1 FROM ochr_invoices WHERE id = $1 AND organization_id = $2 FOR UPDATE`,
       [id, req.organizationId]
     )
+    const { rows: [p] } = await client.query(
+      `SELECT id, amount, is_deposit, refunded_at FROM ochr_invoice_payments
+        WHERE id = $3 AND invoice_id = $1 AND organization_id = $2 FOR UPDATE`,
+      [id, req.organizationId, paymentId]
+    )
+    if (!p || p.refunded_at) {
+      await client.query('ROLLBACK')
+      return res.status(404).json({ error: 'Payment not found or already refunded' })
+    }
+    // Deposits are refunded by request and another admin's approval (130).
+    if (p.is_deposit) {
+      await client.query('ROLLBACK')
+      return res.status(409).json({ code: 'deposit_refund_requires_request',
+        error: 'A deposit refund is requested, then approved by another admin. Use Deposits held.' })
+    }
+    // Append-only record; the payment row is no longer rewritten (130).
     const { rowCount } = await client.query(
-      `UPDATE ochr_invoice_payments
-          SET refunded_at = NOW(), refund_ref = $4
-        WHERE id = $3 AND invoice_id = $1 AND organization_id = $2 AND refunded_at IS NULL`,
-      [id, req.organizationId, paymentId,
-       (typeof req.body?.refund_ref === 'string' && req.body.refund_ref.trim()) || null]
+      `INSERT INTO ochr_invoice_payment_refunds
+         (organization_id, invoice_id, payment_id, amount, refund_ref, recorded_by_user_id, recorded_by_name)
+       SELECT $2, $1, $3, $4, $5, u.id, u.name
+         FROM (SELECT 1) one
+         LEFT JOIN ochr_users u ON u.id = $6 AND u.organization_id = $2
+       ON CONFLICT (organization_id, payment_id) DO NOTHING`,
+      [id, req.organizationId, paymentId, p.amount,
+       (typeof req.body?.refund_ref === 'string' && req.body.refund_ref.trim()) || null, req.user.id]
     )
     if (!rowCount) {
       await client.query('ROLLBACK')
@@ -686,7 +752,8 @@ router.post('/:id/payments/:paymentId/refund', requireRole('admin'), async (req,
 })
 
 // POST /api/invoices/:id/cancel — drafts always; issued only if untouched.
-router.post('/:id/cancel', async (req, res) => {
+// Admin-only (José, 2026-10-23), like waive and payment refund.
+router.post('/:id/cancel', requireRole('admin'), async (req, res) => {
   const id = requireIntParam(req, res); if (id === null) return
   try {
     const { rowCount } = await pool.query(

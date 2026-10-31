@@ -36,7 +36,7 @@ export default function DailyVerseCard({ index = 0 }) {
             <div className="w-8 h-8 rounded-lg bg-church-900/[0.06] dark:bg-brass-500/10 border border-church-900/10 dark:border-brass-500/20 flex items-center justify-center">
               <BookOpen size={15} className="text-church-700 dark:text-brass-200" />
             </div>
-            <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-ink-500 dark:text-parchment-300/70">
+            <span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-ink-500 dark:text-parchment-300/70">
               {t('verse.title')}
             </span>
           </div>
@@ -51,10 +51,10 @@ export default function DailyVerseCard({ index = 0 }) {
         </div>
 
         {loading ? (
-          <div className="space-y-2.5 animate-pulse">
-            <div className="h-4 bg-parchment-300/50 dark:bg-parchment-100/10 rounded w-full" />
-            <div className="h-4 bg-parchment-300/50 dark:bg-parchment-100/10 rounded w-5/6" />
-            <div className="h-4 bg-parchment-300/50 dark:bg-parchment-100/10 rounded w-4/6" />
+          <div className="space-y-2.5" aria-hidden="true">
+            <div className="h-4 skeleton-shimmer rounded w-full" />
+            <div className="h-4 skeleton-shimmer rounded w-5/6" />
+            <div className="h-4 skeleton-shimmer rounded w-4/6" />
           </div>
         ) : (
           <>

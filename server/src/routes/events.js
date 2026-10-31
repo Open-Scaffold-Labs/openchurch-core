@@ -497,9 +497,33 @@ router.post('/import', async (req, res) => {
   }
 })
 
+// The season, color and feast for a PATCH that changes the date. R340-2: each
+// field the body leaves out is derived from the new date on its own; each
+// field the body sends (an intentional null included) is kept as sent. A
+// cleared date clears the omitted ones: no date has no liturgical day. {} when
+// the body has no date (ordinary partial update) or nothing is omitted.
+const LIT_FIELDS = ['liturgical_season', 'liturgical_color', 'feast_name']
+async function liturgicalForNewDate(body, orgId) {
+  if (!body || body.date === undefined) return {}
+  const omitted = LIT_FIELDS.filter((k) => body[k] === undefined)
+  if (!omitted.length) return {}
+  let day = {}
+  if (body.date) {
+    const ctx = await resolveLiturgicalContext(String(body.date).slice(0, 10), orgId)
+    day = { liturgical_season: ctx.season, liturgical_color: ctx.color, feast_name: ctx.feast_name }
+  }
+  return Object.fromEntries(omitted.map((k) => [k, day[k] ?? null]))
+}
+
 // PATCH /api/events/:id
 router.patch('/:id', async (req, res) => {
   const id = requireIntParam(req, res); if (id === null) return
+  // A new date with none of season, color or feast in the body: stamp them
+  // from the date, as POST does. Without this a moved event kept its old
+  // date's season, which the Events list, Check-in and the event reminder
+  // then repeated. Each of the three sent explicitly still wins on its own. Resolved
+  // BEFORE the client is taken, for the reason given at POST.
+  const derived = await liturgicalForNewDate(req.body, req.organizationId)
   const client = await pool.connect()
   let updated, newlyAdded = []
   try {
@@ -517,9 +541,10 @@ router.patch('/:id', async (req, res) => {
     const PATCHABLE = ['title', 'service_division', 'date', 'time', 'location', 'liturgical_season', 'liturgical_color', 'feast_name']
     const sets = []
     const vals = []
+    const body = { ...req.body, ...derived }
     for (const col of PATCHABLE) {
-      if (req.body[col] !== undefined) {
-        vals.push(req.body[col] === '' ? null : req.body[col])
+      if (body[col] !== undefined) {
+        vals.push(body[col] === '' ? null : body[col])
         sets.push(`${col} = $${vals.length}`)
       }
     }

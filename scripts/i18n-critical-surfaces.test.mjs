@@ -73,7 +73,7 @@ describe('I18N-L1-13 repo gate', () => {
     assert.equal(tables.en.get('conflicts.scanFailedStatus'), 'Scan failed ({status})')
   })
 
-  it('ScheduleConflicts primary chrome is on t(); meridiem and the row phrase stay held', () => {
+  it('ScheduleConflicts primary chrome and the row phrase are on t(); meridiem stays held', () => {
     const page = repoSources().find(s => s.file === 'client/src/pages/ScheduleConflicts.jsx')
     const scan = scanSource(page.file, page.src, 'schedule')
     const ids = new Set(scan.findings.map(f => f.id))
@@ -84,17 +84,19 @@ describe('I18N-L1-13 repo gate', () => {
       'client/src/pages/ScheduleConflicts.jsx|return|Week of {...}',
       'client/src/pages/ScheduleConflicts.jsx|jsx-text|across',
       'client/src/pages/ScheduleConflicts.jsx|jsx-text|conflict',
+      // App Review 2026-10-26: the row phrase moved onto conflicts.doubleBooked.
+      'client/src/pages/ScheduleConflicts.jsx|jsx-text|— double-booked',
     ]) {
       assert.equal(ids.has(gone), false, gone)
     }
     for (const held of [
       'client/src/pages/ScheduleConflicts.jsx|meridiem|am',
       'client/src/pages/ScheduleConflicts.jsx|meridiem|pm',
-      'client/src/pages/ScheduleConflicts.jsx|jsx-text|— double-booked',
     ]) {
       assert.equal(ids.has(held), true, [...ids].join('\n'))
     }
-    assert.equal(ids.size, 3, [...ids].join('\n'))
+    assert.equal(ids.size, 2, [...ids].join('\n'))
+    assert.ok(scan.resolvedKeys.some(k => k.key === 'conflicts.doubleBooked'), 'conflicts.doubleBooked')
     for (const key of CONFLICT_KEYS) {
       assert.ok(scan.resolvedKeys.some(k => k.key === key), key)
     }

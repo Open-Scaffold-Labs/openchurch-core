@@ -1,6 +1,7 @@
 import { Component } from 'react'
 import { AlertTriangle, RotateCw } from 'lucide-react'
 import { useOptionalLocale } from '../i18n'
+import { reportBoundary } from '../monitoring/clientCapture.js'
 
 // Top-level error boundary. Catches render-time errors anywhere in the
 // tree so a single broken component can't white-screen the whole app.
@@ -65,11 +66,7 @@ export default class ErrorBoundary extends Component {
   componentDidCatch(error, info) {
     // Structured log — when we eventually wire a monitoring SDK, this
     // is the call site that becomes Sentry.captureException etc.
-    console.error('[ErrorBoundary]', {
-      message: error?.message,
-      stack:   error?.stack,
-      componentStack: info?.componentStack,
-    })
+    reportBoundary('[ErrorBoundary]', error, info, 'ErrorBoundary')
   }
 
   handleReset = () => {

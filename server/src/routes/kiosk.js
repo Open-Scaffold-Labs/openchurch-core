@@ -22,6 +22,7 @@
 import { Router } from 'express'
 import crypto from 'crypto'
 import rateLimit from 'express-rate-limit'
+import { kioskTokenLimiter } from '../middleware/rateLimit.js'
 import pool from '../db.js'
 import { genSecurityCode, hashSecurityCode } from '../utils/pickupCode.js'
 import { monitor } from '../monitoring/index.js'
@@ -108,7 +109,7 @@ const checkinLimiter = rateLimit({
 // active rooms. Deliberately NO member roster — members come from the
 // query-gated /:token/members typeahead so a token holder can't slurp the
 // whole directory in one unauthenticated request.
-kioskPublicRouter.get('/:token', async (req, res) => {
+kioskPublicRouter.get('/:token', kioskTokenLimiter, async (req, res) => {
   try {
     const org = await orgForToken(req.params.token)
     if (!org) return res.status(404).json({ error: 'Kiosk not found' })

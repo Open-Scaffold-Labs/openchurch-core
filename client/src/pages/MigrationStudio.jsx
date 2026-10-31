@@ -35,7 +35,7 @@ function serverText(body, locale, fallback) {
   return body?.message?.[locale] ?? body?.message?.en ?? body?.error ?? fallback
 }
 import { useAuth } from '../context/AuthContext'
-import PageWrapper from '../components/PageWrapper'
+import PageWrapper, { PageHeader } from '../components/PageWrapper'
 import { useConfirm } from '../components/ConfirmProvider'
 import { isWorkbook, isLegacyWorkbook, readWorkbook, interpretWorkbook } from '../utils/workbook'
 
@@ -189,7 +189,7 @@ function Welcome({ history, historyFailed, retention, onStart, reload }) {
         <p className="text-sm text-ink-600 dark:text-parchment-300/80">{t('mig.startIntro')}</p>
         <div className="flex flex-wrap items-end gap-3">
           <label className="block">
-            <span className="block text-[10px] font-semibold uppercase tracking-widest text-ink-500 dark:text-parchment-300/70 mb-1">{t('mig.whatKind')}</span>
+            <span className="block text-[11px] font-semibold uppercase tracking-widest text-ink-500 dark:text-parchment-300/70 mb-1">{t('mig.whatKind')}</span>
             <select value={kind} onChange={e => setKind(e.target.value)} className={`${inputCls} w-auto`}>
               {KINDS.map(k => <option key={k} value={k}>{t(`mig.kind.${k}`)}</option>)}
             </select>
@@ -233,7 +233,7 @@ function Welcome({ history, historyFailed, retention, onStart, reload }) {
             </p>
             {reading.read.other_sheets.length > 0 && (
               <label className="block">
-                <span className="block text-[10px] font-semibold uppercase tracking-widest text-ink-500 dark:text-parchment-300/70 mb-1">
+                <span className="block text-[11px] font-semibold uppercase tracking-widest text-ink-500 dark:text-parchment-300/70 mb-1">
                   {t('mig.readOtherTabs')}
                 </span>
                 <select
@@ -280,7 +280,7 @@ function Welcome({ history, historyFailed, retention, onStart, reload }) {
           <div className="space-y-2">
             {history.map(b => (
               <div key={b.id} className={`${cardCls} px-4 py-3 flex flex-wrap items-center gap-3`}>
-                <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-wider ${BATCH_TONE[b.status]}`}>
+                <span className={`px-2 py-0.5 rounded-full text-[11px] font-semibold uppercase tracking-wider ${BATCH_TONE[b.status]}`}>
                   {t(`mig.batch.${b.status}`)}
                 </span>
                 <span className="flex-1 min-w-0 text-sm text-ink-800 dark:text-parchment-100 truncate">
@@ -520,7 +520,7 @@ function BatchWorkspace({ batchId, onExit }) {
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
-                <tr className="text-left text-[10px] font-semibold uppercase tracking-widest text-ink-500 dark:text-parchment-300/70">
+                <tr className="text-left text-[11px] font-semibold uppercase tracking-widest text-ink-500 dark:text-parchment-300/70">
                   <th className="py-2 pr-3">{t('mig.colSource')}</th>
                   <th className="py-2 pr-3">{t('mig.colSample')}</th>
                   <th className="py-2">{t('mig.colDest')}</th>
@@ -721,9 +721,9 @@ export default function MigrationStudio() {
   useEffect(() => { if (!batchId) loadHistory() }, [batchId, loadHistory])
 
   return (
-    <PageWrapper>
+    <PageWrapper type="list">
       <div className="mb-5">
-        <h1 className="font-display text-2xl font-semibold text-church-900 dark:text-parchment-50">{t('mig.title')}</h1>
+        <PageHeader title={t('mig.title')} />
         <p className="text-sm text-ink-500 dark:text-parchment-300/70 mt-0.5">{t('mig.subtitle')}</p>
       </div>
       {batchId ? (

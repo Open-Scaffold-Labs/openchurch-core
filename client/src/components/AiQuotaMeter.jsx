@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Feather, Infinity as InfinityIcon } from 'lucide-react'
 import { apiUrl } from '../api'
+import { nativeAiFetchInit } from '../native/nativeAiCeiling'
 import { useToast } from './ToastProvider'
 import { useLocale } from '../i18n'
 
@@ -46,7 +47,7 @@ export default function AiQuotaMeter({ refreshKey = 0 }) {
   useEffect(() => {
     let cancelled = false
     setLoading(true)
-    fetch(apiUrl('/api/ai/quota'))
+    fetch(apiUrl('/api/ai/quota'), nativeAiFetchInit())
       .then(async r => {
         if (!r.ok) throw new Error()
         return r.json()
@@ -90,6 +91,17 @@ export default function AiQuotaMeter({ refreshKey = 0 }) {
   // failed — the meter is decorative; a missing one shouldn't push
   // the layout around or imply an error.
   if (loading || err || !data) return null
+
+  // Own key (José, 2026-10-23): the parish pays its own provider, so there
+  // is no OpenChurch monthly limit to show — say so, with no count or bar.
+  if (data.own_key === true) {
+    return (
+      <div data-testid="ai-quota-own-key" className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-full bg-brass-50 dark:bg-brass-900/20 border border-brass-200/70 dark:border-brass-800/40 text-xs">
+        <InfinityIcon size={12} className="text-brass-700 dark:text-brass-300" />
+        <span className="font-semibold text-brass-700 dark:text-brass-300">{t('quota.ownKey')}</span>
+      </div>
+    )
+  }
 
   // Unlimited plan — short pill, no bar.
   if (data.limit === null) {
@@ -144,7 +156,7 @@ export default function AiQuotaMeter({ refreshKey = 0 }) {
           (localStorage flag) — this keeps the signal visible every
           time the user looks at the meter after that. */}
       {warning && (
-        <p className={`text-[10px] font-medium leading-tight ${c.text}`}>
+        <p className={`text-[11px] font-medium leading-tight ${c.text}`}>
           {data.exceeded
             ? `${t('quota.reached')}${reset ? ` · ${t('quota.resets', { date: reset })}` : ''}`
             : `${t('quota.left', { n: left })}${reset ? ` · ${t('quota.resets', { date: reset })}` : ''}`}

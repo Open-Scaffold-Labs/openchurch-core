@@ -4,7 +4,7 @@ import { motion } from 'framer-motion'
 import {
   ArrowLeft, AlertTriangle, Download, Mail, FileText, Inbox,
 } from 'lucide-react'
-import PageWrapper from '../components/PageWrapper'
+import PageWrapper, { PageHeader } from '../components/PageWrapper'
 import EmptyState from '../components/EmptyState'
 import { SkeletonRowList } from '../components/Skeleton'
 import { useToast } from '../components/ToastProvider'
@@ -120,12 +120,12 @@ function downloadCsv(filename, csv) {
 }
 
 export default function FormResponses() {
+  const { t } = useLocale()
   const { id } = useParams()
   const navigate = useNavigate()
   const { user } = useAuth()
   const isAdmin  = user?.role === 'admin'
   const toast    = useToast()
-  const { t }    = useLocale()
 
   const [form, setForm]       = useState(null)
   const [responses, setResp]  = useState(null)
@@ -168,7 +168,7 @@ export default function FormResponses() {
       const csv = buildCsv(form, responses)
       const stamp = todayLocalISO() // local YYYY-MM-DD
       downloadCsv(`${form.slug}-responses-${stamp}.csv`, csv)
-      toast.info(`Exported ${responses.length} response${responses.length === 1 ? '' : 's'}`)
+      toast.info(t(responses.length === 1 ? 'forms.resp.exportedOne' : 'forms.resp.exportedMany', { n: responses.length }))
     } catch (e) {
       toast.error(t('form.submitFail'))
     }
@@ -176,12 +176,12 @@ export default function FormResponses() {
 
   if (!isAdmin) {
     return (
-      <PageWrapper>
+      <PageWrapper type="record">
         <div className="max-w-2xl mx-auto py-16">
           <EmptyState
             icon={AlertTriangle}
-            title="Admins only"
-            body="The response inbox is restricted to admins."
+            title={t('forms.resp.admins_only')}
+            body={t('forms.resp.the_response_inbox_is_restricted')}
           />
         </div>
       </PageWrapper>
@@ -190,7 +190,7 @@ export default function FormResponses() {
 
   if (loading) {
     return (
-      <PageWrapper>
+      <PageWrapper type="record">
         <div className="max-w-4xl mx-auto space-y-4">
           <SkeletonRowList count={4} />
         </div>
@@ -200,12 +200,12 @@ export default function FormResponses() {
 
   if (err === 'not-found') {
     return (
-      <PageWrapper>
+      <PageWrapper type="record">
         <div className="max-w-2xl mx-auto py-16">
           <EmptyState
             icon={AlertTriangle}
-            title="Form not found"
-            body="This form may have been deleted or belongs to another organization."
+            title={t('forms.resp.form_not_found')}
+            body={t('forms.resp.this_form_may_have_been')}
             action={{ label: 'Back to forms', onClick: () => navigate('/forms') }}
           />
         </div>
@@ -215,7 +215,7 @@ export default function FormResponses() {
 
   if (err) {
     return (
-      <PageWrapper>
+      <PageWrapper type="record">
         <div className="max-w-2xl mx-auto py-16">
           <EmptyState
             icon={AlertTriangle}
@@ -229,7 +229,7 @@ export default function FormResponses() {
   }
 
   return (
-    <PageWrapper>
+    <PageWrapper type="record">
       <div className="max-w-4xl mx-auto space-y-6">
         {/* Header */}
         <motion.div
@@ -240,18 +240,15 @@ export default function FormResponses() {
             to="/forms"
             className="inline-flex items-center gap-1.5 text-xs font-medium text-ink-500 dark:text-parchment-300/70 hover:text-ink-900 dark:hover:text-parchment-100 transition-colors mb-3"
           >
-            <ArrowLeft size={12} /> All forms
+            <ArrowLeft size={12} /> {t('forms.resp.all_forms')}
           </Link>
           <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4">
             <div>
-              <h1 className="font-display text-3xl font-semibold text-ink-900 dark:text-parchment-50 tracking-tight inline-flex items-center gap-3">
-                <FileText size={22} className="text-brass-600 dark:text-brass-300" />
-                {form.title}
-              </h1>
-              <p className="text-sm text-ink-500 dark:text-parchment-300/70 mt-1">
-                {total} response{total === 1 ? '' : 's'}
-                {showingTruncated && ` (showing the latest ${responses.length})`}
-              </p>
+              <PageHeader
+                title={form.title}
+                leading={<FileText size={22} />}
+                subtitle={`${total} response${total === 1 ? '' : 's'}${showingTruncated ? ` (showing the latest ${responses.length})` : ''}`}
+              />
             </div>
             {responses.length > 0 && (
               <button
@@ -261,7 +258,7 @@ export default function FormResponses() {
               >
                 <Download size={14} /> Export CSV
                 {showingTruncated && (
-                  <span className="text-[10px] font-normal opacity-80">(latest {responses.length})</span>
+                  <span className="text-[11px] font-normal opacity-80">(latest {responses.length})</span>
                 )}
               </button>
             )}
@@ -272,7 +269,7 @@ export default function FormResponses() {
         {responses.length === 0 ? (
           <EmptyState
             icon={Inbox}
-            title="No responses yet"
+            title={t('forms.resp.no_responses_yet')}
             body={`Share the public link from the form list to start collecting responses for "${form.title}".`}
           />
         ) : (

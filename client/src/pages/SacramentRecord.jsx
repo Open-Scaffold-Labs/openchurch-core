@@ -1,6 +1,6 @@
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { ChevronLeft, FileText, History, Loader2, PenLine, RotateCcw, ShieldOff } from 'lucide-react'
-import PageWrapper from '../components/PageWrapper'
+import PageWrapper, { PageHeader } from '../components/PageWrapper'
 import LoadFailure from '../components/LoadFailure'
 import LoadState from '../components/LoadState'
 import { useAuth } from '../context/AuthContext'
@@ -179,12 +179,12 @@ export default function SacramentRecord() {
   }
 
   if (record.state === 'loading') {
-    return <PageWrapper><div className="flex justify-center py-24">
+    return <PageWrapper type="record"><div className="flex justify-center py-24">
       <Loader2 size={22} className="animate-spin text-brass-600" /></div></PageWrapper>
   }
   if (record.state === 'failed') {
     return (
-      <PageWrapper>
+      <PageWrapper type="record">
         <div className="max-w-2xl mx-auto py-10 space-y-4">
           <LoadFailure cause={record.error} onRetry={record.reload} retrying={record.retrying} />
           <Link to="/register" className="tap inline-flex items-center gap-1 text-sm text-church-700 dark:text-brass-300 hover:underline">
@@ -219,24 +219,21 @@ export default function SacramentRecord() {
   const KIND_LABEL = { correction: 'record.k.correction', void: 'record.k.void', restore: 'record.k.restore' }
 
   return (
-    <PageWrapper>
+    <PageWrapper type="record">
       <div className="max-w-2xl mx-auto space-y-6">
         <div className="flex items-center justify-between gap-3">
           <Link to="/register" className="tap inline-flex items-center gap-1 text-sm text-ink-600 dark:text-parchment-200 hover:text-church-700 dark:hover:text-brass-300">
             <ChevronLeft size={16} /> {t('cert.back')}
           </Link>
           {isVoid ? (
-            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest bg-parchment-200 text-ink-600 dark:bg-ink-800 dark:text-parchment-200">
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold uppercase tracking-widest bg-parchment-200 text-ink-600 dark:bg-ink-800 dark:text-parchment-200">
               <ShieldOff size={12} aria-hidden="true" /> {t('record.void')}
             </span>
           ) : null}
         </div>
 
         <div>
-          <h1 className="font-display text-3xl font-bold text-ink-900 dark:text-parchment-50">
-            {t(`sac.${r.type}`)}
-          </h1>
-          <p className="text-sm text-ink-500 dark:text-parchment-300/70 mt-1">{t('record.sub')}</p>
+          <PageHeader title={t(`sac.${r.type}`)} subtitle={t('record.sub')} />
         </div>
 
         {/* The write is on the server; what follows is what we last read.

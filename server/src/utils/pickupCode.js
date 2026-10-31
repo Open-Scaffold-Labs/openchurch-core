@@ -18,20 +18,18 @@
 // hashing so comparison is case-insensitive on the way back in.
 
 import crypto from 'crypto'
+import { requireSigningSecret, usableSecret } from '../auth/signingSecrets.js'
 
 const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'
 
-// Server-side pepper (HMAC key), kept out of the DB. Required in production —
-// we fail closed rather than silently fall back to a public constant that
-// would defeat the whole point of hashing a low-entropy code. Dev/test may
-// run without it (fixed fallback + a loud warning), mirroring auth.js's
-// JWT_SECRET handling.
-const PEPPER = process.env.CHECKIN_CODE_PEPPER
-if (process.env.NODE_ENV === 'production' && !PEPPER) {
-  throw new Error('CHECKIN_CODE_PEPPER must be set in production')
-}
-const CODE_KEY = PEPPER || 'dev-only-checkin-pepper-change-me'
-if (!PEPPER) {
+// Server-side pepper (HMAC key), kept out of the DB. Required on any
+// production-like runtime (NODE_ENV=production OR VERCEL_ENV
+// production/preview) — a missing, blank, or known-dev pepper there
+// throws rather than falling back to a public constant that would defeat
+// the whole point of hashing a low-entropy code. Dev/test may run
+// without it (fixed fallback + a loud warning), mirroring auth.js.
+const CODE_KEY = requireSigningSecret('CHECKIN_CODE_PEPPER', 'dev-only-checkin-pepper-change-me')
+if (!usableSecret(process.env.CHECKIN_CODE_PEPPER)) {
   console.warn('[pickupCode] CHECKIN_CODE_PEPPER not set — using insecure dev pepper')
 }
 

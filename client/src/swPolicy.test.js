@@ -5,7 +5,7 @@
 // Each block names the parish consequence, not the mechanism, because that is
 // what a future change has to keep true.
 import { describe, it, expect } from 'vitest'
-import { createCachePolicy } from './swPolicy.js'
+import { createCachePolicy, isRuntimeApiCacheable, isPublicApiPath } from './swPolicy.js'
 
 const CACHED = { body: 'yesterday' }
 const serve = policy => policy.onlyWhenOffline.cachedResponseWillBeUsed({ cachedResponse: CACHED })
@@ -90,5 +90,24 @@ describe('cache generation — a logout ends the generation its requests belong 
   it('requestWillFetch passes the request through untouched', async () => {
     const p = createCachePolicy(() => true)
     expect(await p.generationGuard.requestWillFetch({ request: 'REQ', state: {} })).toBe('REQ')
+  })
+})
+
+
+describe('N466-1 / N469-1 — public API paths are not runtime-cacheable', () => {
+  it('excludes /api/public page, bulletin, and groups (and the prefix)', () => {
+    expect(isPublicApiPath('/api/public/acme/page')).toBe(true)
+    expect(isPublicApiPath('/api/public/acme/bulletin')).toBe(true)
+    expect(isPublicApiPath('/api/public/acme/groups')).toBe(true)
+    expect(isPublicApiPath('/api/public')).toBe(true)
+    expect(isPublicApiPath('/api/publicly-not')).toBe(false)
+    expect(isRuntimeApiCacheable('/api/public/acme/page')).toBe(false)
+    expect(isRuntimeApiCacheable('/api/public/acme/bulletin')).toBe(false)
+    expect(isRuntimeApiCacheable('/api/public/acme/groups')).toBe(false)
+  })
+
+  it('still caches ordinary authenticated API reads', () => {
+    expect(isRuntimeApiCacheable('/api/clients')).toBe(true)
+    expect(isRuntimeApiCacheable('/api/daily-verse')).toBe(true)
   })
 })

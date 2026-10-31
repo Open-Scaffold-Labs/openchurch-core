@@ -1,6 +1,6 @@
 import { motion } from 'framer-motion'
 import { Bell, Clock, AlertTriangle, Loader2 } from 'lucide-react'
-import PageWrapper from '../components/PageWrapper'
+import PageWrapper, { PageHeader } from '../components/PageWrapper'
 import EmptyState from '../components/EmptyState'
 import LoadState from '../components/LoadState'
 import { useAuth } from '../context/AuthContext'
@@ -131,7 +131,7 @@ export default function Notifications() {
 
   if (!isAdmin) {
     return (
-      <PageWrapper>
+      <PageWrapper type="list">
         <div className="max-w-2xl mx-auto py-16">
           <EmptyState icon={AlertTriangle} title={t('np.adminsOnly')}
             body={t('np.adminsBody')} />
@@ -142,7 +142,7 @@ export default function Notifications() {
 
   if (loading) {
     return (
-      <PageWrapper>
+      <PageWrapper type="list">
         <div role="status" aria-label={t('np.loading')} className="flex items-center justify-center py-24">
           <Loader2 size={20} className="animate-spin text-church-700 dark:text-brass-300" aria-hidden="true" />
         </div>
@@ -173,7 +173,7 @@ export default function Notifications() {
       <div className="flex items-center gap-2 shrink-0">
         <time className="text-[11px] text-ink-500 dark:text-parchment-300/70">{when}</time>
         {status && (
-          <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-wider ${STATUS_STYLES[status] || FALLBACK_STATUS_STYLE}`}>
+          <span className={`px-2 py-0.5 rounded-full text-[11px] font-semibold uppercase tracking-wider ${STATUS_STYLES[status] || FALLBACK_STATUS_STYLE}`}>
             {statusLabel(status, t)}
           </span>
         )}
@@ -182,16 +182,10 @@ export default function Notifications() {
   )
 
   return (
-    <PageWrapper>
+    <PageWrapper type="list">
       <div className="max-w-3xl mx-auto space-y-6">
         <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.25 }}>
-          <div className="flex items-center gap-2">
-            <Bell size={18} className="text-brass-600 dark:text-brass-300" aria-hidden="true" />
-            <h1 className="font-display text-3xl font-semibold text-ink-900 dark:text-parchment-50 tracking-tight">{t('np.title')}</h1>
-          </div>
-          <p className="text-sm text-ink-500 dark:text-parchment-300/70 mt-1">
-            {t('np.subtitle')}
-          </p>
+          <PageHeader title={t('np.title')} leading={<Bell size={18} />} subtitle={t('np.subtitle')} />
         </motion.div>
 
         {/* Upcoming */}

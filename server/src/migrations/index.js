@@ -138,6 +138,30 @@ import { up as stage7AiStopAndPlaintextGuard } from './116-stage7-ai-stop-and-pl
 import { up as neutralizeDemoAdmin } from './117-neutralize-demo-admin.js'
 import { up as viewsSecurityInvoker } from './118-views-security-invoker.js'
 import { up as closedAddressSuppression } from './119-closed-address-suppression.js'
+import { up as massIntentionCorrections } from './120-mass-intention-corrections.js'
+import { up as massIntentionMarkSaid } from './121-mass-intention-mark-said.js'
+import { up as massIntentionBookRevision } from './122-mass-intention-book-revision.js'
+import { up as cashCountVoidVerifier } from './123-cash-count-void-verifier.js'
+import { up as cashCountVoidRequests } from './124-cash-count-void-requests.js'
+import { up as donationVoidRefundMarkers } from './125-donation-void-refund-markers.js'
+import { up as massIntentionOfferingHistory } from './126-mass-intention-offering-history.js'
+import { up as accountDeletionRequests } from './127-account-deletion-requests.js'
+import { up as nativeAiConsent } from './128-native-ai-consent.js'
+import { up as cutoverSignoffs } from './129-cutover-signoffs.js'
+import { up as eventDeposits } from './130-event-deposits.js'
+import { up as loginDeletionTombstone } from './131-login-deletion-tombstone.js'
+import { up as effectiveDatedMappings } from './132-effective-dated-mappings.js'
+import { up as parishCatering, ensureHallAgreementGuards } from './133-parish-catering.js'
+import { up as fundNetAssetClass } from './135-fund-net-asset-class.js'
+import { up as massStipendLiability } from './136-mass-stipend-liability.js'
+import { up as stripeConnectAccount } from './137-stripe-connect-account.js'
+import { up as clientMailingAddress } from './138-client-mailing-address.js'
+import { up as massStipendFollowup } from './139-mass-stipend-followup.js'
+import { up as publicBranding } from './140-public-branding.js'
+import { up as publicBrandingChecks } from './141-public-branding-checks.js'
+import { up as siteDocuments } from './142-site-documents.js'
+import { up as sitePublish } from './143-site-publish.js'
+import { up as onlineGivingClearing } from './144-online-giving-clearing.js'
 
 // The ordered chain, each with a stable ledger name. baseMigrate runs
 // FIRST because it creates the core tables (organizations, users, and the
@@ -264,6 +288,30 @@ const MIGRATIONS = [
   ['117-neutralize-demo-admin', neutralizeDemoAdmin],
   ['118-views-security-invoker', viewsSecurityInvoker],
   ['119-closed-address-suppression', closedAddressSuppression],
+  ['120-mass-intention-corrections', massIntentionCorrections],
+  ['121-mass-intention-mark-said', massIntentionMarkSaid],
+  ['122-mass-intention-book-revision', massIntentionBookRevision],
+  ['123-cash-count-void-verifier', cashCountVoidVerifier],
+  ['124-cash-count-void-requests', cashCountVoidRequests],
+  ['125-donation-void-refund-markers', donationVoidRefundMarkers],
+  ['126-mass-intention-offering-history', massIntentionOfferingHistory],
+  ['127-account-deletion-requests', accountDeletionRequests],
+  ['128-native-ai-consent', nativeAiConsent],
+  ['129-cutover-signoffs', cutoverSignoffs],
+  ['130-event-deposits', eventDeposits],
+  ['131-login-deletion-tombstone', loginDeletionTombstone],
+  ['132-effective-dated-mappings', effectiveDatedMappings],
+  ['133-parish-catering', parishCatering],
+  ['135-fund-net-asset-class', fundNetAssetClass],
+  ['136-mass-stipend-liability', massStipendLiability],
+  ['137-stripe-connect-account', stripeConnectAccount],
+  ['138-client-mailing-address', clientMailingAddress],
+  ['139-mass-stipend-followup', massStipendFollowup],
+  ['140-public-branding', publicBranding],
+  ['141-public-branding-checks', publicBrandingChecks],
+  ['142-site-documents', siteDocuments],
+  ['143-site-publish', sitePublish],
+  ['144-online-giving-clearing', onlineGivingClearing],
 ]
 
 // names.js carries this same chain for /api/health, which needs the names
@@ -449,7 +497,12 @@ export async function runAllMigrations({ appReviewEnv } = {}) {
     const ctx = { freshDatabase: !schemaExisted }
 
     for (const [name, up] of MIGRATIONS) {
-      if (done.has(name)) continue
+      if (done.has(name)) {
+        // SP-232: 133 was edited in place before release. A DB that ran the
+        // earlier 133 is in the ledger without the token index; re-assert it.
+        if (name === '133-parish-catering') await ensureHallAgreementGuards()
+        continue
+      }
       await applyMigration(pool, name, up, ctx)
       await pool.query(
         'INSERT INTO ochr_schema_migrations (name) VALUES ($1) ON CONFLICT (name) DO NOTHING',

@@ -68,7 +68,7 @@ function makeMass(token, body) {
     title: body.title,
     date: body.date,
     start_time: body.start_time || '09:00',
-    end_time: body.end_time || '10:00',
+    end_time: body.end_time || '23:00', // SP-106: end must be after any fixture start
     type: 'service',
   })
 }
@@ -87,7 +87,7 @@ async function renameMass(token, id, body) {
     title: body.title,
     date: body.date,
     start_time: body.start_time || '09:00',
-    end_time: body.end_time || '10:00',
+    end_time: body.end_time || '23:00', // SP-106: end must be after any fixture start
     type: 'service',
     assigned_to: [],
   })

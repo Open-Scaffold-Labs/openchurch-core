@@ -96,7 +96,7 @@ export default function NextOnCalendar({ events, failed = false }) {
               <li key={e.id} className="flex items-center gap-3">
                 {/* Date badge */}
                 <div className="shrink-0 w-11 text-center rounded-lg bg-parchment-100 dark:bg-ink-800 border border-parchment-300/60 dark:border-brass-900/30 py-1">
-                  <p className="text-[9px] font-bold uppercase tracking-wide text-brass-700 dark:text-brass-300 leading-none">
+                  <p className="text-[11px] font-bold uppercase tracking-wide text-brass-700 dark:text-brass-300 leading-none">
                     {month}
                   </p>
                   <p className="font-display text-lg font-semibold text-ink-900 dark:text-parchment-50 leading-tight">

@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Loader2, AlertTriangle, Search, Check, UserPlus, Baby, ArrowLeft, RefreshCw } from 'lucide-react'
+import { Loader2, AlertTriangle, Search, UserPlus, Baby, ArrowLeft, RefreshCw } from 'lucide-react'
 import { apiUrl } from '../api'
 import { LIT_COLOR_TEXT, LIT_COLOR_DOT, LIT_COLOR_DOT_NONE } from '../utils/liturgicalColors'
 import { useLocale } from '../i18n'
+import { dialogPanelMotion, EASE_SETTLE } from '../utils/motion'
 
 // Small liturgical chip — season/feast in its canonical color.
 function LitChip({ season, color, feast }) {
@@ -26,12 +27,12 @@ function LitChip({ season, color, feast }) {
 // Flow, built for a fast repeating line on a touchscreen:
 //   1. Pick today's service (auto-skipped when there's only one).
 //   2. Search your name and tap it → checked in.
-//      Or "I'm a guest" / "Check in a child" (child returns a big
+//      Or t('kiosk.i_m_a_guest') / t('kiosk.check_in_a_child') (child returns a big
 //      pickup code for the guardian).
 //   3. Confirmation, then it resets itself for the next person.
 //
 // Shell matches PublicSwap/PublicForm: parchment background, brand
-// wordmark, "Powered by OpenChurch" footer — reads as the church's
+// wordmark, t('kiosk.powered_by_openchurch') footer — reads as the church's
 // own kiosk, not a SaaS surface.
 
 function fmtTime(hms) {
@@ -42,10 +43,9 @@ function fmtTime(hms) {
 }
 
 export default function Kiosk() {
-  // Not for t() — these pages are still English (the string pass is
-  // separate work). This is the switch that lets the parish's language
-  // reach a page nobody signs in to.
-  const { setPublicLocale } = useLocale()
+  // Public pages have no signed-in user; setPublicLocale is how the
+  // parish's language reaches a screen nobody logs into.
+  const { t, setPublicLocale } = useLocale()
   const { token } = useParams()
   const [data,    setData]    = useState(null)
   const [loading, setLoading] = useState(true)
@@ -89,8 +89,8 @@ export default function Kiosk() {
         // while a queue builds at the door.
         setLinkIsGone(res.status === 404)
         setError(res.status === 404
-          ? "We couldn't find that kiosk. The link may have been rotated."
-          : "We couldn't reach the kiosk just now. The link is fine — this is on our side. Try again in a moment.")
+          ? t('kiosk.notFound')
+          : t('kiosk.reachFail'))
         setData(null); setLoading(false); return
       }
       const d = await res.json()
@@ -102,7 +102,7 @@ export default function Kiosk() {
       if (d.services?.length === 1) setServiceId(d.services[0].id)
     } catch (err) {
       setLinkIsGone(false)
-      setError("We couldn't reach the kiosk. Please check the connection and try again.")
+      setError(t('kiosk.connectionFail'))
     } finally {
       setLoading(false)
     }
@@ -194,13 +194,13 @@ export default function Kiosk() {
         }),
       })
       const r = await res.json().catch(() => ({}))
-      if (!res.ok) { setFlash(r.error || "That check-in didn't go through — please try once more."); return }
+      if (!res.ok) { setFlash(r.error || t('kiosk.checkinFail')); return }
       setResult({ name: displayName || r.person_name, kind: r.kind, security_code: r.security_code })
       // Auto-dismiss: a child code lingers longer so a guardian can read it.
       clearTimeout(resetTimer.current)
       resetTimer.current = setTimeout(softReset, r.security_code ? 12000 : 5000)
     } catch {
-      setFlash("That check-in didn't go through — please check the connection and try once more.")
+      setFlash(t('kiosk.checkinConnFail'))
     } finally {
       setBusy(false)
     }
@@ -219,21 +219,21 @@ export default function Kiosk() {
       <div className="min-h-screen flex items-center justify-center bg-parchment-100 dark:bg-ink-900 p-6">
         <div className="max-w-md text-center space-y-3">
           <AlertTriangle className="mx-auto text-amber-600" size={40} />
-          <h1 className="text-2xl font-bold text-ink-900 dark:text-parchment-50 font-display">Kiosk unavailable</h1>
-          <p className="text-sm text-ink-700 dark:text-parchment-200">{error || "We couldn't find that kiosk."}</p>
+          <h1 className="text-2xl font-bold text-ink-900 dark:text-parchment-50 font-display">{t('kiosk.unavailable')}</h1>
+          <p className="text-sm text-ink-700 dark:text-parchment-200">{error || t('kiosk.notFoundShort')}</p>
           {/* The advice has to match the diagnosis. "Ask for a fresh link" is
               right when the token is genuinely gone and actively unhelpful
               when the server simply failed — it sends a volunteer away from a
               queue to solve a problem that is not theirs. */}
           {linkIsGone ? (
-            <p className="text-xs text-ink-500 dark:text-parchment-300/70 mt-4">Ask a staff member for a fresh kiosk link.</p>
+            <p className="text-xs text-ink-500 dark:text-parchment-300/70 mt-4">{t('kiosk.askStaff')}</p>
           ) : (
             <button
               type="button"
               onClick={() => { setLoading(true); load() }}
               className="tap mt-4 inline-flex items-center justify-center gap-1.5 px-5 py-2.5 text-sm font-semibold rounded-lg bg-church-900 text-parchment-50 hover:bg-church-800"
             >
-              <RefreshCw size={15} aria-hidden="true" /> Try again
+              <RefreshCw size={15} aria-hidden="true" /> {t('kiosk.try_again')}
             </button>
           )}
         </div>
@@ -248,7 +248,7 @@ export default function Kiosk() {
       <div className="max-w-2xl mx-auto space-y-5">
         <header className="text-center pb-1">
           <p className="text-[11px] uppercase tracking-widest text-brass-600 dark:text-brass-300 font-semibold">{data.org?.name || 'OpenChurch'}</p>
-          <h1 className="text-3xl font-display text-ink-900 dark:text-parchment-50 mt-1">Welcome — check in</h1>
+          <h1 className="text-3xl font-display text-ink-900 dark:text-parchment-50 mt-1">{t('kiosk.welcome')}</h1>
         </header>
 
         {flash && (
@@ -260,15 +260,15 @@ export default function Kiosk() {
         {/* No services today */}
         {data.services.length === 0 && (
           <section className="bg-parchment-50 dark:bg-ink-900 rounded-2xl border border-parchment-300/60 dark:border-brass-900/30 shadow-warm p-8 text-center">
-            <p className="text-lg text-ink-700 dark:text-parchment-200">No services scheduled today.</p>
-            <p className="text-sm text-ink-500 dark:text-parchment-300/70 mt-1">Check back before the next gathering.</p>
+            <p className="text-lg text-ink-700 dark:text-parchment-200">{t('kiosk.noServices')}</p>
+            <p className="text-sm text-ink-500 dark:text-parchment-300/70 mt-1">{t('kiosk.checkBack')}</p>
           </section>
         )}
 
         {/* Step 1 — pick a service */}
         {data.services.length > 0 && !serviceId && (
           <section className="bg-parchment-50 dark:bg-ink-900 rounded-2xl border border-parchment-300/60 dark:border-brass-900/30 shadow-warm p-5 space-y-3">
-            <h2 className="text-sm font-bold uppercase tracking-widest text-brass-700 dark:text-brass-300">Which service?</h2>
+            <h2 className="text-sm font-bold uppercase tracking-widest text-brass-700 dark:text-brass-300">{t('kiosk.whichService')}</h2>
             <div className="grid gap-2">
               {data.services.map(s => (
                 <button
@@ -296,7 +296,7 @@ export default function Kiosk() {
             <div className="flex items-center justify-between gap-3 px-1">
               <p className="text-sm text-ink-600 dark:text-parchment-300/80 flex items-center gap-2 flex-wrap">
                 <span>
-                  Checking in to <span className="font-semibold text-ink-900 dark:text-parchment-50">{selectedService?.title}</span>
+                  {t('kiosk.checking_in_to')} <span className="font-semibold text-ink-900 dark:text-parchment-50">{selectedService?.title}</span>
                   {selectedService?.start_time ? ` · ${fmtTime(selectedService.start_time)}` : ''}
                 </span>
                 <LitChip season={selectedService?.liturgical_season} color={selectedService?.liturgical_color} feast={selectedService?.feast_name} />
@@ -306,7 +306,7 @@ export default function Kiosk() {
                   onClick={() => { setServiceId(null); softReset() }}
                   className="text-xs font-semibold text-brass-700 dark:text-brass-300 hover:underline shrink-0"
                 >
-                  Change
+                  {t('kiosk.change')}
                 </button>
               )}
             </div>
@@ -318,7 +318,7 @@ export default function Kiosk() {
                   onClick={() => setRoomPick('')}
                   className={`px-3 py-1.5 text-sm rounded-full border transition-colors ${roomPick === '' ? 'bg-church-900 text-parchment-50 border-church-900' : 'border-parchment-300/70 dark:border-brass-900/40 text-ink-700 dark:text-parchment-200 hover:bg-parchment-200 dark:hover:bg-ink-800'}`}
                 >
-                  No room
+                  {t('kiosk.no_room')}
                 </button>
                 {rooms.map(r => (
                   <button
@@ -341,7 +341,7 @@ export default function Kiosk() {
                     type="text"
                     value={query}
                     onChange={e => setQuery(e.target.value)}
-                    placeholder="Type your name…"
+                    placeholder={t('kiosk.namePh')}
                     autoFocus
                     className="w-full pl-10 pr-3 py-3 text-base rounded-xl border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-100 dark:bg-ink-800 text-ink-900 dark:text-parchment-50 placeholder-ink-400 focus:outline-none focus:ring-2 focus:ring-church-500"
                   />
@@ -351,16 +351,15 @@ export default function Kiosk() {
                   {!queryReady ? (
                     // Below the 2-char threshold the server won't search,
                     // so nudge rather than render an empty/stale list.
-                    <p className="text-sm text-ink-500 dark:text-parchment-300/70 py-3 text-center">Type at least 2 letters of your name.</p>
+                    <p className="text-sm text-ink-500 dark:text-parchment-300/70 py-3 text-center">{t('kiosk.type2')}</p>
                   ) : searching && matches.length === 0 ? (
-                    <p className="text-sm text-ink-500 dark:text-parchment-300/70 py-3 text-center">Searching…</p>
+                    <p className="text-sm text-ink-500 dark:text-parchment-300/70 py-3 text-center">{t('kiosk.searching')}</p>
                   ) : searchFailed ? (
                     <p role="status" className="text-sm text-amber-700 dark:text-amber-400 py-3 text-center px-4 leading-relaxed">
-                      We couldn&apos;t search the roster just now — that&apos;s our side, not a
-                      missing name. Try again in a moment before checking anyone in as a guest.
+                      {t('kiosk.searchFail')}
                     </p>
                   ) : matches.length === 0 ? (
-                    <p className="text-sm text-ink-500 dark:text-parchment-300/70 py-3 text-center">No members match — try the guest button below.</p>
+                    <p className="text-sm text-ink-500 dark:text-parchment-300/70 py-3 text-center">{t('kiosk.noMatch')}</p>
                   ) : matches.map(m => (
                     <button
                       key={m.id}
@@ -378,13 +377,13 @@ export default function Kiosk() {
                     onClick={() => setMode('guest')}
                     className="flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-xl border border-church-900 dark:border-parchment-100 text-church-900 dark:text-parchment-100 hover:bg-church-900 hover:text-parchment-50 dark:hover:bg-parchment-100 dark:hover:text-church-900 font-semibold transition-colors"
                   >
-                    <UserPlus size={18} /> I'm a guest
+                    <UserPlus size={18} /> {t('kiosk.i_m_a_guest')}
                   </button>
                   <button
                     onClick={() => setMode('child')}
                     className="flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-xl border border-brass-700/70 dark:border-brass-300/50 text-brass-800 dark:text-brass-200 hover:bg-brass-700 hover:text-parchment-50 font-semibold transition-colors"
                   >
-                    <Baby size={18} /> Check in a child
+                    <Baby size={18} /> {t('kiosk.check_in_a_child')}
                   </button>
                 </div>
               </section>
@@ -394,14 +393,14 @@ export default function Kiosk() {
             {mode === 'guest' && (
               <section className="bg-parchment-50 dark:bg-ink-900 rounded-2xl border border-parchment-300/60 dark:border-brass-900/30 shadow-warm p-5 space-y-3">
                 <button onClick={() => setMode('list')} className="flex items-center gap-1 text-xs font-semibold text-brass-700 dark:text-brass-300 hover:underline">
-                  <ArrowLeft size={13} /> Back
+                  <ArrowLeft size={13} /> {t('kiosk.back')}
                 </button>
-                <h2 className="text-base font-semibold text-ink-900 dark:text-parchment-50">Welcome! What's your name?</h2>
+                <h2 className="text-base font-semibold text-ink-900 dark:text-parchment-50">{t('kiosk.whatsName')}</h2>
                 <input
                   type="text"
                   value={guestName}
                   onChange={e => setGuestName(e.target.value)}
-                  placeholder="Your name"
+                  placeholder={t('kiosk.yourName')}
                   autoFocus
                   className="w-full px-4 py-3 text-base rounded-xl border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-100 dark:bg-ink-800 text-ink-900 dark:text-parchment-50 focus:outline-none focus:ring-2 focus:ring-church-500"
                 />
@@ -419,15 +418,15 @@ export default function Kiosk() {
             {mode === 'child' && (
               <section className="bg-parchment-50 dark:bg-ink-900 rounded-2xl border border-brass-300/50 dark:border-brass-800/40 shadow-warm p-5 space-y-3">
                 <button onClick={() => setMode('list')} className="flex items-center gap-1 text-xs font-semibold text-brass-700 dark:text-brass-300 hover:underline">
-                  <ArrowLeft size={13} /> Back
+                  <ArrowLeft size={13} /> {t('kiosk.back')}
                 </button>
-                <h2 className="text-base font-semibold text-ink-900 dark:text-parchment-50">Check in a child</h2>
-                <p className="text-xs text-ink-500 dark:text-parchment-300/70 -mt-1">You'll get a pickup code — keep it to collect your child.</p>
+                <h2 className="text-base font-semibold text-ink-900 dark:text-parchment-50">{t('kiosk.childTitle')}</h2>
+                <p className="text-xs text-ink-500 dark:text-parchment-300/70 -mt-1">{t('kiosk.childHelp')}</p>
                 <input
                   type="text"
                   value={childName}
                   onChange={e => setChildName(e.target.value)}
-                  placeholder="Child's name"
+                  placeholder={t('kiosk.childNamePh')}
                   autoFocus
                   className="w-full px-4 py-3 text-base rounded-xl border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-100 dark:bg-ink-800 text-ink-900 dark:text-parchment-50 focus:outline-none focus:ring-2 focus:ring-church-500"
                 />
@@ -435,7 +434,7 @@ export default function Kiosk() {
                   type="text"
                   value={guardian}
                   onChange={e => setGuardian(e.target.value)}
-                  placeholder="Parent / guardian name (optional)"
+                  placeholder={t('kiosk.guardianPh')}
                   className="w-full px-4 py-3 text-base rounded-xl border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-100 dark:bg-ink-800 text-ink-900 dark:text-parchment-50 focus:outline-none focus:ring-2 focus:ring-church-500"
                 />
                 <button
@@ -451,7 +450,7 @@ export default function Kiosk() {
         )}
 
         <footer className="text-center text-[11px] text-ink-500 dark:text-parchment-300/60 pt-3 pb-6">
-          Powered by OpenChurch
+          {t('kiosk.powered_by_openchurch')}
         </footer>
       </div>
 
@@ -466,21 +465,37 @@ export default function Kiosk() {
             onClick={softReset}
           >
             <motion.div
-              initial={{ scale: 0.9, y: 20 }}
-              animate={{ scale: 1, y: 0 }}
+              initial={dialogPanelMotion.initial}
+              animate={dialogPanelMotion.animate}
+              transition={dialogPanelMotion.transition}
               className="text-center max-w-md"
             >
+              {/* The checkmark draws itself (V1.3, study #4): a volunteer
+                  watching the child, not the screen, knows at a glance it
+                  worked. Reduce-motion shows it complete. */}
               <div className="mx-auto w-20 h-20 rounded-full bg-brass-500 flex items-center justify-center mb-5">
-                <Check size={44} className="text-parchment-50" strokeWidth={3} />
+                <svg viewBox="0 0 24 24" width="44" height="44" aria-hidden="true" className="text-parchment-50">
+                  <motion.path
+                    d="M5 12.5 l4.5 4.5 L19 7.5"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="3"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    initial={{ pathLength: 0 }}
+                    animate={{ pathLength: 1 }}
+                    transition={{ duration: 0.32, ease: EASE_SETTLE, delay: 0.14 }}
+                  />
+                </svg>
               </div>
-              <h2 className="text-3xl font-display text-parchment-50">You're checked in!</h2>
+              <h2 className="text-3xl font-display text-parchment-50">{t('kiosk.checkedIn')}</h2>
               <p className="text-lg text-parchment-200 mt-1">{result.name}</p>
 
               {result.security_code && (
                 <div className="mt-6 rounded-2xl bg-parchment-50 px-6 py-5">
-                  <p className="text-xs uppercase tracking-widest text-ink-500 font-semibold">Pickup code</p>
+                  <p className="text-xs uppercase tracking-widest text-ink-500 font-semibold">{t('kiosk.pickupCode')}</p>
                   <p className="text-5xl font-bold tracking-[0.3em] text-church-900 mt-1">{result.security_code}</p>
-                  <p className="text-xs text-ink-500 mt-2">Keep this to collect your child.</p>
+                  <p className="text-xs text-ink-500 mt-2">{t('kiosk.keepCode')}</p>
                 </div>
               )}
 
@@ -488,7 +503,7 @@ export default function Kiosk() {
                 onClick={softReset}
                 className="mt-7 px-8 py-3 rounded-xl bg-parchment-50 text-church-900 font-semibold hover:opacity-90 transition-opacity"
               >
-                Done
+                {t('kiosk.done')}
               </button>
             </motion.div>
           </motion.div>

@@ -102,10 +102,16 @@ const DRAFTING_DEFAULTS = {
   timeoutMs: 30_000,
 }
 
+// D-01 (José, 2026-10-19; R334): every PARISH capability runs only on the
+// parish's own key. No platform route is ever chosen for these, even if
+// ANTHROPIC_API_KEY is set; no key → 409 ai_key_required (ai/gate.js).
+const PARISH_BYOK_ONLY = { managed: false, byokOnly: true }
+
 export const CAPABILITIES = {
   // POST /api/ai/enhance — polish text the user already wrote.
   parish_text_enhance_v1: {
     ...DRAFTING_DEFAULTS,
+    ...PARISH_BYOK_ONLY,
     routeId: 'anthropic-managed',
     promptVersion: 'enhance-1',
     systemPrompt:
@@ -119,6 +125,7 @@ export const CAPABILITIES = {
   // and the only one that reads liturgical context.
   parish_sermon_draft_v1: {
     ...DRAFTING_DEFAULTS,
+    ...PARISH_BYOK_ONLY,
     routeId: 'anthropic-managed',
     promptVersion: 'sermon-1',
     systemPrompt:
@@ -130,6 +137,7 @@ export const CAPABILITIES = {
 
   parish_message_draft_v1: {
     ...DRAFTING_DEFAULTS,
+    ...PARISH_BYOK_ONLY,
     routeId: 'anthropic-managed',
     promptVersion: 'message-1',
     systemPrompt:
@@ -141,6 +149,7 @@ export const CAPABILITIES = {
 
   parish_devotional_draft_v1: {
     ...DRAFTING_DEFAULTS,
+    ...PARISH_BYOK_ONLY,
     routeId: 'anthropic-managed',
     promptVersion: 'devotional-1',
     systemPrompt:
@@ -152,6 +161,7 @@ export const CAPABILITIES = {
 
   parish_announcement_draft_v1: {
     ...DRAFTING_DEFAULTS,
+    ...PARISH_BYOK_ONLY,
     routeId: 'anthropic-managed',
     promptVersion: 'announcement-1',
     systemPrompt:
@@ -162,11 +172,17 @@ export const CAPABILITIES = {
   },
 
   // In-app help assistant (routes/assistant.js; its SYSTEM_PROMPT is the one
-  // sent). Anthropic-shaped chat only: a parish whose own key is OpenAI gets
-  // a visible refusal, not the platform key (TARS, #280 ba12d348).
+  // sent). D-01 (José, 2026-10-19): each parish chooses its provider and
+  // brings its own key — Anthropic or OpenAI. There is no platform-managed
+  // key; with no parish key the answer is "add your parish's key"
+  // (ai_key_required), not an outage. byokOnly: the platform key is never
+  // used for this capability, even if ANTHROPIC_API_KEY is set (R334-1).
+  // routeId stays as the policy-shape anchor; resolveRoute never returns it.
   parish_assistant_v1: {
     ...DRAFTING_DEFAULTS,
-    byokProviders: ['anthropic'],
+    byokProviders: ['anthropic', 'openai'],
+    managed: false,
+    byokOnly: true,
     routeId: 'anthropic-managed',
     promptVersion: 'assistant-1',
     systemPrompt: 'routes/assistant.js SYSTEM_PROMPT (in-app help; not a canonist)',
@@ -278,6 +294,17 @@ export function validatePolicy({ routes = ROUTES, capabilities = CAPABILITIES } 
     }
     if (c.output?.type === 'json' && !c.output.schema) {
       problems.push(`capability ${id}: json output with no schema`)
+    }
+    // Drafts-only (José, 2026-10-25), policy half: a capability returns a
+    // draft to the person who asked; it cannot declare tools, actions,
+    // recipients or a send step, and its output is text or json. This does
+    // not stop app code from sending model text it received; that is checked
+    // only by the static scan in tests/aiDraftsOnly.test.js (R412-1).
+    if (!['text', 'json'].includes(c.output?.type)) {
+      problems.push(`capability ${id}: drafts-only — output must be text or json`)
+    }
+    for (const k of ['tools', 'actions', 'send', 'autoSend', 'recipients', 'channels']) {
+      if (c[k] !== undefined) problems.push(`capability ${id}: drafts-only — declares ${k}`)
     }
     // An anonymous caller cannot spend the platform's money.
     if (c.allowAnonymous && route.credentialMode === 'managed') {

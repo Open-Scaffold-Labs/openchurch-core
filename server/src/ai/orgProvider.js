@@ -1,7 +1,8 @@
 // Per-org AI credentials (AIP.1) — encryption + lookup.
 //
 // A parish that plugs in its own key pays its own AI bill and gets its
-// own rate limits; everyone else rides the platform's keys. The key is
+// own rate limits. D-01: there is no platform key; a parish without its own
+// key has AI off (409 ai_key_required). The key is
 // AES-256-GCM encrypted at rest with a key derived from AI_KEY_SECRET
 // (or JWT_SECRET as the fallback — already required-at-boot in prod).
 // The plaintext key exists only in memory during a request; no API ever
@@ -11,9 +12,29 @@
 
 import crypto from 'node:crypto'
 import pool from '../db.js'
+import { requireSigningSecret, usableSecret } from '../auth/signingSecrets.js'
+import { productionLike } from '../auth/sessionCookie.js'
+
+// R381-1: the encryption root must never silently change. An absent or
+// empty AI_KEY_SECRET keeps the documented JWT_SECRET fallback; a
+// non-empty AI_KEY_SECRET is the root, used byte-for-byte (never trimmed).
+// If it is configured but rejected (whitespace-only or a known dev value)
+// on a production-like runtime, refuse — do not fall through to
+// JWT_SECRET, which would orphan existing ciphertext and mix keys.
+function resolveAiKeySecret(env = process.env) {
+  const configured = env.AI_KEY_SECRET
+  if (typeof configured === 'string' && configured !== '') {
+    if (usableSecret(configured)) return configured
+    if (productionLike({ env: env.NODE_ENV, vercelEnv: env.VERCEL_ENV })) {
+      throw new Error('AI_KEY_SECRET is set but invalid (blank or a known dev value); refusing to fall back to JWT_SECRET')
+    }
+    return configured // local/test: same bytes the legacy derivation used
+  }
+  return requireSigningSecret(['JWT_SECRET'], 'dev-only-ai-key-secret', { env })
+}
 
 function derivedKey() {
-  const secret = process.env.AI_KEY_SECRET || process.env.JWT_SECRET || 'dev-only-ai-key-secret'
+  const secret = resolveAiKeySecret()
   return crypto.createHash('sha256').update(`${secret}:ochr-org-ai-key`).digest()
 }
 

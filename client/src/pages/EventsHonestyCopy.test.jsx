@@ -114,7 +114,7 @@ describe('Events honesty copy follows the parish language', () => {
   it('a genuinely empty calendar stays empty, in a Spanish session too', async () => {
     stub({ events: 'empty' })
     mount('es')
-    expect(await screen.findByText(EMPTY_EVENTS)).toBeInTheDocument()
+    expect(await screen.findByText(es['events.emptyYet'])).toBeInTheDocument()
     expect(screen.queryByText(es['load.failedTitle'])).not.toBeInTheDocument()
     expect(screen.queryByText(es['load.failedBody'])).not.toBeInTheDocument()
     expect(screen.queryByText(es['dash.upcomingUnread'])).not.toBeInTheDocument()
@@ -127,6 +127,7 @@ describe('Events honesty copy follows the parish language', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Edit event: Sunday Parish Event' }))
     expect(await screen.findByText(es['dash.tasksUnread'])).toBeInTheDocument()
     expect(screen.queryByText(en['dash.tasksUnread'])).not.toBeInTheDocument()
+    expect(screen.queryByText(es['events.no_tasks_are_assigned_to'])).not.toBeInTheDocument()
     expect(screen.queryByText(EMPTY_TASKS)).not.toBeInTheDocument()
   })
 
@@ -134,7 +135,8 @@ describe('Events honesty copy follows the parish language', () => {
     stub({ tasks: 'empty' })
     mount('es')
     fireEvent.click(await screen.findByRole('button', { name: 'Edit event: Sunday Parish Event' }))
-    expect(await screen.findByText(EMPTY_TASKS)).toBeInTheDocument()
+    expect(await screen.findByText(es['events.no_tasks_are_assigned_to'])).toBeInTheDocument()
+    expect(screen.queryByText(en['events.no_tasks_are_assigned_to'])).not.toBeInTheDocument()
     expect(screen.queryByText(es['dash.tasksUnread'])).not.toBeInTheDocument()
     expect(screen.queryByText(en['dash.tasksUnread'])).not.toBeInTheDocument()
   })
@@ -142,7 +144,7 @@ describe('Events honesty copy follows the parish language', () => {
   it('a Spanish session hears the member-list failure on the event form', async () => {
     stub({ members: 'fail' })
     mount('es')
-    fireEvent.click(await screen.findByRole('button', { name: 'Add Event' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Agregar evento' }))
     expect(await screen.findByText(es['mem.listFailed'])).toBeInTheDocument()
     expect(screen.queryByText(en['mem.listFailed'])).not.toBeInTheDocument()
   })

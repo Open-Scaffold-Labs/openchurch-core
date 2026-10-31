@@ -41,6 +41,8 @@
 
 import { Router } from 'express'
 import { dispatch } from '../ai/gate.js'
+import { configuredNativeAiMode, effectiveNativeAiMode, isNativeShellRequest, nativeAiCeilingFromRequest, supportTriageAllowed } from '../ai/nativeAiMode.js'
+import { hasActiveNativeAiConsent } from '../ai/nativeAiConsent.js'
 import { ERROR_CATEGORIES } from '../ai/providerError.js'
 import { routeTemplate } from '../ai/routeTemplate.js'
 import pool from '../db.js'
@@ -134,7 +136,7 @@ async function forwardToSupport(ticketId, req, description, pageRoute) {
 }
 
 // ── Diagnostic pass (async — never blocks the submission response) ───────
-export async function runDiagnostic(ticketId, description, pageRoute) {
+export async function runDiagnostic(ticketId, description, pageRoute, admission = {}) {
   const startMs = Date.now()
 
   const prompt = `You are the triage agent for OpenChurch. A user reported a problem in-app.
@@ -171,6 +173,9 @@ Report: ${description}`
       response = await dispatch({
         orgId: activeTicket[0].organization_id, capabilityId: 'support_triage_v1',
         system: loadSupportContext(), messages: [{ role: 'user', content: prompt }], maxTokens: 1000,
+        nativeShell: admission?.nativeShell === true,
+        actorUserId: admission?.actorUserId ?? null,
+        nativeCeiling: admission?.nativeCeiling === 'consent-required' ? 'consent-required' : 'excluded',
       })
     } catch (refused) {
       // Stopped, not configured, or this parish routes AI through its own
@@ -254,8 +259,23 @@ router.post('/', async (req, res) => {
       [req.organizationId, req.user.id, description, pageRoute,
        contextBundle ? JSON.stringify(contextBundle) : null])
 
-    runDiagnostic(ticket.id, description, pageRoute)
-      .catch(err => monitor.error('supportTickets.diagnostic', err, { ticketId: ticket.id }))
+    const native = isNativeShellRequest(req)
+    const nativeCeiling = native ? nativeAiCeilingFromRequest(req) : 'excluded'
+    const mode = native ? effectiveNativeAiMode(configuredNativeAiMode(), nativeCeiling) : 'web'
+    let consentActive = false
+    if (native && mode === 'consent-required') {
+      try {
+        consentActive = await hasActiveNativeAiConsent(req.organizationId, req.user.id)
+      } catch (err) {
+        // The report still saves. The provider send does not.
+        monitor.error('supportTickets.triage.consent', err, { orgId: req.organizationId })
+        consentActive = false
+      }
+    }
+    if (supportTriageAllowed({ native, mode, consentActive })) {
+      runDiagnostic(ticket.id, description, pageRoute, { nativeShell: native, actorUserId: req.user.id, nativeCeiling })
+        .catch(err => monitor.error('supportTickets.diagnostic', err, { ticketId: ticket.id }))
+    }
     forwardToSupport(ticket.id, req, description, pageRoute)
       .catch(err => monitor.error('supportTickets.email', err, { ticketId: ticket.id }))
 

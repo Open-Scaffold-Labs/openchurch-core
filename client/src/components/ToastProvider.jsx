@@ -1,7 +1,8 @@
-import { createContext, useCallback, useContext, useMemo, useRef, useState } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { CheckCircle2, AlertTriangle, Info, X } from 'lucide-react'
 import { useLocale } from '../i18n'
+import { toastMotion } from '../utils/motion'
 
 // App-wide toast notifications. Replaces alert() everywhere — we
 // accumulated a dozen-plus alert() sites once role enforcement
@@ -16,7 +17,8 @@ import { useLocale } from '../i18n'
 //   toast.dismiss(id)
 //
 // Toasts auto-dismiss after 4s, stack vertically (max 3 visible —
-// older ones drop), slide in from the right, fade out. Click the X
+// older ones drop), drift down into place and leave a little quicker
+// (utils/motion.js toastMotion). Click the X
 // to dismiss early. Pointer-events-none on the container so toasts
 // never block clicks behind them; the toast itself opts in.
 
@@ -53,6 +55,13 @@ export function ToastProvider({ children }) {
   const { t } = useLocale()
   const [toasts, setToasts] = useState([])
   const idRef = useRef(1)
+  // Auto-dismiss timers still pending. Cleared on unmount so a timer
+  // never calls setState after the provider (or a test's jsdom) is gone.
+  const timersRef = useRef(new Set())
+  useEffect(() => () => {
+    for (const h of timersRef.current) clearTimeout(h)
+    timersRef.current.clear()
+  }, [])
 
   const dismiss = useCallback((id) => {
     setToasts(prev => prev.filter(item => item.id !== id))
@@ -65,7 +74,13 @@ export function ToastProvider({ children }) {
       const next = [...prev, { id, kind, message }]
       return next.slice(-MAX_STACK)
     })
-    if (duration > 0) setTimeout(() => dismiss(id), duration)
+    if (duration > 0) {
+      const h = setTimeout(() => {
+        timersRef.current.delete(h)
+        dismiss(id)
+      }, duration)
+      timersRef.current.add(h)
+    }
     return id
   }, [dismiss])
 
@@ -102,10 +117,9 @@ function Toast({ kind, message, onDismiss }) {
   return (
     <motion.div
       layout
-      initial={{ opacity: 0, x: 24, scale: 0.96 }}
-      animate={{ opacity: 1, x: 0, scale: 1 }}
-      exit={{ opacity: 0, x: 24, scale: 0.96 }}
-      transition={{ duration: 0.22, ease: [0.25, 0.1, 0.25, 1] }}
+      initial={toastMotion.initial}
+      animate={toastMotion.animate}
+      exit={toastMotion.exit}
       className={`pointer-events-auto flex items-start gap-3 px-4 py-3 rounded-xl border shadow-warm-md ${v.classes}`}
       role={kind === 'error' ? 'alert' : 'status'}
     >

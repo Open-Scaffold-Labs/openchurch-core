@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import {
   Heart, Plus, X, Pencil, Trash2, AlertTriangle, Loader2, User as UserIcon, Mail,
 } from 'lucide-react'
-import PageWrapper from '../components/PageWrapper'
+import PageWrapper, { PageHeader } from '../components/PageWrapper'
 import EmptyState from '../components/EmptyState'
 import LoadFailure from '../components/LoadFailure'
 import { SkeletonRowList } from '../components/Skeleton'
@@ -17,6 +17,7 @@ import { todayLocalISO } from '../utils/dates'
 import { useConfirm } from '../components/ConfirmProvider'
 import { loadList } from '../utils/format'
 import { useLocale } from '../i18n'
+import { dialogMotionNow } from '../utils/motion'
 
 // Pledges admin page (Sprint D / D.2). Lists every pledge with
 // computed fulfillment, supports create/edit/cancel via modal.
@@ -130,10 +131,10 @@ function FulfillmentBar({ fulfillment, unavailable }) {
 }
 
 function PledgeModal({ pledge, members, membersFailed, onClose, onSaved }) {
+  const { t } = useLocale()
   const isEdit = !!pledge
   const toast = useToast()
   const ask = useConfirm()
-  const { t } = useLocale()
 
   const [form, setForm] = useState(() => ({
     member_id:   pledge?.member_id ?? null,
@@ -185,17 +186,13 @@ function PledgeModal({ pledge, members, membersFailed, onClose, onSaved }) {
 
   return (
     <div className={sheetOverlayCls}>
-      <motion.div
-        initial={{ opacity: 0, scale: 0.96, y: 8 }}
-        animate={{ opacity: 1, scale: 1, y: 0 }}
-        exit={{ opacity: 0, scale: 0.96, y: 8 }}
-        transition={{ duration: 0.18 }}
+      <motion.div {...dialogMotionNow()}
         className={sheetPanelCls}
       >
         <MobileSheetGrip />
         <div className="flex items-center justify-between px-6 py-4 border-b border-parchment-300/60 dark:border-brass-900/30">
           <h2 className="font-display text-lg font-semibold text-ink-900 dark:text-parchment-50">
-            {isEdit ? 'Edit pledge' : 'New pledge'}
+            {isEdit ? t('plg.edit') : t('plg.new')}
           </h2>
           <button type="button" onClick={onClose} className="-m-2 p-2 text-ink-400 hover:text-ink-700 dark:hover:text-parchment-50 transition-colors">
             <X size={18} />
@@ -211,7 +208,7 @@ function PledgeModal({ pledge, members, membersFailed, onClose, onSaved }) {
               multi-assign. */}
           <div>
             <label className="block text-xs font-semibold text-ink-600 dark:text-parchment-200 mb-1.5">
-              Member
+              {t('pld.member')}
             </label>
             <select
               value={form.member_id ?? ''}
@@ -231,24 +228,24 @@ function PledgeModal({ pledge, members, membersFailed, onClose, onSaved }) {
               </p>
             )}
             <p className="mt-1.5 text-[11px] text-ink-500 dark:text-parchment-300/70">
-              Pledges match donations by the member's email. Pick the donor here for the cleanest tracking.
+              {t('pld.pledges_match_donations_by_the')}
             </p>
           </div>
 
           {!form.member_id && (
             <TextField
-              label="Donor email (when not a member)"
+              label={t('plg.donorEmail')}
               type="email"
               value={form.donor_email}
               onChange={f('donor_email')}
               leadingIcon={Mail}
-              hint="Donations with this email will count toward the pledge."
+              hint="{t('plg.donorEmailHelp')}"
             />
           )}
 
           <div className="grid grid-cols-2 gap-3">
             <TextField
-              label="Amount"
+              label={t('plg.amount')}
               type="number"
               step="0.01"
               min="0.01"
@@ -256,67 +253,67 @@ function PledgeModal({ pledge, members, membersFailed, onClose, onSaved }) {
               value={form.amount}
               onChange={f('amount')}
               placeholder="100"
-              hint="Per period"
+              hint={t('plg.perPeriod')}
             />
             <div>
-              <label className="block text-xs font-semibold text-ink-600 dark:text-parchment-200 mb-1.5">Frequency</label>
+              <label className="block text-xs font-semibold text-ink-600 dark:text-parchment-200 mb-1.5">{t('plg.frequency')}</label>
               <select
                 value={form.frequency}
                 onChange={f('frequency')}
                 className="w-full px-3 py-2.5 text-sm rounded-lg bg-parchment-50 dark:bg-ink-800 border border-parchment-300/70 dark:border-brass-900/40 text-ink-900 dark:text-parchment-50 focus:outline-none focus:ring-2 focus:ring-brass-400"
               >
-                {FREQUENCIES.map(f => <option key={f.value} value={f.value}>{f.label}</option>)}
+                {FREQUENCIES.map(f => <option key={f.value} value={f.value}>{t('plg.freq.' + f.value)}</option>)}
               </select>
             </div>
           </div>
 
           <div className="grid grid-cols-2 gap-3">
             <TextField
-              label="Start date"
+              label={t('plg.start')}
               type="date"
               value={form.start_date}
               onChange={f('start_date')}
             />
             <TextField
-              label="End date (optional)"
+              label={t('plg.end')}
               type="date"
               value={form.end_date}
               onChange={f('end_date')}
-              hint="Leave empty for open-ended."
+              hint="{t('plg.endHelp')}"
             />
           </div>
 
           {isEdit && (
             <div>
-              <label className="block text-xs font-semibold text-ink-600 dark:text-parchment-200 mb-1.5">Status</label>
+              <label className="block text-xs font-semibold text-ink-600 dark:text-parchment-200 mb-1.5">{t('plg.status')}</label>
               <select
                 value={form.status}
                 onChange={f('status')}
                 className="w-full px-3 py-2.5 text-sm rounded-lg bg-parchment-50 dark:bg-ink-800 border border-parchment-300/70 dark:border-brass-900/40 text-ink-900 dark:text-parchment-50 focus:outline-none focus:ring-2 focus:ring-brass-400"
               >
-                <option value="active">Active</option>
-                <option value="completed">Completed</option>
-                <option value="cancelled">Cancelled</option>
+                <option value="active">{t('plg.active')}</option>
+                <option value="completed">{t('plg.completed')}</option>
+                <option value="cancelled">{t('plg.cancelled')}</option>
               </select>
             </div>
           )}
 
           <div>
-            <label className="block text-xs font-semibold text-ink-600 dark:text-parchment-200 mb-1.5">Notes</label>
+            <label className="block text-xs font-semibold text-ink-600 dark:text-parchment-200 mb-1.5">{t('plg.notes')}</label>
             <textarea
               value={form.notes}
               onChange={f('notes')}
               rows={2}
-              placeholder="Optional context — building campaign, missions fund, etc." aria-label="Optional context — building campaign, missions fund, etc."
+              placeholder={t('plg.notesPh')} aria-label="Optional context — building campaign, missions fund, etc."
               className="w-full px-3 py-2.5 text-sm rounded-lg bg-parchment-50 dark:bg-ink-800 border border-parchment-300/70 dark:border-brass-900/40 text-ink-900 dark:text-parchment-50 placeholder-ink-400 dark:placeholder-parchment-400/50 focus:outline-none focus:ring-2 focus:ring-brass-400 resize-none"
             />
           </div>
 
           <div className="flex items-center justify-end gap-3 pt-2 border-t border-parchment-300/60 dark:border-brass-900/25">
             <button type="button" onClick={onClose} className="text-sm text-ink-600 dark:text-parchment-300 hover:text-ink-900 dark:hover:text-parchment-50 px-3 py-2">
-              Cancel
+              {t('pld.cancel')}
             </button>
-            <SaveButton status={saveStatus}>{isEdit ? 'Save pledge' : 'Create pledge'}</SaveButton>
+            <SaveButton status={saveStatus}>{isEdit ? t('plg.save') : t('plg.create')}</SaveButton>
           </div>
         </form>
       </motion.div>
@@ -385,29 +382,29 @@ export default function Pledges() {
 
   async function removePledge(p) {
     if (!(await ask({
-      title: 'Delete this pledge?',
-      body: 'The matched donations stay. Only the pledge record goes away.',
-      confirmLabel: 'Delete pledge',
+      title: t('plg.deleteTitle'),
+      body: t('plg.deleteBody'),
+      confirmLabel: t('plg.deleteConfirm'),
     }))) return
     try {
       const res = await fetch(apiUrl(`/api/pledges/${p.id}`), { method: 'DELETE' })
       // 204 is the only success. A 200 error body must not read as deleted.
       if (res.status !== 204) throw new Error('delete')
-      toast.info('Pledge deleted')
+      toast.info(t('plg.deleted'))
       load()
     } catch (e) {
-      toast.error("That didn't delete — nothing was changed. Please try again.")
+      toast.error(t('plg.deleteFailed'))
     }
   }
 
   if (!isAdmin) {
     return (
-      <PageWrapper>
+      <PageWrapper type="list">
         <div className="max-w-2xl mx-auto py-16">
           <EmptyState
             icon={AlertTriangle}
-            title="Admins only"
-            body="Pledges are restricted to admins — they show donor commitments and fulfillment."
+            title={t('plg.adminsOnly')}
+            body={t('plg.adminsOnlyBody')}
           />
         </div>
       </PageWrapper>
@@ -421,7 +418,7 @@ export default function Pledges() {
   const totalMatched = listReady ? sumMoney(visible, 'matched_total') : null
 
   return (
-    <PageWrapper>
+    <PageWrapper type="list">
       <div className="max-w-5xl mx-auto space-y-6">
         {/* Header */}
         <motion.div
@@ -429,21 +426,14 @@ export default function Pledges() {
           animate={{ opacity: 1, y: 0 }}
           className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4"
         >
-          <div>
-            <h1 className="font-display text-3xl font-semibold text-ink-900 dark:text-parchment-50 tracking-tight">
-              Pledges
-            </h1>
-            <p className="text-sm text-ink-500 dark:text-parchment-300/70 mt-1">
-              Donor commitments and fulfillment toward them. Donations match by email.
-            </p>
-          </div>
+          <PageHeader title={t('plg.title')} subtitle={t('plg.subtitle')} />
           <button
             type="button"
             onClick={() => setModal('new')}
             disabled={loading || failed}
             className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-church-900 hover:bg-church-800 text-parchment-50 text-sm font-semibold shadow-sm transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
           >
-            <Plus size={16} /> New pledge
+            <Plus size={16} /> {t('plg.new')}
           </button>
         </motion.div>
 
@@ -456,19 +446,19 @@ export default function Pledges() {
             className="rounded-2xl border border-parchment-300/60 dark:border-brass-900/30 bg-parchment-50 dark:bg-ink-900 shadow-warm p-5 grid grid-cols-3 gap-4 sm:max-w-2xl"
           >
             <div>
-              <p className="text-[11px] font-semibold uppercase tracking-wider text-brass-700 dark:text-brass-300">Pledges</p>
+              <p className="text-[11px] font-semibold uppercase tracking-wider text-brass-700 dark:text-brass-300">{t('plg.title')}</p>
               <p className="font-display text-2xl font-semibold text-ink-900 dark:text-parchment-50 mt-1">
                 {visible.length}
               </p>
             </div>
             <div>
-              <p className="text-[11px] font-semibold uppercase tracking-wider text-brass-700 dark:text-brass-300">Expected</p>
+              <p className="text-[11px] font-semibold uppercase tracking-wider text-brass-700 dark:text-brass-300">{t('plg.expected')}</p>
               <p className="font-display text-2xl font-semibold text-ink-900 dark:text-parchment-50 mt-1">
                 {fmtCurrency(totalPledged, unavailable)}
               </p>
             </div>
             <div>
-              <p className="text-[11px] font-semibold uppercase tracking-wider text-brass-700 dark:text-brass-300">Received</p>
+              <p className="text-[11px] font-semibold uppercase tracking-wider text-brass-700 dark:text-brass-300">{t('plg.received')}</p>
               <p className="font-display text-2xl font-semibold text-ink-900 dark:text-parchment-50 mt-1">
                 {fmtCurrency(totalMatched, unavailable)}
               </p>
@@ -486,7 +476,7 @@ export default function Pledges() {
             icon={Heart}
             title={t('plg.emptyTitle')}
             body={t('plg.emptyBody')}
-            action={{ label: 'New pledge', onClick: () => setModal('new') }}
+            action={{ label: t('plg.new'), onClick: () => setModal('new') }}
           />
         ) : (
           <motion.div
@@ -501,28 +491,28 @@ export default function Pledges() {
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2 flex-wrap">
                       <p className="text-sm font-semibold text-ink-900 dark:text-parchment-50 truncate">
-                        {p.member_name || p.donor_email || 'Unnamed donor'}
+                        {p.member_name || p.donor_email || t('plg.unnamed')}
                       </p>
-                      <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${STATUS_PILL[p.status]}`}>
+                      <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${STATUS_PILL[p.status]}`}>
                         {p.status}
                       </span>
                     </div>
                     <p className="text-xs text-ink-500 dark:text-parchment-300/70 mt-0.5 truncate">
                       {p.member_email ? <><Mail size={10} className="inline mr-1" />{p.member_email}</>
                         : p.donor_email ? <><Mail size={10} className="inline mr-1" />{p.donor_email}</>
-                        : <><UserIcon size={10} className="inline mr-1" />No email on file</>}
+                        : <><UserIcon size={10} className="inline mr-1" />{t('plg.noEmail')}</>}
                     </p>
                   </div>
                   <div className="hidden sm:block text-right shrink-0 min-w-[110px]">
-                    <p className="text-[10px] font-semibold uppercase tracking-wider text-ink-500 dark:text-parchment-300/70">Pledged</p>
+                    <p className="text-[11px] font-semibold uppercase tracking-wider text-ink-500 dark:text-parchment-300/70">{t('plg.pledged')}</p>
                     <p className="text-sm font-semibold text-ink-900 dark:text-parchment-50 tabular-nums">
                       {fmtCurrency(p.amount, unavailable)}<span className="text-ink-500 text-xs"> / {p.frequency.replace('_', ' ')}</span>
                     </p>
                   </div>
                   <div className="hidden md:block shrink-0 w-44">
-                    <p className="text-[10px] font-semibold uppercase tracking-wider text-ink-500 dark:text-parchment-300/70 mb-1">Fulfillment</p>
+                    <p className="text-[11px] font-semibold uppercase tracking-wider text-ink-500 dark:text-parchment-300/70 mb-1">{t('plg.fulfillment')}</p>
                     <FulfillmentBar fulfillment={p.fulfillment} unavailable={unavailable} />
-                    <p className="text-[10px] text-ink-500 dark:text-parchment-300/70 mt-1 tabular-nums">
+                    <p className="text-[11px] text-ink-500 dark:text-parchment-300/70 mt-1 tabular-nums">
                       {fmtCurrency(p.matched_total, unavailable)} of {fmtCurrency(p.period_total, unavailable)}
                     </p>
                   </div>
@@ -530,7 +520,7 @@ export default function Pledges() {
                     <button
                       type="button"
                       onClick={() => setModal(p)}
-                      aria-label="Edit pledge"
+                      aria-label={t('plg.edit')}
                       className="p-2 rounded-lg text-ink-400 hover:text-church-700 dark:hover:text-brass-200 hover:bg-parchment-200 dark:hover:bg-ink-800 transition-colors"
                     >
                       <Pencil size={14} />
@@ -538,7 +528,7 @@ export default function Pledges() {
                     <button
                       type="button"
                       onClick={() => removePledge(p)}
-                      aria-label="Delete pledge"
+                      aria-label={t('plg.deleteConfirm')}
                       className="p-2 rounded-lg text-ink-400 hover:text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-900/20 transition-colors"
                     >
                       <Trash2 size={14} />
@@ -558,7 +548,7 @@ export default function Pledges() {
               onClick={() => setShowCancelled(s => !s)}
               className="text-xs font-medium text-ink-500 dark:text-parchment-300/70 hover:text-ink-700 dark:hover:text-parchment-100 transition-colors"
             >
-              {showCancelled ? 'Hide cancelled' : 'Show cancelled pledges'}
+              {showCancelled ? t('plg.hideCancelled') : t('plg.showCancelled')}
             </button>
           </div>
         )}

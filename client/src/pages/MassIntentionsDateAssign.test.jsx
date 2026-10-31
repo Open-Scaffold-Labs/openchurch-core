@@ -6,6 +6,7 @@
 //   4. Picking a Mass does not set the Mass date
 
 import { ToastProvider } from '../components/ToastProvider'
+import { ConfirmProvider } from '../components/ConfirmProvider'
 import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
@@ -62,7 +63,7 @@ function renderBook(path = '/mass-intentions') {
     <MemoryRouter initialEntries={[path]}>
       <LocaleProvider>
         <Routes>
-          <Route path="/mass-intentions" element={<ToastProvider><MassIntentions /></ToastProvider>} />
+          <Route path="/mass-intentions" element={<ToastProvider><ConfirmProvider><MassIntentions /></ConfirmProvider></ToastProvider>} />
           <Route path="/schedule" element={<div>Schedule</div>} />
         </Routes>
       </LocaleProvider>
@@ -316,7 +317,7 @@ describe('Assign dropdown follows the Mass date', () => {
     fireEvent.change(screen.getByLabelText(/^mass date$/i), { target: { value: '2026-10-04' } })
     expect(assignSelect().value).toBe('11')
     const conflict = await screen.findByTestId('save-date-conflict')
-    expect(conflict.textContent).toMatch(/You entered Sun, Oct 4, but this Mass is Sun, Oct 11/)
+    expect(conflict.textContent).toMatch(/You entered Sun, Oct 4, 2026, but this Mass is Sun, Oct 11, 2026/)
     expect(optionValues()).toContain('11')
     expect(optionValues()).toEqual(expect.arrayContaining(['', '4', '5', '6', '11']))
   })
@@ -332,20 +333,28 @@ describe('Assign dropdown follows the Mass date', () => {
     fireEvent.change(screen.getByLabelText(/^mass date$/i), { target: { value: '2026-10-04' } })
     expect(assignSelect().value).toBe('15')
     const conflict = await screen.findByTestId('save-date-conflict')
-    expect(conflict.textContent).toMatch(/You entered Sun, Oct 4, but this Mass is Mon, Oct 5/)
+    expect(conflict.textContent).toMatch(/You entered Sun, Oct 4, 2026, but this Mass is Mon, Oct 5, 2026/)
     return conflict
   }
 
-  it('save does not send a typed day with a Mass on another day', async () => {
+  it('save does not send a typed day with a Mass on another day, and says why (SP-095)', async () => {
     await typeOct4OverMondayMass()
+    expect(screen.queryByText(STRINGS.en['mi.dateConflictRefused'])).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: /^save$/i }))
     expect(writes()).toEqual([])
     expect(screen.getByTestId('save-date-conflict')).toBeInTheDocument()
+    expect(await screen.findByText(STRINGS.en['mi.dateConflictRefused'])).toBeInTheDocument()
   })
 
-  it('using the Mass date saves that day with the Mass', async () => {
+  // SP-094: the conflict buttons change the form only; Save writes.
+  it('using the Mass date changes the form only; Save then sends that day with the Mass', async () => {
     await typeOct4OverMondayMass()
     fireEvent.click(screen.getByRole('button', { name: /use the mass's date/i }))
+    expect(screen.getByLabelText(/^mass date$/i).value).toBe('2026-10-05')
+    await new Promise(r => setTimeout(r, 20))
+    expect(writes()).toEqual([])
+    expect(screen.queryByTestId('save-date-conflict')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /^save$/i }))
     await waitFor(() => expect(writes()).toHaveLength(1))
     expect(writes()[0]).toMatchObject({
       method: 'POST',
@@ -353,14 +362,37 @@ describe('Assign dropdown follows the Mass date', () => {
     })
   })
 
-  it('clearing the assignment saves the typed day with no Mass', async () => {
+  it('clearing the assignment changes the form only; Save then sends the typed day with no Mass', async () => {
     await typeOct4OverMondayMass()
     fireEvent.click(screen.getByRole('button', { name: /clear the assignment/i }))
+    expect(assignSelect().value).toBe('')
+    await new Promise(r => setTimeout(r, 20))
+    expect(writes()).toEqual([])
+    fireEvent.click(screen.getByRole('button', { name: /^save$/i }))
     await waitFor(() => expect(writes()).toHaveLength(1))
     expect(writes()[0].method).toBe('POST')
     expect(writes()[0].body.mass_date).toBe('2026-10-04')
     expect(writes()[0].body.calendar_event_id).toBeUndefined()
     expect(writes()[0].body.status).toBe('open')
+  })
+
+  it('SP-094: in Edit, either conflict button then Cancel writes nothing', async () => {
+    const row = { id: 9, intention: 'For a safe journey', requested_by: 'The family', calendar_event_id: 4, mass_date: '2026-10-04', status: 'scheduled' }
+    for (const name of [/use the mass's date/i, /clear the assignment/i]) {
+      stubFetch({ intentions: [row] })
+      const { unmount } = renderBook()
+      fireEvent.click(await screen.findByRole('button', { name: /edit intention/i }))
+      await waitFor(() => expect(assignSelect().value).toBe('4'))
+      fireEvent.change(screen.getByLabelText(/^mass date$/i), { target: { value: '2026-11-01' } })
+      await screen.findByTestId('save-date-conflict')
+      fireEvent.click(screen.getByRole('button', { name }))
+      await new Promise(r => setTimeout(r, 20))
+      expect(writes()).toEqual([])
+      fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }))
+      await new Promise(r => setTimeout(r, 20))
+      expect(writes()).toEqual([])
+      unmount()
+    }
   })
 
   it('an already-saved mismatch stays selected and says the days disagree', async () => {
@@ -378,7 +410,7 @@ describe('Assign dropdown follows the Mass date', () => {
     fireEvent.click(await screen.findByRole('button', { name: /edit intention/i }))
     await waitFor(() => expect(assignSelect().value).toBe('4'))
     const note = await screen.findByTestId('save-date-conflict')
-    expect(note.textContent).toMatch(/You entered Sun, Oct 18, but this Mass is Sun, Oct 4/)
+    expect(note.textContent).toMatch(/You entered Sun, Oct 18, 2026, but this Mass is Sun, Oct 4, 2026/)
     expect(assignSelect().value).toBe('4')
     fireEvent.click(screen.getByRole('button', { name: /save changes/i }))
     expect(writes()).toEqual([])

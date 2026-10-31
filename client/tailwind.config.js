@@ -4,6 +4,20 @@ export default {
   content: ['./index.html', './src/**/*.{js,jsx}'],
   theme: {
     extend: {
+      screens: {
+        // Narrow SCREEN only: phones, tablets, laptops under 1280px, and
+        // 200-300% desktop zoom (a 1280px window is 640/512/427 CSS px; a
+        // 1920px one 960/768). From md up the 240px sidebar is pinned, so
+        // the seven-column register (~850px) only fits at ~1140px+; below
+        // xl it clipped Place / Member and scrolled sideways (Beacon R3),
+        // so it reflows to stacked cards. Unlike max-xl it never matches
+        // print, so a printed register stays the ledger table.
+        reflow: { raw: 'screen and (max-width: 1279.98px)' },
+        // Schedule week grid (App Review R4, Beacon): seven readable day
+        // columns beside the sidebar need 1440 CSS px; at exactly 1280 the
+        // titles still clamped. Below this the Schedule uses the day agenda.
+        weekgrid: '1440px',
+      },
       fontFamily: {
         // Body UI stays familiar & readable.
         sans:  ['Inter', 'system-ui', '-apple-system', 'Segoe UI', 'sans-serif'],

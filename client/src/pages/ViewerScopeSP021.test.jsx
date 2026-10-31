@@ -94,7 +94,7 @@ describe('SP-029 Viewer shell makes no call that can only 403', () => {
 })
 
 describe('SP-021 Viewer routes', () => {
-  it.each(['/', '/clients', '/clients/12', '/schedule', '/preferences', '/getting-settled'])('%s opens', (p) => {
+  it.each(['/', '/clients', '/clients/12', '/schedule', '/preferences', '/getting-settled', '/mass-intentions/print'])('%s opens', (p) => {
     expect(viewerMayOpen(p)).toBe(true)
   })
   it.each(['/donations', '/payroll', '/finance', '/billing', '/groups', '/migration', '/schedule/conflicts',
@@ -105,14 +105,14 @@ describe('SP-021 Viewer routes', () => {
 })
 
 describe('SP-021 Help says what the server does', () => {
-  it('the Viewer column is true only for Dashboard/Schedule/Members and Report a problem', () => {
+  it('the Viewer column is true only for Dashboard/Schedule/Members/Mass Intentions and Report a problem', () => {
     const yes = ROLE_TABLE.filter(r => r.viewer).map(r => r.area)
-    expect(yes).toEqual(['Dashboard, Schedule, Members (view)', 'Report a problem; use the Assistant'])
+    expect(yes).toEqual(['Dashboard, Schedule, Members, Mass Intentions (view)', 'Report a problem; use the Assistant'])
   })
   it('Team guide and FAQ no longer promise Viewers read everything', () => {
     const all = JSON.stringify(MODULE_HELP.team) + JSON.stringify(FAQ)
     expect(all).not.toMatch(/Read-only everywhere/)
     expect(all).not.toMatch(/read everything they/)
-    expect(all).toMatch(/Viewers see the Dashboard, Members and Schedule/)
+    expect(all).toMatch(/Viewers see the Dashboard, Members, Schedule and Mass Intentions/)
   })
 })

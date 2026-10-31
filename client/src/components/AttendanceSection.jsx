@@ -3,6 +3,7 @@ import { Check, X, Minus, Users, Loader2 } from 'lucide-react'
 import { apiUrl } from '../api'
 import { useToast } from './ToastProvider'
 import SaveButton, { useSaveStatus } from './SaveButton'
+import { useLocale } from '../i18n'
 
 // Attendance section in the Event edit modal (Sprint T / T.2). Only
 // renders when editing an existing event (creates have no roster yet).
@@ -14,7 +15,7 @@ import SaveButton, { useSaveStatus } from './SaveButton'
 // trips and gives the user a clear 'did I save?' answer via the V3
 // SaveButton checkmark.
 //
-// 'Mark all present' is the common case for a regular Sunday — one
+// t('att.mark_all_present') is the common case for a regular Sunday — one
 // click and the whole roster is marked, then the user only flips
 // the few absentees.
 
@@ -30,11 +31,13 @@ import SaveButton, { useSaveStatus } from './SaveButton'
 // gilt, affirmative voice, same as a fully-met pledge; amber-800 6.69:1
 // for excused, the middle state; rose-800 7.56:1 for absent. Same
 // good/middle/bad reading, no traffic light, no failures.
-const STATUSES = [
-  { key: 'present', label: 'Present', icon: Check,  className: 'bg-brass-700 text-parchment-50 border-brass-700' },
-  { key: 'absent',  label: 'Absent',  icon: X,      className: 'bg-rose-800 text-parchment-50 border-rose-800' },
-  { key: 'excused', label: 'Excused', icon: Minus,  className: 'bg-amber-800 text-parchment-50 border-amber-800' },
-]
+function statusChips(t) {
+  return [
+    { key: 'present', label: t('att.present'), icon: Check,  className: 'bg-brass-700 text-parchment-50 border-brass-700' },
+    { key: 'absent',  label: t('att.absent'),  icon: X,      className: 'bg-rose-800 text-parchment-50 border-rose-800' },
+    { key: 'excused', label: t('att.excused'), icon: Minus,  className: 'bg-amber-800 text-parchment-50 border-amber-800' },
+  ]
+}
 
 const STATUS_LABEL = {
   present: 'present',
@@ -43,6 +46,7 @@ const STATUS_LABEL = {
 }
 
 export default function AttendanceSection({ eventId }) {
+  const { t } = useLocale()
   const toast = useToast()
   const [roster, setRoster] = useState(null)   // [{ member_id, member_name, member_email, status }, …]
   const [marks, setMarks]   = useState({})      // local mutations keyed by member_id
@@ -91,7 +95,7 @@ export default function AttendanceSection({ eventId }) {
       })),
     }
     if (payload.marks.length === 0) {
-      throw new Error('Mark at least one member before saving.')
+      throw new Error(t('att.markOneBeforeSave'))
     }
     const res = await fetch(apiUrl(`/api/events/${eventId}/attendance`), {
       method: 'POST',
@@ -160,7 +164,7 @@ export default function AttendanceSection({ eventId }) {
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-1.5">
           <Users size={13} className="text-church-700 dark:text-brass-300" />
-          <h3 className="text-xs font-semibold text-ink-700 dark:text-parchment-200">Attendance</h3>
+          <h3 className="text-xs font-semibold text-ink-700 dark:text-parchment-200">{t('att.attendance')}</h3>
           {!loading && roster?.length > 0 && (
             <span className="text-[11px] text-ink-500 dark:text-parchment-300/70">
               · {summary.present + summary.absent + summary.excused} of {roster.length} marked
@@ -174,7 +178,7 @@ export default function AttendanceSection({ eventId }) {
               onClick={markAllPresent}
               className="text-[11px] font-semibold text-church-700 dark:text-brass-300 hover:underline"
             >
-              Mark all present
+              {t('att.mark_all_present')}
             </button>
             <span className="text-ink-300 dark:text-parchment-400/40">·</span>
             <button
@@ -182,7 +186,7 @@ export default function AttendanceSection({ eventId }) {
               onClick={clearAll}
               className="text-[11px] font-semibold text-ink-500 dark:text-parchment-300/70 hover:text-ink-700 dark:hover:text-parchment-100"
             >
-              Clear
+              {t('att.clear')}
             </button>
           </div>
         )}
@@ -211,13 +215,13 @@ export default function AttendanceSection({ eventId }) {
                       {r.member_name}
                     </p>
                     {current && (
-                      <p className="text-[10px] text-ink-500 dark:text-parchment-300/70 capitalize">
+                      <p className="text-[11px] text-ink-500 dark:text-parchment-300/70 capitalize">
                         {STATUS_LABEL[current]}
                       </p>
                     )}
                   </div>
                   <div className="flex items-center gap-1 shrink-0">
-                    {STATUSES.map(s => {
+                    {statusChips(t).map(s => {
                       const active = current === s.key
                       return (
                         <button
@@ -268,7 +272,7 @@ export default function AttendanceSection({ eventId }) {
               disabled={Object.keys(marks).length === 0}
               className="text-xs px-3 py-2"
             >
-              Save attendance
+              {t('att.save_attendance')}
             </SaveButton>
           </div>
         </>

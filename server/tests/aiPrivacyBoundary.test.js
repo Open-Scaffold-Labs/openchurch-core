@@ -134,7 +134,9 @@ const leaky = (status) => {
 }
 
 describe('positive controls', () => {
-  it('a platform generate reaches the managed route model with the text and saves the draft', async () => {
+  // D-01 (R334-1): AI Studio is BYOK-only too — the control runs on the parish's own key.
+  it('an own-key generate reaches the BYOK route model with the text and saves the draft', async () => {
+    await setByok(orgA, 'anthropic')
     const r = await generate(orgA, { prompt: 'Synthetic announcement for the bake sale', type: 'announcement' })
     expect(r.status).toBe(200)
     expect(r.body.output).toBe('SYNTH-DRAFT-OUTPUT')
@@ -145,12 +147,16 @@ describe('positive controls', () => {
     expect(cap.anthropic[0].body.messages[0].content).toContain('Synthetic announcement for the bake sale')
     expect(cap.openai).toHaveLength(0)
   })
-  it('the assistant answers a parish on the platform key and stores metadata only', async () => {
-    const r = await assistant(orgA, { question: 'SYNTH-Q how do I print a tag?', page_route: '/checkin' })
+  // D-01: the assistant runs only on the parish's own key (BYOK-only).
+  it('the assistant answers a parish on its own key and stores metadata only', async () => {
+    await setByok(orgA, 'anthropic')
+    let r
+    try { r = await assistant(orgA, { question: 'SYNTH-Q how do I print a tag?', page_route: '/checkin' }) } finally { await clearByok(orgA) }
     expect(r.status).toBe(200)
     expect(cap.anthropic).toHaveLength(1)
+    expect(cap.anthropic[0].opts?.apiKey).toBe('synthetic-anthropic-org-key')
     const { rows } = await pool.query('SELECT question, answer, page_route, provider FROM ochr_assistant_messages WHERE id = $1 AND organization_id = $2', [r.body.id, orgA.id])
-    expect(rows[0]).toEqual({ question: null, answer: null, page_route: '/checkin', provider: 'anthropic' })
+    expect(rows[0]).toEqual({ question: null, answer: null, page_route: '/checkin', provider: 'anthropic (org key)' })
   })
 })
 
@@ -165,9 +171,11 @@ describe('F1: provider errors carry no upstream text', () => {
   })
   it('generate, enhance and assistant failures: no marker in monitor/log output, no OpenAI fallback', async () => {
     cap.anthropicImpl = () => { throw leaky(529) }
+    await setByok(orgA, 'anthropic') // D-01: every parish capability needs the parish's own key
     const g = await capture(() => generate(orgA, { prompt: SECRET_PROMPT, type: 'message' }))
     const e = await capture(() => enhance(orgA, SECRET_PROMPT))
-    const a = await capture(() => assistant(orgA, { question: SECRET_PROMPT }))
+    let a
+    try { a = await capture(() => assistant(orgA, { question: SECRET_PROMPT })) } finally { await clearByok(orgA) }
     for (const { result, text } of [g, e, a]) {
       expect(result.status).toBe(500)
       expect(result.body.code).toBe('ai_failed')
@@ -189,7 +197,7 @@ describe('F2: explicit routing', () => {
     expect(cap.anthropic).toHaveLength(2)
     for (const c of cap.anthropic) expect(c.opts?.apiKey).toBe('synthetic-anthropic-org-key')
   })
-  it('openai BYOK: generate uses OpenAI with the org key; the assistant refuses visibly with zero calls', async () => {
+  it('openai BYOK (D-01): generate AND the assistant use OpenAI with the org key, never Anthropic or the platform key', async () => {
     await setByok(orgA, 'openai')
     const g = await generate(orgA, { prompt: 'Synthetic', type: 'announcement' })
     expect(g.status).toBe(200)
@@ -198,11 +206,12 @@ describe('F2: explicit routing', () => {
     expect(cap.anthropic).toHaveLength(0)
     cap.openai.length = 0
     const a = await assistant(orgA, { question: 'Synthetic help?' })
-    expect(a.status).toBe(403)
-    expect(a.body.code).toBe('ai_unsupported_provider')
-    noCalls()
+    expect(a.status).toBe(200)
+    expect(cap.openai).toHaveLength(1)
+    expect(cap.openai[0].opts.apiKey).toBe('synthetic-openai-org-key')
+    expect(cap.anthropic).toHaveLength(0)
     const st = await request(server).get('/api/assistant/status').set(auth(orgA.token))
-    expect(st.body.available).toBe(false)
+    expect(st.body).toEqual({ available: true })
   })
   it('a malformed stored key refuses (503) with zero calls; it never becomes managed routing', async () => {
     await setByok(orgA, 'anthropic', 'not.a.valid-ciphertext')
@@ -212,11 +221,75 @@ describe('F2: explicit routing', () => {
     noCalls()
     expect((await request(server).get('/api/assistant/status').set(auth(orgA.token))).body.available).toBe(false)
   })
-  it('platform-only with no platform key: 503 ai_unavailable, zero calls', async () => {
+  // R334-1: every parish capability is BYOK-only, with a stray platform key PRESENT.
+  it.each([
+    ['parish_announcement_draft_v1', () => generate(orgA, { prompt: 'Synthetic', type: 'announcement' })],
+    ['parish_sermon_draft_v1', () => generate(orgA, { prompt: 'Synthetic', type: 'sermon' })],
+    ['parish_message_draft_v1', () => generate(orgA, { prompt: 'Synthetic', type: 'message' })],
+    ['parish_devotional_draft_v1', () => generate(orgA, { prompt: 'Synthetic', type: 'devotional' })],
+    ['parish_text_enhance_v1', () => enhance(orgA, 'Synthetic text')],
+  ])('D-01: %s with no parish key and a stray platform key PRESENT: 409 ai_key_required, zero calls, nothing saved', async (capId, call) => {
+    await clearByok(orgA)
+    process.env.ANTHROPIC_API_KEY = 'synthetic-platform-anthropic'
+    const before = (await pool.query('SELECT count(*)::int n FROM ochr_ai_generations WHERE organization_id = $1', [orgA.id])).rows[0].n
+    const r = await call()
+    expect(r.status).toBe(409)
+    expect(r.body.code).toBe('ai_key_required')
+    noCalls()
+    const after = (await pool.query('SELECT count(*)::int n FROM ochr_ai_generations WHERE organization_id = $1', [orgA.id])).rows[0].n
+    expect(after).toBe(before)
+    const led = await pool.query('SELECT count(*)::int n FROM ochr_ai_ledger WHERE organization_id = $1', [orgA.id])
+    expect(led.rows[0].n).toBe(0)
+    expect(CAPABILITIES[capId].byokOnly).toBe(true)
+  })
+  // R334-1: BYOK-only is enforced in routing, not by an unset env var.
+  it('D-01: no parish key with a stray platform key PRESENT: 409 ai_key_required, zero calls, status not available', async () => {
+    await clearByok(orgA)
+    process.env.ANTHROPIC_API_KEY = 'synthetic-platform-anthropic'
+    const a = await assistant(orgA, { question: 'Synthetic help?' })
+    expect(a.status).toBe(409)
+    expect(a.body.code).toBe('ai_key_required')
+    noCalls()
+    const st = await request(server).get('/api/assistant/status').set(auth(orgA.token))
+    expect(st.body).toEqual({ available: false, code: 'ai_key_required' })
+  })
+  it.each([['anthropic'], ['openai']])('D-01: %s BYOK provider failure: one call on that tenant key only, no cross-provider or platform retry', async (provider) => {
+    process.env.ANTHROPIC_API_KEY = 'synthetic-platform-anthropic'
+    await setByok(orgA, provider)
+    const other = provider === 'anthropic' ? 'openai' : 'anthropic'
+    cap[`${provider}Impl`] = () => { const e = new Error('SYNTH-UPSTREAM'); e.status = 529; throw e }
+    try {
+      const a = await assistant(orgA, { question: 'Synthetic help?' })
+      expect(a.status).toBeGreaterThanOrEqual(500)
+      expect(cap[provider]).toHaveLength(1)
+      expect(cap[provider][0].opts.apiKey).toBe(`synthetic-${provider}-org-key`)
+      expect(cap[other]).toHaveLength(0)
+    } finally {
+      cap[`${provider}Impl`] = null
+      cap.anthropic.length = 0; cap.openai.length = 0
+      await clearByok(orgA)
+    }
+  })
+  it('D-01: no parish key and no platform key: the assistant says add your key (409 ai_key_required), zero calls', async () => {
+    await clearByok(orgA)
+    const saved = process.env.ANTHROPIC_API_KEY
+    delete process.env.ANTHROPIC_API_KEY
+    try {
+      const a = await assistant(orgA, { question: 'Synthetic help?' })
+      expect(a.status).toBe(409)
+      expect(a.body.code).toBe('ai_key_required')
+      expect(a.body.error).toMatch(/Settings/)
+      expect(a.body.error).not.toMatch(/not available right now|unavailable/i)
+      noCalls()
+      const st = await request(server).get('/api/assistant/status').set(auth(orgA.token))
+      expect(st.body).toEqual({ available: false, code: 'ai_key_required' })
+    } finally { if (saved !== undefined) process.env.ANTHROPIC_API_KEY = saved }
+  })
+  it('no parish key and no platform key: generate is 409 ai_key_required (D-01), zero calls', async () => {
     delete process.env.ANTHROPIC_API_KEY
     const g = await generate(orgA, { prompt: 'Synthetic', type: 'announcement' })
-    expect(g.status).toBe(503)
-    expect(g.body.code).toBe('ai_unavailable')
+    expect(g.status).toBe(409)
+    expect(g.body.code).toBe('ai_key_required')
     noCalls()
   })
   it('support triage is managed-only: a BYOK parish gets its ticket, and no provider call', async () => {
@@ -261,6 +334,10 @@ describe('F4: route templates, not URLs', () => {
     }
   })
   it('the assistant sends and stores only the template', async () => {
+    await setByok(orgA, 'anthropic') // D-01: own key
+    try { await templateCase() } finally { await clearByok(orgA) }
+  })
+  async function templateCase() {
     const r = await assistant(orgA, { question: 'Where is the roster?', page_route: '/checkin/42%25253Fcode=SYNTH-ENC' })
     expect(r.status).toBe(200)
     expect(JSON.stringify(cap.anthropic[0].body)).not.toContain('SYNTH-')
@@ -269,7 +346,7 @@ describe('F4: route templates, not URLs', () => {
     const r2 = await assistant(orgA, { question: 'Where?', page_route: '/members/77?tab=SYNTH-T' })
     const { rows: r2rows } = await pool.query('SELECT page_route FROM ochr_assistant_messages WHERE id = $1', [r2.body.id])
     expect(r2rows[0].page_route).toBe('/members/:id')
-  })
+  }
 })
 
 describe('F5: bounds and classes at the seam', () => {
@@ -283,6 +360,7 @@ describe('F5: bounds and classes at the seam', () => {
     const c = CAPABILITIES.parish_devotional_draft_v1
     const saved = c.allowedDataClasses
     c.allowedDataClasses = ['restricted']
+    await setByok(orgA, 'anthropic') // reach the class check on a real (own-key) route
     try {
       const r = await generate(orgA, { prompt: 'Synthetic devotional', type: 'devotional' })
       expect(r.status).toBe(403)
@@ -324,6 +402,7 @@ describe('platform AI stop (Dale/CoS)', () => {
     } finally {
       expect((await setStop(false)).status).toBe(200)
     }
+    await setByok(orgA, 'anthropic') // D-01: resume is proven on the parish's own key
     expect((await generate(orgA, { prompt: 'Synthetic', type: 'announcement' })).status).toBe(200)
   })
 })
@@ -370,6 +449,7 @@ describe('R3-2: provider set without a key', () => {
 describe('least privilege and org type', () => {
   it('raw shared AI history is admin-only; tenant-scoped for admins', async () => {
     const mark = `SYNTH-TENANT-A-${RUN_ID}`
+    await setByok(orgA, 'anthropic')
     const made = await generate(orgA, { prompt: mark, type: 'announcement' })
     expect(made.status).toBe(200)
     for (const who of [viewerA, staffA]) {
@@ -386,7 +466,10 @@ describe('least privilege and org type', () => {
     expect(own.body.total).toBe(1)
   })
   it('assistant feedback is own-answer only and stores no note', async () => {
-    const r = await assistant(orgA, { question: 'Synthetic?' })
+    await setByok(orgA, 'anthropic') // D-01: own key
+    let r
+    try { r = await assistant(orgA, { question: 'Synthetic?' }) } finally { await clearByok(orgA) }
+    expect(r.status).toBe(200)
     expect((await request(server).post(`/api/assistant/${r.body.id}/feedback`).set(auth(staffA.token)).send({ feedback: 'up' })).status).toBe(404)
     expect((await request(server).post(`/api/assistant/${r.body.id}/feedback`).set(auth(orgA.token)).send({ feedback: 'down', note: 'SYNTH-NOTE' })).status).toBe(200)
     const { rows } = await pool.query('SELECT feedback, feedback_note FROM ochr_assistant_messages WHERE id = $1', [r.body.id])
@@ -462,12 +545,15 @@ describe('S7-F6: authoritative stop recheck at the admission boundary', () => {
   }
   beforeEach(async () => { await new Promise(r => setTimeout(r, 300)); cap.anthropic.length = 0; cap.openai.length = 0 })
 
-  it('managed generate and assistant: zero SDK calls, 403 ai_disabled', async () => {
-    for (const call of [() => generate(orgA, { prompt: 'Synthetic', type: 'announcement' }), () => assistant(orgA, { question: 'Synthetic?' })]) {
-      const { r, paused } = await stopDuringLookup(call)
-      expect(paused).toBeGreaterThan(0)
-      expect(r.status).toBe(403)
-      expect(r.body.code).toBe('ai_disabled')
+  it('own-key generate and assistant: zero SDK calls, 403 ai_disabled', async () => {
+    for (const [byok, call] of [[true, () => generate(orgA, { prompt: 'Synthetic', type: 'announcement' })], [true, () => assistant(orgA, { question: 'Synthetic?' })]]) {
+      if (byok) await setByok(orgA, 'anthropic') // D-01: the assistant has no managed route
+      try {
+        const { r, paused } = await stopDuringLookup(call)
+        expect(paused).toBeGreaterThan(0)
+        expect(r.status).toBe(403)
+        expect(r.body.code).toBe('ai_disabled')
+      } finally { if (byok) await clearByok(orgA) }
     }
     noCalls()
   })

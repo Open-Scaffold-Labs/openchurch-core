@@ -357,3 +357,34 @@ describe('Option A — money-invariants scanner', () => {
     expect(n, 'the scanner examined nothing').toBeGreaterThanOrEqual(6)
   })
 })
+
+// #365 — José 2026-10-22: the provider refund route is admin-only, like
+// /void and /record-refund. Staff and viewers get 403 and no refund row.
+describe('POST /api/donations/:id/refund is admin-only', () => {
+  let par, fund, staff
+  beforeAll(async () => {
+    process.env.PAYMENTS_PROVIDER = 'stub'
+    par = await signup({ organizationName: `OA admin-only Parish ${RUN_ID}`, name: 'Admin',
+      email: `oa_adm_${RUN_ID}@example.com`, password: 'oa-pw-adm-1' })
+    fund = await mkFund(par, `General adm ${RUN_ID}`)
+    const email = `oa_staff_${RUN_ID}@example.com`
+    const created = await request(server).post('/api/users').set(auth(par.token)).set('X-Forwarded-For', ip())
+      .send({ name: 'Sam Staff', email, password: 'oa-pw-staff-1', role: 'staff' })
+    expect(created.status).toBe(201)
+    const logged = await request(server).post('/api/auth/login').set('X-Forwarded-For', ip())
+      .send({ email, password: 'oa-pw-staff-1' })
+    expect(logged.status).toBe(200)
+    staff = { token: logged.body.token }
+  }, 30_000)
+  afterAll(() => { delete process.env.PAYMENTS_PROVIDER })
+
+  it('staff gets 403 and nothing is written; admin succeeds', async () => {
+    const gift = await chargedGift(par, fund, 'OA AdminOnly', 50)
+    const denied = await refund(staff, gift.id, { amount: 10 })
+    expect(denied.status).toBe(403)
+    expect((await facts(gift.id)).refunds).toHaveLength(0)
+    const ok = await refund(par, gift.id, { amount: 10 })
+    expect(ok.status).toBe(200)
+    expect((await facts(gift.id)).refunds).toHaveLength(1)
+  })
+})

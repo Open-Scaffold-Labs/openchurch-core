@@ -1,6 +1,10 @@
 // One in-progress intention, held while Schedule creates the Mass for that day.
 // The nonce leaves with the return URL. A later ?resume= restores this draft
 // only when it carries that same nonce and the draft has not expired.
+// createdMass is the Mass the server just confirmed, so the book can name it
+// on the first paint. It is never trusted unless its id is the id on the URL.
+
+import { calendarDay } from './dates'
 
 export const INTENTION_DRAFT_KEY = 'ochr:intention-draft'
 export const INTENTION_DRAFT_TTL_MS = 30 * 60 * 1000
@@ -17,6 +21,35 @@ export function newIntentionDraftNonce() {
     return crypto.randomUUID()
   }
   return '00000000-0000-4000-8000-000000000000'
+}
+
+// A created Mass id is a positive safe integer, or the canonical decimal
+// string of one. Arrays, booleans, objects, fractions, and unsafe
+// magnitudes are not ids — String([80]) is "80", and that is not a type check.
+export function parseCreatedMassId(raw) {
+  if (typeof raw === 'number') {
+    return Number.isSafeInteger(raw) && raw > 0 ? raw : null
+  }
+  if (typeof raw === 'string' && /^[1-9]\d*$/.test(raw)) {
+    const n = Number(raw)
+    return Number.isSafeInteger(n) && String(n) === raw ? n : null
+  }
+  return null
+}
+
+function readCreatedMass(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const id = parseCreatedMassId(raw.id)
+  if (id == null) return null
+  const text = (value) => (typeof value === 'string' ? value : '')
+  return {
+    id,
+    title: text(raw.title),
+    date: text(raw.date),
+    start_time: text(raw.start_time),
+    end_time: text(raw.end_time),
+    type: text(raw.type),
+  }
 }
 
 function draftFromForm(form, editingId) {
@@ -53,9 +86,41 @@ export function peekIntentionDraft() {
     const draft = draftFromForm(parsed.form, parsed.editingId)
     draft.nonce = isIntentionDraftNonce(parsed.nonce) ? parsed.nonce : null
     draft.expiresAt = typeof parsed.expiresAt === 'number' ? parsed.expiresAt : 0
+    const created = readCreatedMass(parsed.createdMass)
+    if (created) draft.createdMass = created
     return draft
   } catch {
     return null
+  }
+}
+
+// The write already landed. Remember that Mass on the open draft so the
+// book can select it before the next calendar read. A missing or expired
+// draft is left alone — the URL still carries the id.
+export function attachCreatedMass(nonce, mass, now = Date.now()) {
+  const draft = peekIntentionDraft()
+  if (!draftMatchesResume(draft, nonce, now)) return false
+  const created = readCreatedMass(mass)
+  if (!created) return false
+  const civil = calendarDay(created.date)
+  const previous = draft.form.status
+  const status = previous === 'open' || previous == null || previous === '' ? 'scheduled' : previous
+  try {
+    sessionStorage.setItem(INTENTION_DRAFT_KEY, JSON.stringify({
+      form: {
+        ...draft.form,
+        calendar_event_id: String(created.id),
+        mass_date: civil || draft.form.mass_date || '',
+        status,
+      },
+      editingId: draft.editingId,
+      nonce: draft.nonce,
+      expiresAt: draft.expiresAt,
+      createdMass: created,
+    }))
+    return true
+  } catch {
+    return false
   }
 }
 

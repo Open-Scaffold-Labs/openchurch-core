@@ -4,6 +4,7 @@ import crypto from 'crypto'
 import pool from '../db.js'
 import { monitor } from '../monitoring/index.js'
 import { notify } from '../notifications/transport.js'
+import { syncEventReminders } from '../notifications/calendarReminders.js'
 
 // VS.2 — token-based magic-link swap requests.
 //
@@ -315,6 +316,7 @@ swapPublicRouter.post('/by-token/:token/request', swapLinkLimiter, async (req, r
 swapPublicRouter.post('/by-token/:token/accept', swapLinkLimiter, async (req, res) => {
   const c = await pool.connect()
   let inTransaction = false
+  let released = false
   try {
     const me = await resolveToken(c, req.params.token)
     if (!me) return res.status(404).json({ error: 'Unknown link' })
@@ -378,12 +380,25 @@ swapPublicRouter.post('/by-token/:token/accept', swapLinkLimiter, async (req, re
     )
     await c.query('COMMIT'); inTransaction = false
 
+    // Finish every read that needs `c`, then hand its pool slot back BEFORE
+    // the reminder re-sync: syncEventReminders acquires its own pool
+    // connections, and holding `c` across it lets concurrent accepts exhaust
+    // a small serverless pool (each waiting on a second slot while keeping
+    // its first) so the syncs time out and stale reminders survive (R384-1).
     const { rows: req2 } = await c.query(
       `SELECT email FROM ochr_clients WHERE id = $1
        -- tenancy: the client id comes from a swap row this handler already
        -- scoped to the caller's organization; used only to address a notification.`,
       [r.requester_client_id]
     )
+    c.release(); released = true
+
+    // The roster changed, so the queued serving reminder must follow it:
+    // the member who swapped out no longer gets it, the member who took the
+    // slot does. Same re-sync every other roster change runs; it logs its
+    // own failures and never undoes the accepted swap.
+    await syncEventReminders(me.organization_id, r.calendar_event_id)
+
     notify({
       organizationId:    me.organization_id,
       recipient:         req2[0]?.email ?? null,
@@ -397,7 +412,7 @@ swapPublicRouter.post('/by-token/:token/accept', swapLinkLimiter, async (req, re
     monitor.error('swap.byToken.accept', err)
     res.status(500).json({ error: 'Failed to accept swap' })
   } finally {
-    c.release()
+    if (!released) c.release()
   }
 })
 

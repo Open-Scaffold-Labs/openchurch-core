@@ -9,7 +9,7 @@ import { useLocale } from '../i18n'
 // Public read-online bulletin (BUL.3b). Token-free; reached at
 // /p/:slug/bulletin. Shows the parish's most recent PUBLISHED bulletin
 // (drafts 404 server-side). Shell matches the other public pages —
-// parchment background, brand wordmark, "Powered by OpenChurch" footer.
+// parchment background, brand wordmark, "Powered by ScaffoldLabs" footer.
 
 function fmtLong(iso, dateLocale) {
   if (!iso) return ''
@@ -59,15 +59,15 @@ export default function PublicBulletin() {
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-parchment-100 dark:bg-ink-900">
+      <main className="min-h-screen flex items-center justify-center bg-parchment-100 dark:bg-ink-900">
         <Loader2 className="animate-spin text-brass-600" size={32} />
-      </div>
+      </main>
     )
   }
 
   if (err === 'not-found') {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-parchment-100 dark:bg-ink-900 p-6">
+      <main className="min-h-screen flex items-center justify-center bg-parchment-100 dark:bg-ink-900 p-6">
         <div className="max-w-md text-center space-y-3">
           <Newspaper className="mx-auto text-brass-500" size={36} />
           <h1 className="text-xl font-bold text-ink-900 dark:text-parchment-50 font-display">{t('bulletin.notFound')}</h1>
@@ -75,13 +75,13 @@ export default function PublicBulletin() {
             {t('bulletin.notFoundBody')}
           </p>
         </div>
-      </div>
+      </main>
     )
   }
 
   if (err || !data) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-parchment-100 dark:bg-ink-900 p-6">
+      <main className="min-h-screen flex items-center justify-center bg-parchment-100 dark:bg-ink-900 p-6">
         <div className="max-w-md text-center space-y-3">
           <Newspaper className="mx-auto text-brass-500" size={36} />
           <h1 className="text-xl font-bold text-ink-900 dark:text-parchment-50 font-display">{t('bulletin.loadFailTitle')}</h1>
@@ -89,7 +89,7 @@ export default function PublicBulletin() {
             {t('bulletin.loadFailBody')}
           </p>
         </div>
-      </div>
+      </main>
     )
   }
 
@@ -97,7 +97,7 @@ export default function PublicBulletin() {
   const litLabel = liturgical?.feast_name || liturgical?.season
 
   return (
-    <div className="min-h-screen bg-parchment-100 dark:bg-ink-900 py-8 px-4">
+    <main className="min-h-screen bg-parchment-100 dark:bg-ink-900 py-8 px-4">
       <motion.div
         initial={{ opacity: 0, y: 10 }}
         animate={{ opacity: 1, y: 0 }}
@@ -132,6 +132,6 @@ export default function PublicBulletin() {
           {t('bulletin.powered')}
         </footer>
       </motion.div>
-    </div>
+    </main>
   )
 }

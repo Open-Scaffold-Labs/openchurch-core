@@ -3,8 +3,8 @@
 // Viewer: 403 everywhere except what the Help role table gives them
 // (Dashboard, Schedule, Members, plus their own profile, notifications,
 // preferences and reports). Staff and Admin: unchanged, except that under
-// ux-legal 0005a Staff also lose Finance and Billing. The test reads which
-// option is applied from app.js so one file serves both stacks.
+// SP-007: Staff lose Finance when the finance mount is requireRole('admin').
+// Billing status Staff GET stays open until SP-001 (not coupled to finance).
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import request from 'supertest'
 import { readFileSync } from 'node:fs'
@@ -16,7 +16,7 @@ import { signToken } from '../src/middleware/auth.js'
 import { viewerMayRead } from '../src/middleware/viewerScope.js'
 
 const appSrc = readFileSync(new URL('../src/app.js', import.meta.url), 'utf8')
-const OPTION_A = /app\.use\('\/api\/finance',\s*requireAuth,\s*requireRole\('admin'\)/.test(appSrc)
+const FINANCE_ADMIN = /app\.use\('\/api\/finance',\s*requireAuth,\s*requireRole\('admin'\)/.test(appSrc)
 
 // [path, staff status at this stack, viewer may read]
 const D = '?start=2026-10-01&end=2026-10-12'
@@ -29,7 +29,7 @@ const MATRIX = [
   ['/api/checkins/recent', 200, false],
   ['/api/events', 200, false],
   ['/api/sacraments', 200, false],
-  ['/api/mass-intentions', 200, false],
+  ['/api/mass-intentions', 200, true],
   ['/api/service-plans', 200, false],
   ['/api/calendar/conflicts', 200, false],
   ['/api/events', 200, false],
@@ -45,9 +45,9 @@ const MATRIX = [
   [`/api/payroll/staff${D}`, 200, false],
   [`/api/payroll/shifts${D}`, 200, false],
   [`/api/payroll/summary${D}`, 200, false],
-  ['/api/finance/summary', OPTION_A ? 403 : 200, false],
-  ['/api/finance/coa', OPTION_A ? 403 : 200, false],
-  ['/api/finance/ledger', OPTION_A ? 403 : 200, false],
+  ['/api/finance/summary', FINANCE_ADMIN ? 403 : 200, false],
+  ['/api/finance/coa', FINANCE_ADMIN ? 403 : 200, false],
+  ['/api/finance/ledger', FINANCE_ADMIN ? 403 : 200, false],
   ['/api/ai/quota', 200, false],
   ['/api/ai/generations', 403, false], // admin-only since Stage 7 AI (main)
   ['/api/ai/provider', 403, false],
@@ -58,7 +58,7 @@ const MATRIX = [
   ['/api/insights', 403, false],
   ['/api/users', 403, false],
   ['/api/organization', 403, false],
-  ['/api/billing/status', OPTION_A ? 403 : 200, false],
+  ['/api/billing/status', 200, false], // SP-001: Staff GET still open; not SP-007
   ['/api/audit-log?limit=5', 403, false],
   ['/api/vault', 200, false],
   ['/api/support-tickets/mine', 200, true],

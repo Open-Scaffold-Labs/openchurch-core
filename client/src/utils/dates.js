@@ -1,3 +1,5 @@
+import { canonicalParishTimeZone } from './parishTimeZone'
+
 // Local-date helpers (1.1). Two bug families these exist to kill:
 //
 //   1. `new Date().toISOString().slice(0, 10)` returns the *UTC* day,
@@ -34,6 +36,34 @@ export function toLocalISO(date) {
 // `new Date().toISOString().slice(0, 10)`, which returns the UTC day.
 export function todayLocalISO() {
   return toLocalISO(new Date())
+}
+
+// Next upcoming Sunday (today when today is Sunday) as a civil YYYY-MM-DD
+// in the parish IANA zone. SP-189 / UAT SVC-16: Worship's New-plan date
+// should open on the Sunday the office is planning, not a weekday. Falls
+// back to UTC when the zone is missing or rejected by Intl — same rule as
+// parishTodayIso / the packet default.
+export function upcomingSundayISO(timeZone, now = new Date()) {
+  let zone = 'UTC'
+  if (typeof timeZone === 'string' && timeZone.trim()) {
+    try {
+      new Intl.DateTimeFormat('en-US', { timeZone: timeZone.trim() })
+      zone = timeZone.trim()
+    } catch { zone = 'UTC' }
+  }
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit', weekday: 'short',
+  }).formatToParts(now)
+  const pick = (type) => parts.find((p) => p.type === type)?.value
+  const today = `${pick('year')}-${pick('month')}-${pick('day')}`
+  const wd = pick('weekday') // Sun, Mon, ...
+  const dow = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 }[wd]
+  if (dow == null) return today
+  const daysAhead = dow === 0 ? 0 : 7 - dow
+  const [y, m, d] = today.split('-').map(Number)
+  const civil = new Date(y, m - 1, d)
+  civil.setDate(civil.getDate() + daysAhead)
+  return toLocalISO(civil)
 }
 
 // Parse a 'YYYY-MM-DD' string into a Date at LOCAL midnight. Replaces
@@ -146,4 +176,19 @@ export function calendarDay(value) {
   if (bare) return bare[1]
   const utcMidnight = /^(\d{4}-\d{2}-\d{2})T00:00:00(?:\.0+)?Z$/.exec(s)
   return utcMidnight ? utcMidnight[1] : ''
+}
+
+// One parish-facing day: weekday, month, day, year. A civil DATE stays
+// that stored day in every timezone. A real instant (anything calendarDay
+// rejects) is read in the parish zone, or UTC when the zone is unusable.
+export const PARISH_DAY_OPTIONS = { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' }
+
+export function formatParishDay(value, locale = 'en-US', timeZone) {
+  if (value == null || value === '') return ''
+  const day = calendarDay(value)
+  if (day) return formatStoredDate(day, PARISH_DAY_OPTIONS, locale || 'en-US')
+  const zone = canonicalParishTimeZone(typeof timeZone === 'string' ? timeZone : '') || 'UTC'
+  const date = value instanceof Date ? value : new Date(value)
+  if (Number.isNaN(date.getTime())) return ''
+  return date.toLocaleDateString(locale || 'en-US', { ...PARISH_DAY_OPTIONS, timeZone: zone })
 }

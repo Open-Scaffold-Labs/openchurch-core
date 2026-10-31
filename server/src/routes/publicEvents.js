@@ -19,8 +19,10 @@ import { isEmail } from './auth.js'
 import rateLimit from 'express-rate-limit'
 import ical from 'ical-generator'
 import pool from '../db.js'
+import { loadPublicChurchPage } from '../public/sitePage.js'
 import { normalizeDonorEmail } from '../finance/donorIdentity.js'
 import { createCharge, createDonationCheckout, paymentsConfigured, paymentsProvider, stubWouldFakeMoney } from '../payments/index.js'
+import { isBetaBillingOn } from '../billing/beta.js'
 import { notify } from '../notifications/transport.js'
 import { monitor } from '../monitoring/index.js'
 import { resolveLiturgicalContext } from './liturgical.js'
@@ -57,10 +59,17 @@ const connectLimiter = rateLimit({
 
 // Lookup the org row by slug. Returns null on miss so callers can
 // 404 cleanly.
+// The parish's own saved Stripe Connect account, or null. Only a value
+// stored on the organization row counts; nothing from the request or env.
+function savedConnectAccountId(org) {
+  const v = org?.stripe_connect_account_id
+  return typeof v === 'string' && /^acct_[A-Za-z0-9]+$/.test(v.trim()) ? v.trim() : null
+}
+
 async function findOrgBySlug(slug) {
   if (!slug || typeof slug !== 'string') return null
   const { rows } = await pool.query(
-    'SELECT id, name, slug, locale FROM ochr_organizations WHERE slug = $1 AND held_at IS NULL LIMIT 1',
+    'SELECT id, name, slug, locale, stripe_connect_account_id FROM ochr_organizations WHERE slug = $1 AND held_at IS NULL LIMIT 1',
     [slug]
   )
   return rows[0] ?? null
@@ -111,33 +120,16 @@ router.get('/:slug', async (req, res) => {
 // Location reuses the org's letterhead `address`.
 router.get('/:slug/page', async (req, res) => {
   try {
-    const { rows } = await pool.query(
-      // THIRD hand-listed org column list in this file — the two helpers
-      // above are the other two. That is exactly how a field goes missing:
-      // `locale` was added to both helpers and this query still returned
-      // English, and the test that asserts the class caught it rather than
-      // a reviewer noticing a third query fifteen lines further down.
-      `SELECT name, slug, tagline, about, service_times, address, page_published, locale
-         FROM ochr_organizations
-        WHERE slug = $1 AND held_at IS NULL
-        LIMIT 1`,
-      [req.params.slug]
-    )
-    const org = rows[0]
-    if (!org || !org.page_published) {
+    // Site document + branding live in public/sitePage.js so this router
+    // does not keep growing a third hand-listed org column SELECT.
+    const payload = await loadPublicChurchPage(req.params.slug)
+    if (!payload) {
       return res.status(404).json({ error: 'Church page not found' })
     }
-
-    res.set('Cache-Control', 'public, max-age=300')
-    res.json({
-      church: { name: org.name, slug: org.slug, locale: org.locale ?? 'en' },
-      page: {
-        tagline:       org.tagline,
-        about:         org.about,
-        service_times: org.service_times,
-        address:       org.address,
-      },
-    })
+    // N465-1: unpublish must not linger in shared/browser caches for up to
+    // 5 minutes. This surface can be taken down for privacy; never cache it.
+    res.set('Cache-Control', 'no-store')
+    res.json(payload)
   } catch (err) {
     console.error('public church page failed:', err)
     res.status(500).json({ error: 'Failed to load church page' })
@@ -172,7 +164,8 @@ router.get('/:slug/groups', async (req, res) => {
         ORDER BY name ASC`,
       [org.id]
     )
-    res.set('Cache-Control', 'public, max-age=300')
+    // N466-2: takedown / page_published flip must not linger in shared caches.
+    res.set('Cache-Control', 'no-store')
     res.json({ church: { name: org.name, slug: org.slug, locale: org.locale ?? 'en' }, groups: rows })
   } catch (err) {
     console.error('public groups failed:', err)
@@ -322,20 +315,45 @@ router.post('/:slug/give', giveLimiter, async (req, res) => {
       if (frequency) {
         return res.status(400).json({ error: 'Recurring online gifts are coming soon — choose a one-time gift for now.' })
       }
+      // Payments are on hold (same switch as SaaS checkout). Refuse before
+      // any Checkout session is created. Body-supplied Connect accounts are
+      // ignored later; the hold must fire first so a forged acct_ cannot
+      // reach Stripe while the hold is on.
+      if (isBetaBillingOn()) {
+        return res.status(409).json({ error: 'beta_billing_disabled' })
+      }
       const base = (process.env.CLIENT_URL || 'http://localhost:5202').replace(/\/$/, '')
       try {
-        const { url } = await createDonationCheckout({
+        const coverFee = Boolean(req.body?.cover_fee === true)
+        // The destination account is the parish's OWN saved Connect
+        // account and nothing else. Never from the request body (a caller
+        // could otherwise route this parish's gifts to any account), and
+        // never from a deployment-wide default (which would pool several
+        // parishes' gifts into one account). No saved account → refuse.
+        const stripeConnectAccountId = savedConnectAccountId(org)
+        if (!stripeConnectAccountId) {
+          return res.status(409).json({ error: 'Online giving is not set up for this parish yet. No charge was made.' })
+        }
+        const checkout = await createDonationCheckout({
           organizationId: org.id,
+          stripeConnectAccountId,
           amount: dollars,
           fundId: fund.id,
           fundName: fund.name,
           donorName,
           donorEmail: donorEmail || undefined,
           message: message || undefined,
+          coverFee,
           successUrl: `${base}/p/${req.params.slug}/give?success=1`,
           cancelUrl:  `${base}/p/${req.params.slug}/give?canceled=1`,
         })
-        return res.json({ checkout_url: url })
+        return res.json({
+          checkout_url: checkout.url,
+          connect_mode: checkout.connectMode,
+          application_fee_amount: 0,
+          cover_fee_default_checked: false,
+          cover_fee_applied: Boolean(checkout.coverFeeApplied),
+        })
       } catch {
         return res.status(502).json({ error: 'Payment could not be started. No charge was made.' })
       }
@@ -555,16 +573,29 @@ router.get('/:slug/events.ics', async (req, res) => {
 
 // GET /api/public/:slug/bulletin
 // The parish's most recent PUBLISHED bulletin, read-online (BUL.3b).
-// Privacy boundary: only published rows are exposed — a draft 404s the
-// same as a missing one. The liturgical day is computed server-side (the
-// public reader has no auth to hit /api/liturgical). Internal calendar
-// events are intentionally NOT included here; the bulletin shows only
-// what the admin wrote plus the liturgical context.
+// SP-299: AND-gate page_published && bulletin.published. Same 404 for
+// missing org, unpublished church page, or draft-only bulletin — no
+// existence leak. Checked every request; no-store so unpublish/page-off
+// cannot linger in shared caches. findOrgBySlug alone is not enough
+// (it only checks held_at). The liturgical day is computed server-side.
 router.get('/:slug/bulletin', async (req, res) => {
   try {
-    const org = await findOrgBySlug(req.params.slug)
+    const slug = req.params.slug
+    if (!slug || typeof slug !== 'string') {
+      return res.status(404).json({ error: 'Bulletin not found' })
+    }
+    // Gate 1: held_at IS NULL AND page_published = TRUE (same 404 shape).
+    const { rows: orgRows } = await pool.query(
+      `SELECT id, name, slug, locale
+         FROM ochr_organizations
+        WHERE slug = $1 AND held_at IS NULL AND page_published = TRUE
+        LIMIT 1`,
+      [slug],
+    )
+    const org = orgRows[0]
     if (!org) return res.status(404).json({ error: 'Bulletin not found' })
 
+    // Gate 2: latest published bulletin for that org.
     const { rows } = await pool.query(
       `SELECT to_char(date, 'YYYY-MM-DD') AS date, announcements,
               readings, intentions, pastor_note, updated_at
@@ -579,7 +610,7 @@ router.get('/:slug/bulletin', async (req, res) => {
 
     const liturgical = await resolveLiturgicalContext(bulletin.date, org.id)
 
-    res.set('Cache-Control', 'public, max-age=300')
+    res.set('Cache-Control', 'no-store')
     res.json({ org: { name: org.name, slug: org.slug, locale: org.locale ?? 'en' }, bulletin, liturgical })
   } catch (err) {
     console.error('public bulletin failed:', err)

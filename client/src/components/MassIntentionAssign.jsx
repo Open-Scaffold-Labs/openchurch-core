@@ -12,6 +12,7 @@ import { useLocale } from '../i18n'
 import { useToast } from './ToastProvider'
 import { mutate } from '../utils/format'
 import { isMassCalendarEvent } from '../utils/massEvent'
+import { splitDeathMark } from '../utils/deathMark'
 
 
 // Continuity: the Mass drawer already knows which calendar event and date
@@ -33,6 +34,12 @@ export function intentionBookHref(event) {
   return q ? `/mass-intentions?${q}` : '/mass-intentions'
 }
 
+// SP-158: † only for an intention for the departed (same rule as the book).
+function DeathMarkedText({ text }) {
+  const { departed, text: body } = splitDeathMark(text)
+  return <>{departed && <><span className="font-display">†</span>{' '}</>}{body}</>
+}
+
 function displayIntention(t) {
   if (!t) return t
   return /^\s*[†+]/.test(t) ? `† ${t.replace(/^\s*[†+]\s*/, '')}` : t
@@ -52,11 +59,20 @@ export default function MassIntentionAssign({
   const [awaiting, setAwaiting] = useState([])
   const [awaitingState, setAwaitingState] = useState(isMassCalendarEvent(event) ? 'loading' : 'ok') // loading | ok | failed
   const [busyId, setBusyId] = useState(null)
+  // The intention just assigned arrives in this Mass's list with a brief
+  // brass glow, so staff see exactly where it went (V1.5, study #8).
+  const [justAssignedId, setJustAssignedId] = useState(null)
+  const glowTimerRef = useRef(null)
+  useEffect(() => () => clearTimeout(glowTimerRef.current), [])
   const busyRef = useRef(false)
   const [actionError, setActionError] = useState(null)
+  // SP-159: Release asks first. Nothing is sent until the second click.
+  const [confirmReleaseId, setConfirmReleaseId] = useState(null)
 
   const loadAwaiting = useCallback(() => {
     if (!isMassCalendarEvent(event)) return () => {}
+    // Viewers only see assigned intentions; awaiting is a write lane.
+    if (!canWrite) { setAwaitingState('ok'); setAwaiting([]); return () => {} }
     if (!eventDate) { setAwaitingState('ok'); setAwaiting([]); return () => {} }
     let cancelled = false
     setAwaitingState('loading')
@@ -75,14 +91,17 @@ export default function MassIntentionAssign({
         setAwaitingState('failed')
       })
     return () => { cancelled = true }
-  }, [event, eventDate])
+  }, [event, eventDate, canWrite])
 
   useEffect(() => {
     const cancel = loadAwaiting()
     return cancel
   }, [loadAwaiting])
 
-  const run = async (intentionId, path, body, successKey) => {
+  // SP-078: assigning moves an Open intention to Scheduled, and releasing
+  // moves a Scheduled one back to Open, on the server. Say so — but only
+  // when the confirmed row's status actually differs from what we showed.
+  const run = async (intentionId, path, body, successKey, priorStatus) => {
     if (busyRef.current) return
     busyRef.current = true
     setBusyId(intentionId)
@@ -104,7 +123,17 @@ export default function MassIntentionAssign({
       onChanged?.()
       return
     }
-    toast.success(t(successKey))
+    const nextStatus = data && typeof data.status === 'string' ? data.status : null
+    const changed = nextStatus && priorStatus && nextStatus !== priorStatus
+      && ['open', 'scheduled'].includes(nextStatus)
+    toast.success(changed
+      ? `${t(successKey)} ${t('mi.status')}: ${nextStatus === 'scheduled' ? t('mi.scheduled') : t('mi.open')}.`
+      : t(successKey))
+    if (path === 'assign') {
+      setJustAssignedId(intentionId)
+      clearTimeout(glowTimerRef.current)
+      glowTimerRef.current = setTimeout(() => setJustAssignedId(null), 4000) // outlasts the refetch; animates once
+    }
     loadAwaiting()
     onChanged?.(data)
   }
@@ -112,11 +141,11 @@ export default function MassIntentionAssign({
   const offer = (mi) => run(mi.id, 'assign', {
     calendar_event_id: event.id,
     expected_calendar_event_id: mi.calendar_event_id ?? null,
-  }, 'sched.assignedToast')
+  }, 'sched.assignedToast', mi.status)
 
-  const release = (mi) => run(mi.id, 'unassign', {
+  const release = (mi) => { setConfirmReleaseId(null); return run(mi.id, 'unassign', {
     expected_calendar_event_id: event.id,
-  }, 'sched.releasedToast')
+  }, 'sched.releasedToast', mi.status) }
 
   if (!isMassCalendarEvent(event)) return null
 
@@ -133,19 +162,48 @@ export default function MassIntentionAssign({
       ) : assigned.length > 0 ? (
         <ul className="space-y-1 mb-2">
           {assigned.map(mi => (
-            <li key={mi.id} className="flex items-start justify-between gap-2 text-xs text-ink-800 dark:text-parchment-100">
+            <li key={mi.id} className={`flex items-start justify-between gap-2 text-xs text-ink-800 dark:text-parchment-100 rounded${mi.id === justAssignedId ? ' row-arrive slot-glow' : ''}`}>
               <span className="min-w-0">
-                <span className="font-display">†</span>{' '}
-                {displayIntention(mi.formatted_intention || mi.intention).replace(/^†\s*/, '')}
+                <DeathMarkedText text={mi.formatted_intention || mi.intention} />
                 {mi.requester_name || mi.requested_by ? (
                   <span className="text-ink-500 dark:text-parchment-300/70"> — {mi.requester_name || mi.requested_by}</span>
                 ) : null}
               </span>
-              {canWrite && (
+              {/* SP-182: a fulfilled intention stays with the Mass that offered
+                  it (the server refuses release too), so no Release is offered. */}
+              {mi.status === 'fulfilled' && (
+                <span data-testid="mi-said-badge" className="shrink-0 text-[11px] font-semibold text-brass-700 dark:text-brass-300">
+                  {t('sched.saidBadge')}
+                </span>
+              )}
+              {canWrite && mi.status !== 'fulfilled' && confirmReleaseId === mi.id && (
+                <span role="group" aria-label={t('sched.releaseConfirmTitle')} className="shrink-0 flex flex-col items-end gap-1 max-w-[14rem]">
+                  <span className="text-[11px] text-ink-600 dark:text-parchment-300/80 text-right">{t('sched.releaseConfirmBody')}</span>
+                  <span className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setConfirmReleaseId(null)}
+                      className="text-[11px] font-semibold text-ink-500 dark:text-parchment-300/70 hover:underline"
+                    >
+                      {t('sched.releaseKeep')}
+                    </button>
+                    <button
+                      type="button"
+                      data-testid="mi-release-confirm"
+                      disabled={busyId != null}
+                      onClick={() => release(mi)}
+                      className="text-[11px] font-semibold text-church-800 dark:text-brass-300 hover:underline disabled:opacity-60"
+                    >
+                      {busyId === mi.id ? <Loader2 size={12} className="animate-spin" /> : t('sched.releaseConfirm')}
+                    </button>
+                  </span>
+                </span>
+              )}
+              {canWrite && mi.status !== 'fulfilled' && confirmReleaseId !== mi.id && (
                 <button
                   type="button"
                   disabled={busyId != null}
-                  onClick={() => release(mi)}
+                  onClick={() => setConfirmReleaseId(mi.id)}
                   aria-label={`${t('sched.release')}: ${displayIntention(mi.formatted_intention || mi.intention)}`}
                   className="shrink-0 text-[11px] font-semibold text-ink-500 dark:text-parchment-300/70 hover:text-church-800 dark:hover:text-brass-300 disabled:opacity-60"
                 >
@@ -189,8 +247,7 @@ export default function MassIntentionAssign({
               {awaiting.map(mi => (
                 <li key={mi.id} className="flex items-start justify-between gap-2 text-xs text-ink-800 dark:text-parchment-100">
                   <span className="min-w-0">
-                    <span className="font-display">†</span>{' '}
-                    {displayIntention(mi.intention).replace(/^†\s*/, '')}
+                    <DeathMarkedText text={mi.intention} />
                     {mi.requester_name || mi.requested_by ? (
                       <span className="text-ink-500 dark:text-parchment-300/70"> — {mi.requester_name || mi.requested_by}</span>
                     ) : null}
@@ -215,9 +272,15 @@ export default function MassIntentionAssign({
         <p role="status" className="mt-2 text-xs text-rose-700 dark:text-rose-300">{actionError}</p>
       )}
 
-      <Link to={intentionBookHref(event)} className="mt-2 inline-block text-[11px] font-semibold text-brass-700 dark:text-brass-300 hover:underline">
-        {t('sched.openBook')}
-      </Link>
+      {canWrite ? (
+        <Link to={intentionBookHref(event)} className="mt-2 inline-block text-[11px] font-semibold text-brass-700 dark:text-brass-300 hover:underline">
+          {t('sched.openBook')}
+        </Link>
+      ) : (
+        <Link to="/mass-intentions/print" className="mt-2 inline-block text-[11px] font-semibold text-brass-700 dark:text-brass-300 hover:underline">
+          {t('sched.openWeeklySheet')}
+        </Link>
+      )}
     </div>
   )
 }

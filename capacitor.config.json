@@ -1,0 +1,17 @@
+{
+  "appId": "com.openscaffoldlabs.openchurch",
+  "appName": "OpenChurch",
+  "webDir": "client/dist",
+  "ios": {
+    "contentInset": "automatic",
+    "backgroundColor": "#e7d9c1"
+  },
+  "android": {
+    "backgroundColor": "#e7d9c1",
+    "allowMixedContent": false
+  },
+  "server": {
+    "androidScheme": "https",
+    "iosScheme": "https"
+  }
+}

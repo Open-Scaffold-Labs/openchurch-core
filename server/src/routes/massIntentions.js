@@ -1,17 +1,24 @@
 // Mass intention routes (MI.1 / MI.4). Tenant-scoped book of requested Mass
 // intentions.
 //
-//   GET    /api/mass-intentions              → the book (paginated, ?status=, ?q=)
+//   GET    /api/mass-intentions              → the book (paginated, ?status=, ?q=,
+//                                               ?view=past_scheduled, ?weekend=this_sunday)
 //   GET    /api/mass-intentions/weekly       → sacristy manifest window
 //   GET    /api/mass-intentions/nearest-outside → closest listing date outside a window
 //                                               + tenant undated-waiting signal
 //   GET    /api/mass-intentions/awaiting     → unassigned, offerable on a date
 //   GET    /api/mass-intentions/:id          → one entry
 //   POST   /api/mass-intentions              → add a request
+//   POST   /api/mass-intentions/bulk-mark-said          → mark the chosen rows said (D-1)
+//   POST   /api/mass-intentions/bulk-mark-said/:batchId/undo
 //   POST   /api/mass-intentions/:id/assign   → offer at a scheduled Mass (MI.4)
 //   POST   /api/mass-intentions/:id/unassign → release from a Mass (MI.4)
 //   PATCH  /api/mass-intentions/:id          → edit allowlisted fields
-//   DELETE /api/mass-intentions/:id          → remove
+//   POST   /api/mass-intentions/:id/correct  → admin correction, reason required
+//   POST   /api/mass-intentions/:id/void     → admin void, reason required
+//   POST   /api/mass-intentions/:id/disposition → disposition on already-voided held stipend
+//   (SP-268 Release stipend deferred — fulfilled 2330 stays held until remittance CoA decided)
+//   DELETE /api/mass-intentions/:id          → remove (never fulfilled history)
 //
 // All queries scope on organization_id. Writes are staff/admin (writeGate at
 // the mount); viewers read. A linked requester (requested_by_client_id) is
@@ -23,16 +30,44 @@
 
 import { Router } from 'express'
 import pool from '../db.js'
+import { requireRole } from '../middleware/auth.js'
+import { writeMassIntentionAuditInTx } from '../middleware/auditLog.js'
+import { bulkMarkSaid, undoBulkMarkSaid, MAY_MARK_SAID } from './massIntentionMarkSaid.js'
 import { requireIntParam, parsePagination } from '../utils/params.js'
 import { monitor } from '../monitoring/index.js'
+import {
+  recordStipendIfNeeded,
+  syncStipendLiability,
+  parseDisposition,
+  writeDisposition,
+  openStipendLiability,
+  DISPOSITION_REQUIRED,
+  parseReceivedDate,
+  parsePaymentMethod,
+  stipendEffectiveDate,
+  RECEIVED_DATE_REQUIRED,
+  RECEIVED_DATE_INVALID,
+  PAYMENT_METHOD_REQUIRED,
+} from '../finance/stipends.js'
 import {
   canonicalIsoDate,
   finiteSpanDays,
   orgTodayIso,
+  orgNowHHMM,
   readWeeklyDate,
   resolveWeeklyWindow,
+  thisSundayPair,
+  thisSundaySpan,
   usableTimeZone,
 } from '../utils/sheetWeek.js'
+
+
+// N449-1: stipend money paths use the parish civil day, not process UTC.
+async function orgCivilToday(db, orgId, instant = new Date()) {
+  const { rows } = await db.query(
+    `SELECT timezone FROM ochr_organizations WHERE id = $1`, [orgId])
+  return orgTodayIso(instant, usableTimeZone(rows[0]?.timezone))
+}
 
 const router = Router()
 
@@ -61,6 +96,81 @@ export const DATE_CONFLICT_CODE = 'date_conflict'
 export const STAMPED_HISTORY_CODE = 'stamped_history'
 export const STAMP_CONFLICT_CODE = 'stamp_conflict'
 export const PREVIOUSLY_RECORDED_FULFILMENT = 'previously recorded fulfilment'
+
+// Founder decision 8 (2026-10-19): fulfilled history is preserved. An
+// ordinary PATCH that would change a stored value on a fulfilled row is
+// refused; an administrator corrects it with a reason (POST /:id/correct,
+// written to ochr_mass_intention_corrections). Delete is refused for a
+// fulfilled, stamped, or voided row; an erroneous or duplicate row is
+// voided with a reason instead (POST /:id/void).
+export const FULFILLED_LOCKED_CODE = 'fulfilled_locked'
+// #285 F6 (José, 2026-10-25): once an intention is fulfilled (or carries a
+// fulfilment stamp), its offering amount and its Mass link are locked for
+// every path, the admin correction included. A wrong amount or Mass is put
+// right by voiding the entry with a reason (the row stays in the book) and
+// recording it again — never by rewriting the fulfilled record.
+export const FULFILLED_OFFERING_LOCKED_CODE = 'fulfilled_offering_locked'
+export const REFUSE_FULFILLED_OFFERING_EDIT =
+  'The offering and the Mass are locked once an intention is fulfilled. Nothing was changed. A fulfilled intention with a held stipend cannot be voided yet; remittance accounting is still an open parish decision.'
+export const REFUSE_FULFILLED_EDIT =
+  'This intention was fulfilled and is kept as recorded. Nothing was changed. An administrator can correct it with a reason.'
+export const FULFILLED_HISTORY_CODE = 'fulfilled_history'
+export const REFUSE_FULFILLED_DELETE =
+  'This intention is part of the parish record and cannot be deleted. Nothing was changed. An administrator can void it with a reason.'
+// SP-133 / F4 (José adopted TARS #62 comment 6380227296 item 3, 2026-10-23):
+// once an offering amount has been recorded on an intention, no role —
+// admin included — may hard-delete it. The admin-only reasoned void keeps
+// the row and its trail. "Recorded" means: the stored stipend is not NULL
+// (an explicit 0.00 IS a recorded amount; it does not mean paid or waived),
+// OR the durable offering_recorded marker (migration 126) is set. Amounts
+// cleared before any surviving evidence existed stay UNKNOWN (out of scope). An
+// ordinary edit may not clear a recorded amount to NULL; an admin
+// correction may, and a corrected row has entered history, so it stays
+// protected either way.
+export const OFFERING_RECORDED_CODE = 'offering_recorded'
+export const REFUSE_OFFERING_DELETE =
+  'An offering was recorded for this intention, so it cannot be deleted. Nothing was changed. An administrator can void it with a reason.'
+export const OFFERING_CLEAR_CODE = 'offering_clear_refused'
+export const REFUSE_OFFERING_CLEAR =
+  'A recorded offering cannot be removed with an ordinary edit. Nothing was changed. An administrator can correct it with a reason.'
+
+// R382-1: the proof lives on the row (migration 126 offering_recorded,
+// latched by trigger on every write that stores a non-NULL stipend, 0.00
+// included, never cleared). Audit retention cannot change this answer.
+// Pure: the caller passes the locked row.
+export function offeringEverRecorded(row) {
+  return !!row && (row.offering_recorded === true || row.stipend != null)
+}
+export const VOIDED_CODE = 'voided'
+export const REFUSE_VOIDED =
+  'This intention was voided. Nothing was changed.'
+// N449-3 / Ledger: voiding a fulfilled intention that still holds open 2330
+// is the deferred SP-268 Release by another door (pastor_applied clears
+// liability with no remittance counter-account). Refuse until remittance CoA.
+export const VOID_FULFILLED_HELD_CODE = 'void_fulfilled_held'
+export const REFUSE_VOID_FULFILLED_HELD =
+  'A fulfilled Mass intention with a held stipend cannot be voided yet. The stipend stays held until remittance accounting is decided. Nothing was changed.'
+// D449-4 / Ledger: a disposition is only for an intention whose Mass was NOT
+// said. Fulfilled + disposition (void with open 0, or /disposition after void)
+// refuses. "Was fulfilled" after void comes from the void correction's
+// before.status — no new column, no migration. Missing void correction fails
+// closed with the same code.
+export const DISPOSITION_FULFILLED_CODE = 'disposition_fulfilled'
+export const REFUSE_DISPOSITION_FULFILLED =
+  'This Mass was already offered, so its stipend can\'t be refunded, transferred, or applied elsewhere. Nothing was changed.'
+export const REASON_REQUIRED_CODE = 'reason_required'
+export const REFUSE_REASON_REQUIRED = 'A reason is required. Nothing was changed.'
+export const ADMIN_ONLY_CODE = 'admin_only'
+export const REFUSE_ADMIN_ONLY = 'Only an administrator can correct or void an intention. Nothing was changed.'
+export const REASON_MAX = 500
+
+// A reason is real text: trimmed, non-empty, bounded.
+export function readReason(v) {
+  if (typeof v !== 'string') return null
+  const t = v.trim()
+  if (!t || t.length > REASON_MAX) return null
+  return t
+}
 
 export const REFUSE_STAMPED_HISTORY =
   'This intention was already recorded at a Mass. The link was not changed. Nothing was lost.'
@@ -210,8 +320,8 @@ export function readStipend(v) {
 // R285-F1: columns compared before/after a PATCH so the audit row can name
 // what changed. Only field NAMES leave this module (plus numeric stipend);
 // intention / requester / note text never does.
-const CHANGE_COLS = 'intention, requested_by, note, stipend, requested_by_client_id'
-export const MI_CHANGE_FIELDS = ['intention', 'note', 'requested_by', 'requested_by_client_id', 'stipend', 'mass_date', 'status', 'calendar_event_id']
+const CHANGE_COLS = 'intention, requested_by, note, stipend, requested_by_client_id, payment_method'
+export const MI_CHANGE_FIELDS = ['intention', 'note', 'requested_by', 'requested_by_client_id', 'stipend', 'mass_date', 'status', 'calendar_event_id', 'received_date', 'payment_method']
 const changeKey = v => (v == null ? null : String(v))
 // R285-4: the audit's projected state comes from the SAME committed
 // RETURNING row as changed[] (not the post-COMMIT loadFull re-read, which a
@@ -247,6 +357,15 @@ const EDITABLE = {
   status:       v => (MI_STATUSES.has(v) ? v : undefined),
   stipend:      v => {
     const read = readStipend(v)
+    return read.ok ? read.value : undefined
+  },
+  // SP-266/270: cash-in day and method travel with the offering.
+  received_date: v => {
+    const read = parseReceivedDate(v)
+    return read.ok ? read.value : undefined
+  },
+  payment_method: v => {
+    const read = parsePaymentMethod(v)
     return read.ok ? read.value : undefined
   },
 }
@@ -332,6 +451,12 @@ const SELECT_COLS = `s.id, s.intention, s.requested_by, s.requested_by_client_id
                           ELSE to_char(s.mass_date, 'YYYY-MM-DD')
                      END AS mass_date,
                      s.calendar_event_id, s.stipend, s.status, s.note,
+                     to_char(s.received_date, 'YYYY-MM-DD') AS received_date,
+                     s.payment_method,
+                     (SELECT COALESCE(SUM(CASE WHEN f.kind = 'recorded' THEN f.amount ELSE -f.amount END), 0)::NUMERIC(12,2)
+                        FROM ochr_mass_stipend_facts f
+                       WHERE f.organization_id = s.organization_id
+                         AND f.mass_intention_id = s.id) AS open_stipend_liability,
                      s.created_at, s.updated_at, c.name AS requester_name,
                      CASE WHEN s.status = 'fulfilled'
                           THEN s.fulfilled_mass_title
@@ -341,7 +466,18 @@ const SELECT_COLS = `s.id, s.intention, s.requested_by, s.requested_by_client_id
                           THEN to_char(s.fulfilled_mass_time, 'HH24:MI')
                           ELSE to_char(e.start_time, 'HH24:MI')
                      END AS mass_time,
-                     ${fulfilmentLabelSql('s')} AS fulfilment_label`
+                     ${fulfilmentLabelSql('s')} AS fulfilment_label,
+                     s.voided_at, s.void_reason, s.entered_history,
+                     -- F468-1: after void, status is cancelled; recover whether
+                     -- the Mass was already said from the void correction so
+                     -- the book can hide Disposition without a new column.
+                     (SELECT (c.before->>'status') = 'fulfilled'
+                        FROM ochr_mass_intention_corrections c
+                       WHERE c.organization_id = s.organization_id
+                         AND c.mass_intention_id = s.id
+                         AND c.kind = 'void'
+                       ORDER BY c.id DESC
+                       LIMIT 1) AS was_fulfilled`
 
 const FROM_JOIN = `FROM ochr_mass_intentions s
                    LEFT JOIN ochr_clients c
@@ -355,29 +491,81 @@ const FROM_JOIN = `FROM ochr_mass_intentions s
 // Read-only: the passage of time never marks anything fulfilled, and this is
 // not a claim that the Mass was or was not celebrated. Unknown dates, today,
 // the future, open, cancelled and fulfilled rows never match.
-const pastScheduledSql = todayParam =>
-  `(s.status = 'scheduled' AND s.mass_date IS NOT NULL AND s.mass_date < ${todayParam}::date)`
+//
+// SP-181 (Saint, 2026-10-25): on Sunday afternoon this morning's Mass must
+// be findable too. A row dated TODAY also matches once its linked Mass (the
+// same day on the calendar) has a start time at or before the parish's
+// current wall-clock time. A today row with no linked Mass or no start time
+// still never matches — the time it was offered is unknown.
+const pastScheduledSql = (todayParam, nowParam) =>
+  `(s.status = 'scheduled' AND s.mass_date IS NOT NULL AND (s.mass_date < ${todayParam}::date`
+  + (nowParam
+    ? ` OR (s.mass_date = ${todayParam}::date AND e.id IS NOT NULL AND e.date = s.mass_date`
+      + ` AND e.start_time IS NOT NULL AND ${nowParam}::time IS NOT NULL AND e.start_time <= ${nowParam}::time)`
+    : '')
+  + `))`
 
-// GET /api/mass-intentions?status=&q=&view=past_scheduled  (the book)
+// D-1. Admin and secretary (staff) only — requireRole, not the page.
+// Registered before /:id so "bulk-mark-said" is never read as an intention id.
+router.post('/bulk-mark-said', requireRole(...MAY_MARK_SAID), bulkMarkSaid)
+router.post('/bulk-mark-said/:batchId/undo', requireRole(...MAY_MARK_SAID), undoBulkMarkSaid)
+
+// Listing day on the book — the same CASE as week_date on the sacristy
+// view (migration 110). A recorded fulfilment stamp is the day; otherwise
+// the working mass_date. This does not rewrite a stamp, and it does not
+// drop cancelled rows (the sheet view does; the book does not).
+const listingDateSql = alias =>
+  `(CASE WHEN ${alias}.status = 'fulfilled' AND ${alias}.fulfilled_mass_date IS NOT NULL THEN ${alias}.fulfilled_mass_date ELSE ${alias}.mass_date END)`
+
+// GET /api/mass-intentions?status=&q=&view=past_scheduled&weekend=this_sunday
+// An accepted weekend is pinned with &saturday=&sunday= (a real Saturday
+// and the next day). Those dates are the window; the clock is not read
+// again. A missing or unusable pair is unread, not the whole book and
+// not whatever weekend the clock has moved to.
 router.get('/', async (req, res) => {
   const { limit, offset } = parsePagination(req.query)
   const statusFilter = typeof req.query.status === 'string' && MI_STATUSES.has(req.query.status)
     ? req.query.status : null
   const pastOnly = req.query.view === 'past_scheduled'
+  const thisSunday = req.query.weekend === 'this_sunday'
+  const anchorRequested = thisSunday && (req.query.saturday != null || req.query.sunday != null)
 
   try {
     // Parish clock (JWT organization only — never the host's or browser's
-    // zone), the same helpers the weekly sheet uses.
+    // zone), the same helpers the weekly sheet uses. Past scheduled still
+    // compares against this day when a weekend is pinned.
     const orgTz = await pool.query(`SELECT timezone FROM ochr_organizations WHERE id = $1`, [req.organizationId])
     const todayIso = orgTodayIso(new Date(), usableTimeZone(orgTz.rows[0]?.timezone))
 
     const where = ['s.organization_id = $1']
-    const params = [req.organizationId, todayIso]
-    const pastExpr = pastScheduledSql('$2')
+    const nowHHMM = orgNowHHMM(new Date(), usableTimeZone(orgTz.rows[0]?.timezone))
+    const params = [req.organizationId, todayIso, nowHHMM]
+    const pastExpr = pastScheduledSql('$2', '$3')
+    let sundaySpan = null
+    if (thisSunday && anchorRequested) {
+      sundaySpan = typeof req.query.saturday === 'string' && typeof req.query.sunday === 'string'
+        ? thisSundayPair(req.query.saturday, req.query.sunday)
+        : null
+    } else if (thisSunday) {
+      sundaySpan = thisSundaySpan(todayIso)
+    }
+    // Unresolvable is not an empty weekend and not the clock's new one.
+    if (thisSunday && !sundaySpan) {
+      return res.status(400).json({ error: 'Failed to load Mass intentions' })
+    }
     if (statusFilter) { params.push(statusFilter); where.push(`s.status = $${params.length}`) }
     // Filtered in SQL before LIMIT/OFFSET, so every page is from the whole
     // tenant-scoped set, not from rows the client already downloaded.
     if (pastOnly) where.push(pastExpr)
+    // This Sunday: the vigil Saturday and that Sunday. With no pinned
+    // dates, that is the weekly sheet's week from the parish clock.
+    if (sundaySpan) {
+      params.push(sundaySpan.saturday)
+      const satP = `$${params.length}`
+      params.push(sundaySpan.sunday)
+      const sunP = `$${params.length}`
+      where.push(`${listingDateSql('s')} BETWEEN ${satP}::date AND ${sunP}::date`)
+    }
 
     const q = typeof req.query.q === 'string' ? req.query.q.trim() : ''
     if (q) {
@@ -396,7 +584,9 @@ router.get('/', async (req, res) => {
         LIMIT $${params.length - 1} OFFSET $${params.length}`,
       params
     )
-    res.json({ intentions: rows })
+    const payload = { intentions: rows }
+    if (sundaySpan) payload.weekend = { saturday: sundaySpan.saturday, sunday: sundaySpan.sunday }
+    res.json(payload)
   } catch (err) {
     monitor.error('massIntentions.list', err, { orgId: req.organizationId })
     res.status(500).json({ error: 'Failed to load Mass intentions' })
@@ -508,7 +698,7 @@ router.get('/weekly', async (req, res) => {
 
 // GET /api/mass-intentions/nearest-outside?start=&end=
 // Empty-week honesty: closest week_date on the sacristy view that is
-// outside [start, end], plus a tenant-scoped count of open/scheduled
+// outside [start, end] (SP-100: measured from the nearer window edge), plus a tenant-scoped count of open/scheduled
 // intentions with no listing date. The view drops NULL week_date, so
 // undated waiting is read from the book — never invented as a fulfilled
 // stamp, and never listed on the weekly sheet. Same listing date as
@@ -528,7 +718,9 @@ router.get('/nearest-outside', async (req, res) => {
            FROM ochr_sacristy_weekly_manifest
           WHERE organization_id = $1
             AND week_date NOT BETWEEN $2::date AND $3::date
-          ORDER BY abs(week_date - $2::date) ASC, week_date ASC
+          ORDER BY CASE WHEN week_date < $2::date THEN $2::date - week_date
+                        ELSE week_date - $3::date END ASC,
+                   week_date ASC
           LIMIT 1`,
         [req.organizationId, start, end]
       ),
@@ -626,6 +818,44 @@ router.post('/', async (req, res) => {
     stipend = read.value
   }
 
+  // SP-266/270: when an offering amount is recorded, require the day the
+  // money came in and how it was paid. Defaults are a client concern
+  // (today); the server refuses inventing either.
+  const receivedRead = parseReceivedDate(
+    Object.prototype.hasOwnProperty.call(req.body ?? {}, 'received_date')
+      ? req.body.received_date : undefined)
+  if (!receivedRead.ok) {
+    return res.status(RECEIVED_DATE_INVALID.status).json(RECEIVED_DATE_INVALID.body)
+  }
+  let receivedDate = receivedRead.value
+  const methodRead = parsePaymentMethod(
+    Object.prototype.hasOwnProperty.call(req.body ?? {}, 'payment_method')
+      ? req.body.payment_method : undefined)
+  if (!methodRead.ok) {
+    return res.status(400).json({
+      code: 'payment_method_invalid',
+      error: 'Payment method must be cash, check, card, or other. Nothing was changed.',
+    })
+  }
+  let paymentMethod = methodRead.value
+  if (stipend != null && Number(stipend) > 0) {
+    // Omitted → default today / cash (API compat + SP-266 books cash-in day,
+    // not Mass day). Explicit empty string still refuses.
+    const body = req.body ?? {}
+    if (!receivedDate) {
+      if (Object.prototype.hasOwnProperty.call(body, 'received_date')) {
+        return res.status(RECEIVED_DATE_REQUIRED.status).json(RECEIVED_DATE_REQUIRED.body)
+      }
+      receivedDate = await orgCivilToday(pool, req.organizationId)
+    }
+    if (!paymentMethod) {
+      if (Object.prototype.hasOwnProperty.call(body, 'payment_method')) {
+        return res.status(PAYMENT_METHOD_REQUIRED.status).json(PAYMENT_METHOD_REQUIRED.body)
+      }
+      paymentMethod = 'cash'
+    }
+  }
+
   try {
     // SP-052: any non-null requester id must be a member of THIS parish.
     // Malformed, nonexistent and other-parish ids get one identical answer
@@ -671,20 +901,44 @@ router.post('/', async (req, res) => {
       return res.status(409).json({ error: REFUSE_FULFILL_WITHOUT_MASS })
     }
 
-    const { rows } = await pool.query(
+    // #285 F5: the row and its audit row commit together.
+    const client = await pool.connect()
+    let rows
+    try {
+      await client.query('BEGIN')
+      ;({ rows } = await client.query(
       `INSERT INTO ochr_mass_intentions
          (organization_id, intention, requested_by, requested_by_client_id, mass_date, stipend, status, note, calendar_event_id,
-          fulfilled_mass_date, fulfilled_mass_title, fulfilled_mass_time)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+          fulfilled_mass_date, fulfilled_mass_title, fulfilled_mass_time, received_date, payment_method)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
        RETURNING ${SNAP_COLS}`,
       [req.organizationId, intention, requestedBy, resolvedClientId, massDate, stipend, status, note, resolvedEventId,
-       stampDate, stampTitle, stampTime]
-    )
+       stampDate, stampTitle, stampTime, receivedDate, paymentMethod]
+      ))
+      await writeMassIntentionAuditInTx(client, req, { status: 201, snapshot: massIntentionSnapshot(rows[0]) })
+      if (stipend != null && Number(stipend) > 0) {
+        const today = await orgCivilToday(client, req.organizationId)
+        const eff = stipendEffectiveDate({ receivedDate, massDate, today })
+        await recordStipendIfNeeded(client, {
+          organizationId: req.organizationId,
+          massIntentionId: rows[0].id,
+          amount: stipend,
+          effectiveDate: eff,
+          userId: req.user?.id ?? null,
+        })
+      }
+      await client.query('COMMIT')
+    } catch (err) {
+      try { await client.query('ROLLBACK') } catch { /* already closed */ }
+      throw err
+    } finally {
+      client.release()
+    }
+    res.locals.auditRecorded = true
     const { rows: full } = await pool.query(
       `SELECT ${SELECT_COLS} ${FROM_JOIN} WHERE s.id = $1 AND s.organization_id = $2`,
       [rows[0].id, req.organizationId]
     )
-    res.locals.massIntentionSnapshot = massIntentionSnapshot(rows[0])
     res.status(201).json(full[0])
   } catch (err) {
     monitor.error('massIntentions.create', err, { orgId: req.organizationId })
@@ -697,7 +951,28 @@ router.post('/', async (req, res) => {
 // the org-scoped calendar row in this same transaction. Calendar edits
 // and a later PATCH of mass_date must not rewrite them. There is no
 // correction semantic in this change — do not send fulfilled_mass_*.
-router.patch('/:id', async (req, res) => {
+router.patch('/:id', (req, res) => patchIntention(req, res, null))
+
+// POST /api/mass-intentions/:id/correct  { reason, changes: { ...PATCH body } }
+// Admin only. The same edit rules as PATCH apply (the Mass link, dates and
+// stamps are never rewritten), except that a fulfilled row may change. The
+// correction row records who, the reason, and before/after, in the same
+// transaction as the change.
+router.post('/:id/correct', (req, res) => {
+  if (req.user?.role !== 'admin') {
+    return res.status(403).json({ error: REFUSE_ADMIN_ONLY, code: ADMIN_ONLY_CODE })
+  }
+  const reason = readReason(req.body?.reason)
+  if (!reason) return res.status(400).json({ error: REFUSE_REASON_REQUIRED, code: REASON_REQUIRED_CODE })
+  const changes = req.body?.changes
+  if (!changes || typeof changes !== 'object' || Array.isArray(changes)) {
+    return res.status(400).json({ error: 'No editable fields provided' })
+  }
+  req.body = changes
+  return patchIntention(req, res, { reason })
+})
+
+async function patchIntention(req, res, correction) {
   const id = requireIntParam(req, res); if (id === null) return
 
   const client = await pool.connect()
@@ -709,6 +984,8 @@ router.patch('/:id', async (req, res) => {
               to_char(fulfilled_mass_date, 'YYYY-MM-DD') AS fulfilled_mass_date,
               fulfilled_mass_title,
               to_char(fulfilled_mass_time, 'HH24:MI:SS') AS fulfilled_mass_time,
+              to_char(received_date, 'YYYY-MM-DD') AS received_date,
+              voided_at, entered_history,
               ${CHANGE_COLS}
          FROM ochr_mass_intentions
         WHERE id = $1 AND organization_id = $2
@@ -720,6 +997,44 @@ router.patch('/:id', async (req, res) => {
       return res.status(404).json({ error: 'Not found' })
     }
     const current = locked.rows[0]
+    if (current.voided_at != null) {
+      await client.query('ROLLBACK')
+      return res.status(409).json({ error: REFUSE_VOIDED, code: VOIDED_CODE })
+    }
+
+    // #285 F6 / R405-1: on a fulfilled or stamped row, any valid change to
+    // the offering or the Mass link gets the F6 code first, on the ordinary
+    // edit and the admin correction alike, before the older offering-clear
+    // and stamped-history guards. Invalid payloads still fall through to
+    // their 400. Same row lock; ROLLBACK, so no correction or audit row.
+    if (current.status === 'fulfilled' || hasFulfilmentStamp(current)) {
+      const body = req.body ?? {}
+      let touchesLocked = false
+      if (Object.prototype.hasOwnProperty.call(body, 'stipend')) {
+        const st = readStipend(body.stipend)
+        const cur = current.stipend == null ? null : readStipend(String(current.stipend)).value
+        if (st.ok && st.value !== cur) touchesLocked = true
+      }
+      if (Object.prototype.hasOwnProperty.call(body, 'calendar_event_id')) {
+        const raw = body.calendar_event_id
+        const eid = raw != null && raw !== '' ? Number(raw) : null
+        if ((eid === null || (Number.isInteger(eid) && eid > 0))
+            && !sameEventId(current.calendar_event_id, eid)) touchesLocked = true
+      }
+      if (touchesLocked) {
+        await client.query('ROLLBACK')
+        return res.status(409).json({ error: REFUSE_FULFILLED_OFFERING_EDIT, code: FULFILLED_OFFERING_LOCKED_CODE })
+      }
+    }
+
+    // SP-133: a recorded offering is not nulled by an ordinary edit (that
+    // would re-open hard delete). Admin correction may, with a reason.
+    if (!correction && current.stipend != null
+        && Object.prototype.hasOwnProperty.call(req.body ?? {}, 'stipend')
+        && (req.body.stipend === null || req.body.stipend === undefined)) {
+      await client.query('ROLLBACK')
+      return res.status(409).json({ error: REFUSE_OFFERING_CLEAR, code: OFFERING_CLEAR_CODE })
+    }
 
     const sets = []
     const params = []
@@ -728,10 +1043,68 @@ router.patch('/:id', async (req, res) => {
         const val = read(req.body[col])
         if (val === undefined) {
           await client.query('ROLLBACK')
-          const error = col === 'stipend' ? STIPEND_REFUSED : `Invalid value for ${col}`
-          return res.status(400).json({ error })
+          const error = col === 'stipend' ? STIPEND_REFUSED
+            : col === 'received_date' ? RECEIVED_DATE_INVALID.body.error
+            : col === 'payment_method'
+              ? 'Payment method must be cash, check, card, or other. Nothing was changed.'
+              : `Invalid value for ${col}`
+          const code = col === 'received_date' ? RECEIVED_DATE_INVALID.body.code
+            : col === 'payment_method' ? 'payment_method_invalid'
+            : undefined
+          return res.status(400).json(code ? { code, error } : { error })
         }
         params.push(val); sets.push(`${col} = $${params.length}`)
+      }
+    }
+
+    // SP-266: a positive stipend on the resulting row needs received_date + method.
+    {
+      const body = req.body ?? {}
+      let nextStipend = current.stipend
+      if (Object.prototype.hasOwnProperty.call(body, 'stipend')) {
+        const st = readStipend(body.stipend)
+        if (st.ok) nextStipend = st.value
+      }
+      if (nextStipend != null && Number(nextStipend) > 0) {
+        let nextReceived = current.received_date
+        if (Object.prototype.hasOwnProperty.call(body, 'received_date')) {
+          const rr = parseReceivedDate(body.received_date)
+          if (rr.ok) nextReceived = rr.value
+          if (!nextReceived) {
+            await client.query('ROLLBACK')
+            return res.status(RECEIVED_DATE_REQUIRED.status).json(RECEIVED_DATE_REQUIRED.body)
+          }
+        }
+        let nextMethod = current.payment_method
+        if (Object.prototype.hasOwnProperty.call(body, 'payment_method')) {
+          const mr = parsePaymentMethod(body.payment_method)
+          if (mr.ok) nextMethod = mr.value
+          if (!nextMethod) {
+            await client.query('ROLLBACK')
+            return res.status(PAYMENT_METHOD_REQUIRED.status).json(PAYMENT_METHOD_REQUIRED.body)
+          }
+        }
+        // Legacy rows: latch cash-in defaults only when this write touches
+        // the offering (or the cash-in fields themselves). Ordinary edits to
+        // note/status must not rewrite received_date.
+        const offeringTouched = Object.prototype.hasOwnProperty.call(body, 'stipend')
+          || Object.prototype.hasOwnProperty.call(body, 'received_date')
+          || Object.prototype.hasOwnProperty.call(body, 'payment_method')
+        if (offeringTouched && (!nextReceived || !nextMethod)) {
+          const today = await orgCivilToday(client, req.organizationId)
+          if (!nextReceived) {
+            nextReceived = today
+            if (!Object.prototype.hasOwnProperty.call(body, 'received_date')) {
+              params.push(nextReceived); sets.push(`received_date = $${params.length}`)
+            }
+          }
+          if (!nextMethod) {
+            nextMethod = 'cash'
+            if (!Object.prototype.hasOwnProperty.call(body, 'payment_method')) {
+              params.push(nextMethod); sets.push(`payment_method = $${params.length}`)
+            }
+          }
+        }
       }
     }
 
@@ -882,6 +1255,7 @@ router.patch('/:id', async (req, res) => {
         WHERE id = $${params.length - 1} AND organization_id = $${params.length}
         RETURNING id, status, calendar_event_id,
                   to_char(mass_date, 'YYYY-MM-DD') AS mass_date,
+                  to_char(received_date, 'YYYY-MM-DD') AS received_date,
                   ${CHANGE_COLS}`,
       params
     )
@@ -889,11 +1263,78 @@ router.patch('/:id', async (req, res) => {
       await client.query('ROLLBACK')
       return res.status(404).json({ error: 'Not found' })
     }
-    await client.query('COMMIT')
     // R285-F1/F2: audit records WHICH fields really changed (stored before
     // vs stored after, same transaction), never their text.
-    res.locals.massIntentionChange = massIntentionChange(current, rows[0])
-    res.locals.massIntentionSnapshot = res.locals.massIntentionChange.snapshot
+    // #285 F5: written on this transaction, before COMMIT.
+    const change = massIntentionChange(current, rows[0])
+    // #285 F6: the offering and the Mass link of a fulfilled row are locked,
+    // for the admin correction too (stricter than Decision 8 alone).
+    if ((current.status === 'fulfilled' || hasFulfilmentStamp(current))
+        && change.changed.some(f => f === 'stipend' || f === 'calendar_event_id')) {
+      await client.query('ROLLBACK')
+      return res.status(409).json({ error: REFUSE_FULFILLED_OFFERING_EDIT, code: FULFILLED_OFFERING_LOCKED_CODE })
+    }
+    // Decision 8: a fulfilled row is not silently edited. Any stored change
+    // to it rolls back unless it came through the admin correction path.
+    // R339-1: the durable latch, not the current status, decides.
+    if ((current.entered_history || current.status === 'fulfilled') && change.changed.length > 0 && !correction) {
+      await client.query('ROLLBACK')
+      return res.status(409).json({ error: REFUSE_FULFILLED_EDIT, code: FULFILLED_LOCKED_CODE })
+    }
+    if (correction) {
+      if (change.changed.length === 0) {
+        await client.query('ROLLBACK')
+        return res.status(400).json({ error: 'Nothing to correct. Nothing was changed.' })
+      }
+      // A corrected row has entered history (R339-1).
+      await client.query(
+        'UPDATE ochr_mass_intentions SET entered_history = true WHERE id = $1 AND organization_id = $2',
+        [id, req.organizationId]
+      )
+      await client.query(
+        `INSERT INTO ochr_mass_intention_corrections
+           (organization_id, mass_intention_id, actor_user_id, kind, reason, before, after)
+         VALUES ($1, $2, $3, 'correction', $4, $5, $6)`,
+        [req.organizationId, id, req.user.id, correction.reason,
+         JSON.stringify(correctionValues(current, change.changed)),
+         JSON.stringify(correctionValues(rows[0], change.changed))]
+      )
+    }
+    await writeMassIntentionAuditInTx(client, req, { status: 200, change, snapshot: change.snapshot })
+    {
+      // N439-2 / N442-1 / N442-6: every stipend change (set, increase,
+      // decrease, clear, re-set) is a delta against current open 2330 via
+      // syncStipendLiability — never recordStipendIfNeeded's fixed
+      // recorded:${id} key (that conflicts after a clear). Create still
+      // uses recordStipendIfNeeded. Ordinary PATCH cannot null-clear.
+      const afterStipend = change?.snapshot?.stipend ?? rows[0]?.stipend
+      const stipendTouched = change?.changed?.includes('stipend')
+      const positiveAfter = afterStipend != null && Number(afterStipend) > 0
+      if (stipendTouched || positiveAfter) {
+        // Prefer the cash-in day on the row (SP-266). Snapshot does not
+        // carry received_date; re-read from the RETURNING / locked current.
+        const afterReceived = rows[0]?.received_date || current.received_date || null
+        const afterMass = change?.snapshot?.mass_date || rows[0]?.mass_date || current.mass_date
+        const today = await orgCivilToday(client, req.organizationId)
+        const eff = stipendEffectiveDate({
+          receivedDate: afterReceived,
+          massDate: afterMass,
+          today,
+        })
+        await syncStipendLiability(client, {
+          organizationId: req.organizationId,
+          massIntentionId: id,
+          amount: positiveAfter ? afterStipend : 0,
+          effectiveDate: String(eff).slice(0, 10),
+          userId: req.user?.id ?? null,
+          reason: correction?.reason || (positiveAfter
+            ? 'Stipend amount corrected'
+            : 'Stipend cleared'),
+        })
+      }
+    }
+    await client.query('COMMIT')
+    res.locals.auditRecorded = true
     res.json(await loadFull(id, req.organizationId))
   } catch (err) {
     try { await client.query('ROLLBACK') } catch { /* already closed */ }
@@ -901,6 +1342,170 @@ router.patch('/:id', async (req, res) => {
     res.status(500).json({ error: 'Failed to update Mass intention' })
   } finally {
     client.release()
+  }
+}
+
+// Before/after of exactly the fields that changed, as stored.
+function correctionValues(row, fields) {
+  const out = {}
+  for (const f of fields) out[f] = row?.[f] == null ? null : row[f]
+  return out
+}
+
+// POST /api/mass-intentions/:id/void  { reason, disposition? }
+// Admin only. Marks an erroneous or duplicate entry void instead of
+// removing it: the row stays in the book, status becomes cancelled, the
+// stamp and Mass link are untouched, and the void is recorded with who,
+// when, the reason, and before/after.
+router.post('/:id/void', async (req, res) => {
+  const id = requireIntParam(req, res); if (id === null) return
+  if (req.user?.role !== 'admin') {
+    return res.status(403).json({ error: REFUSE_ADMIN_ONLY, code: ADMIN_ONLY_CODE })
+  }
+  const reason = readReason(req.body?.reason)
+  if (!reason) return res.status(400).json({ error: REFUSE_REASON_REQUIRED, code: REASON_REQUIRED_CODE })
+
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const locked = await client.query(
+      `SELECT id, status, voided_at, stipend, offering_recorded,
+              to_char(mass_date, 'YYYY-MM-DD') AS mass_date
+         FROM ochr_mass_intentions
+        WHERE id = $1 AND organization_id = $2 FOR UPDATE`,
+      [id, req.organizationId]
+    )
+    if (!locked.rows.length) {
+      await client.query('ROLLBACK')
+      return res.status(404).json({ error: 'Not found' })
+    }
+    const before = locked.rows[0]
+    if (before.voided_at != null) {
+      await client.query('ROLLBACK')
+      return res.status(409).json({ error: REFUSE_VOIDED, code: VOIDED_CODE })
+    }
+
+    // SP-250 W1 / N442-7: nonzero open 2330 liability needs a disposition
+    // in the same TX as the void. After a book clear (open already 0), no
+    // disposition is required and submit hold keys on open balance.
+    let disposition = null
+    const openBefore = await openStipendLiability(client, {
+      organizationId: req.organizationId, massIntentionId: id,
+    })
+    // N449-3: fulfilled + open 2330 cannot void (would clear 2330 without
+    // remittance CoA — same as deferred SP-268 Release).
+    if (before.status === 'fulfilled' && openBefore > 0) {
+      await client.query('ROLLBACK')
+      return res.status(409).json({
+        error: REFUSE_VOID_FULFILLED_HELD,
+        code: VOID_FULFILLED_HELD_CODE,
+      })
+    }
+    if (openBefore > 0) {
+      try {
+        disposition = parseDisposition(req.body)
+      } catch (e) {
+        await client.query('ROLLBACK')
+        return res.status(400).json({
+          code: e.code || 'disposition_invalid',
+          error: 'A disposition of refund, transfer, or pastor-directed apply is required. Nothing was changed.',
+        })
+      }
+      if (!disposition) {
+        await client.query('ROLLBACK')
+        return res.status(DISPOSITION_REQUIRED.status).json(DISPOSITION_REQUIRED.body)
+      }
+      // Prefer an explicit disposition.reason; otherwise the void reason.
+      if (!disposition.reason) disposition = { ...disposition, reason }
+      const eff = await orgCivilToday(client, req.organizationId) // SP-266 / N449-1: parish action day
+      try {
+        await writeDisposition(client, {
+          organizationId: req.organizationId,
+          massIntentionId: id,
+          disposition,
+          voidReason: reason,
+          userId: req.user.id,
+          effectiveDate: eff,
+        })
+      } catch (e) {
+        await client.query('ROLLBACK')
+        const msg = {
+          disposition_amount_mismatch: 'The disposition amount must equal the open stipend liability. Nothing was changed.',
+          disposition_reason: 'A disposition reason is required. Nothing was changed.',
+          transfer_target: 'Transfer target must be another open intention in this parish. Nothing was changed.',
+          transfer_self: 'Cannot transfer a stipend to the same intention. Nothing was changed.',
+        }[e.code] || 'Disposition refused. Nothing was changed.'
+        return res.status(400).json({ code: e.code || 'disposition_refused', error: msg })
+      }
+    } else if (req.body?.disposition != null) {
+      // D449-4: open 2330 is already 0 — a disposition is not applicable.
+      // Fulfilled → disposition_fulfilled (Mass was said; stipend exit is
+      // deferred SP-268 Release). Not fulfilled → no_open_stipend (honest
+      // refuse; do not record a false disposition on the void correction).
+      await client.query('ROLLBACK')
+      if (before.status === 'fulfilled') {
+        return res.status(409).json({
+          code: DISPOSITION_FULFILLED_CODE,
+          error: REFUSE_DISPOSITION_FULFILLED,
+        })
+      }
+      return res.status(409).json({
+        code: 'no_open_stipend',
+        error: 'There is no open stipend liability on this intention. Nothing was changed.',
+      })
+    }
+
+    const voided = await client.query(
+      `UPDATE ochr_mass_intentions
+          SET status = 'cancelled', voided_at = NOW(), voided_by = $1,
+              void_reason = $2, updated_at = NOW()
+        WHERE id = $3 AND organization_id = $4
+        RETURNING ${SNAP_COLS}, voided_at`,
+      [req.user.id, reason, id, req.organizationId]
+    )
+    await client.query(
+      `INSERT INTO ochr_mass_intention_corrections
+         (organization_id, mass_intention_id, actor_user_id, kind, reason, before, after)
+       VALUES ($1, $2, $3, 'void', $4, $5, $6)`,
+      [req.organizationId, id, req.user.id, reason,
+       JSON.stringify({ status: before.status, voided: false }),
+       JSON.stringify({ status: 'cancelled', voided: true, disposition: disposition?.kind || null })]
+    )
+    await writeMassIntentionAuditInTx(client, req, { status: 200, snapshot: massIntentionSnapshot(voided.rows[0]) })
+    await client.query('COMMIT')
+    res.locals.auditRecorded = true
+    res.json(await loadFull(id, req.organizationId))
+  } catch (err) {
+    try { await client.query('ROLLBACK') } catch { /* already closed */ }
+    monitor.error('massIntentions.void', err, { orgId: req.organizationId, id })
+    res.status(500).json({ error: 'Failed to void Mass intention' })
+  } finally {
+    client.release()
+  }
+})
+
+// GET /api/mass-intentions/:id/corrections — the correction trail for one
+// row, tenant-scoped, newest last. Reasons and before/after are parish
+// record text; readable by the same roles that read the book.
+router.get('/:id/corrections', async (req, res) => {
+  const id = requireIntParam(req, res); if (id === null) return
+  try {
+    const { rows } = await pool.query(
+      `SELECT k.id, k.kind, k.reason, k.before, k.after, k.created_at,
+              k.actor_user_id, u.name AS actor_name
+         FROM ochr_mass_intention_corrections k
+         JOIN ochr_mass_intentions s
+           ON s.id = k.mass_intention_id AND s.organization_id = k.organization_id
+         LEFT JOIN ochr_users u
+           ON u.id = k.actor_user_id AND u.organization_id = k.organization_id
+        WHERE k.mass_intention_id = $1 AND k.organization_id = $2
+        ORDER BY k.created_at, k.id`,
+      [id, req.organizationId]
+    )
+    res.json(rows)
+  } catch (err) {
+    monitor.error('massIntentions.corrections', err, { orgId: req.organizationId, id })
+    res.status(500).json({ error: 'Failed to load corrections' })
   }
 })
 
@@ -931,7 +1536,8 @@ router.post('/:id/assign', async (req, res) => {
       `SELECT id, status, calendar_event_id, requested_by_client_id,
               to_char(fulfilled_mass_date, 'YYYY-MM-DD') AS fulfilled_mass_date,
               fulfilled_mass_title,
-              to_char(fulfilled_mass_time, 'HH24:MI:SS') AS fulfilled_mass_time
+              to_char(fulfilled_mass_time, 'HH24:MI:SS') AS fulfilled_mass_time,
+              voided_at, entered_history
          FROM ochr_mass_intentions
         WHERE id = $1 AND organization_id = $2
         FOR UPDATE`,
@@ -942,6 +1548,20 @@ router.post('/:id/assign', async (req, res) => {
       return res.status(404).json({ error: 'Not found' })
     }
     const row = locked.rows[0]
+    // R339-2: a voided row is closed to every write path, before any update.
+    if (row.voided_at != null) {
+      await client.query('ROLLBACK')
+      return res.status(409).json({ error: REFUSE_VOIDED, code: VOIDED_CODE })
+    }
+    // #285 F6 / R405-1, same order as patchIntention: a fulfilled row, or a
+    // stamped row whose Mass would change, answers fulfilled_offering_locked
+    // before the older stamped_history refusal. Same Mass on a reopened
+    // stamped row is not a change and stays the no-op below. ROLLBACK, so
+    // no update, correction, or audit row.
+    if (row.status === 'fulfilled' || (hasFulfilmentStamp(row) && !sameEventId(row.calendar_event_id, eid))) {
+      await client.query('ROLLBACK')
+      return res.status(409).json({ error: REFUSE_FULFILLED_OFFERING_EDIT, code: FULFILLED_OFFERING_LOCKED_CODE })
+    }
     if (hasFulfilmentStamp(row) && !sameEventId(row.calendar_event_id, eid)) {
       await client.query('ROLLBACK')
       return res.status(409).json({ error: REFUSE_STAMPED_HISTORY, code: STAMPED_HISTORY_CODE })
@@ -967,7 +1587,8 @@ router.post('/:id/assign', async (req, res) => {
 
     if (sameEventId(row.calendar_event_id, ev.id)) {
       await client.query('COMMIT')
-      res.locals.massIntentionSnapshot = massIntentionSnapshot(row)
+      // #285 F3: already at this Mass. Nothing changed, so no audit row.
+      res.locals.auditNoop = true
       return res.json(await loadFull(id, req.organizationId))
     }
 
@@ -978,6 +1599,13 @@ router.post('/:id/assign', async (req, res) => {
       })
     }
 
+    // R339-1: protected history (durable latch) changes its Mass only via
+    // the reasoned admin correction. Checked under the lock, after the
+    // genuine no-op return and before any update; no audit row on refusal.
+    if (row.entered_history) {
+      await client.query('ROLLBACK')
+      return res.status(409).json({ error: REFUSE_FULFILLED_EDIT, code: FULFILLED_LOCKED_CODE })
+    }
     const assigned = await client.query(
       `UPDATE ochr_mass_intentions
           SET calendar_event_id = $1,
@@ -988,8 +1616,9 @@ router.post('/:id/assign', async (req, res) => {
         RETURNING ${SNAP_COLS}`,
       [ev.id, ev.date, statusOnLink(row.status), id, req.organizationId]
     )
+    await writeMassIntentionAuditInTx(client, req, { status: 200, snapshot: massIntentionSnapshot(assigned.rows[0]) })
     await client.query('COMMIT')
-    res.locals.massIntentionSnapshot = massIntentionSnapshot(assigned.rows[0])
+    res.locals.auditRecorded = true
     res.json(await loadFull(id, req.organizationId))
   } catch (err) {
     try { await client.query('ROLLBACK') } catch { /* already closed */ }
@@ -1020,7 +1649,8 @@ router.post('/:id/unassign', async (req, res) => {
       `SELECT id, status, calendar_event_id, requested_by_client_id,
               to_char(fulfilled_mass_date, 'YYYY-MM-DD') AS fulfilled_mass_date,
               fulfilled_mass_title,
-              to_char(fulfilled_mass_time, 'HH24:MI:SS') AS fulfilled_mass_time
+              to_char(fulfilled_mass_time, 'HH24:MI:SS') AS fulfilled_mass_time,
+              voided_at, entered_history
          FROM ochr_mass_intentions
         WHERE id = $1 AND organization_id = $2
         FOR UPDATE`,
@@ -1031,6 +1661,19 @@ router.post('/:id/unassign', async (req, res) => {
       return res.status(404).json({ error: 'Not found' })
     }
     const row = locked.rows[0]
+    // R339-2: a voided row is closed to every write path, before any update.
+    if (row.voided_at != null) {
+      await client.query('ROLLBACK')
+      return res.status(409).json({ error: REFUSE_VOIDED, code: VOIDED_CODE })
+    }
+    // #285 F6 / R405-1, same order as patchIntention: releasing a fulfilled
+    // or stamped row changes the Mass link, so it answers
+    // fulfilled_offering_locked before the older stamped_history refusal.
+    // ROLLBACK, so no update, correction, or audit row.
+    if (row.status === 'fulfilled' || hasFulfilmentStamp(row)) {
+      await client.query('ROLLBACK')
+      return res.status(409).json({ error: REFUSE_FULFILLED_OFFERING_EDIT, code: FULFILLED_OFFERING_LOCKED_CODE })
+    }
     // Same refusal as PATCH calendar_event_id null. A recorded fulfilment
     // is not a link that can be dropped. A legacy fulfilled row with no
     // stamp still uses the fulfilled sentence below.
@@ -1044,7 +1687,8 @@ router.post('/:id/unassign', async (req, res) => {
     }
     if (row.calendar_event_id == null) {
       await client.query('COMMIT')
-      res.locals.massIntentionSnapshot = massIntentionSnapshot(row)
+      // #285 F3: already unassigned. Nothing changed, so no audit row.
+      res.locals.auditNoop = true
       return res.json(await loadFull(id, req.organizationId))
     }
     if (hasExpected && !sameEventId(row.calendar_event_id, expectedId)) {
@@ -1054,6 +1698,13 @@ router.post('/:id/unassign', async (req, res) => {
       })
     }
 
+    // R339-1: protected history (durable latch) changes its Mass only via
+    // the reasoned admin correction. Checked under the lock, after the
+    // genuine no-op return and before any update; no audit row on refusal.
+    if (row.entered_history) {
+      await client.query('ROLLBACK')
+      return res.status(409).json({ error: REFUSE_FULFILLED_EDIT, code: FULFILLED_LOCKED_CODE })
+    }
     const released = await client.query(
       `UPDATE ochr_mass_intentions
           SET calendar_event_id = NULL,
@@ -1063,8 +1714,9 @@ router.post('/:id/unassign', async (req, res) => {
         RETURNING ${SNAP_COLS}`,
       [statusOnRelease(row.status), id, req.organizationId]
     )
+    await writeMassIntentionAuditInTx(client, req, { status: 200, snapshot: massIntentionSnapshot(released.rows[0]) })
     await client.query('COMMIT')
-    res.locals.massIntentionSnapshot = massIntentionSnapshot(released.rows[0])
+    res.locals.auditRecorded = true
     res.json(await loadFull(id, req.organizationId))
   } catch (err) {
     try { await client.query('ROLLBACK') } catch { /* already closed */ }
@@ -1078,16 +1730,189 @@ router.post('/:id/unassign', async (req, res) => {
 // DELETE /api/mass-intentions/:id
 router.delete('/:id', async (req, res) => {
   const id = requireIntParam(req, res); if (id === null) return
+  // #285 F5: delete and its audit row commit together. Metadata stays {}.
+  // Hard delete only for a row with no history and no recorded offering (F4).
+  const client = await pool.connect()
   try {
-    const { rowCount } = await pool.query(
+    await client.query('BEGIN')
+    const held = await client.query(
+      `SELECT status, voided_at, entered_history, fulfilled_mass_date, fulfilled_mass_title, fulfilled_mass_time, stipend, offering_recorded
+         FROM ochr_mass_intentions WHERE id = $1 AND organization_id = $2 FOR UPDATE`,
+      [id, req.organizationId]
+    )
+    // Decision 8: fulfilled, stamped (even if later reopened), or voided
+    // rows are history. Refuse before any DELETE so nothing is removed.
+    const h = held.rows[0]
+    if (h && (h.entered_history || h.status === 'fulfilled' || hasFulfilmentStamp(h) || h.voided_at != null)) {
+      await client.query('ROLLBACK')
+      return res.status(409).json({ error: REFUSE_FULFILLED_DELETE, code: FULFILLED_HISTORY_CODE })
+    }
+    // SP-133: under the same row lock, every role is refused once an
+    // offering amount has ever been recorded. Void with a reason instead.
+    if (h && offeringEverRecorded(h)) {
+      await client.query('ROLLBACK')
+      return res.status(409).json({ error: REFUSE_OFFERING_DELETE, code: OFFERING_RECORDED_CODE })
+    }
+    const { rowCount } = await client.query(
       'DELETE FROM ochr_mass_intentions WHERE id = $1 AND organization_id = $2',
       [id, req.organizationId]
     )
-    if (!rowCount) return res.status(404).json({ error: 'Not found' })
+    if (!rowCount) {
+      await client.query('ROLLBACK')
+      return res.status(404).json({ error: 'Not found' })
+    }
+    await writeMassIntentionAuditInTx(client, req, { status: 204 })
+    await client.query('COMMIT')
+    res.locals.auditRecorded = true
     res.status(204).end()
   } catch (err) {
+    try { await client.query('ROLLBACK') } catch { /* already closed */ }
+    // Ledger P2: transfer_fk (NO ACTION) blocks deleting a transfer target —
+    // surface an honest 409, not a 500.
+    if (err && (err.code === '23503' || /ochr_mass_stipend_facts_transfer_fk/i.test(String(err.message || '')))) {
+      return res.status(409).json({
+        code: 'stipend_transfer_target',
+        error: 'This intention is the target of a stipend transfer. Void it with a disposition instead of deleting. Nothing was changed.',
+      })
+    }
     monitor.error('massIntentions.delete', err, { orgId: req.organizationId, id })
     res.status(500).json({ error: 'Failed to delete Mass intention' })
+  } finally {
+    client.release()
+  }
+})
+
+
+// POST /api/mass-intentions/:id/disposition
+// Ledger P2: legacy voided+paid intentions (backfill left them without a
+// clearing fact) cannot be re-voided (409 already voided). This path records
+// a disposition only so period submit can proceed.
+router.post('/:id/disposition', async (req, res) => {
+  const id = requireIntParam(req, res); if (id === null) return
+  if (req.user?.role !== 'admin') {
+    return res.status(403).json({ error: REFUSE_ADMIN_ONLY, code: ADMIN_ONLY_CODE })
+  }
+  let disposition
+  try {
+    disposition = parseDisposition(req.body)
+  } catch (e) {
+    return res.status(400).json({
+      code: e.code || 'disposition_invalid',
+      error: 'A disposition of refund, transfer, or pastor-directed apply is required. Nothing was changed.',
+    })
+  }
+  if (!disposition) {
+    return res.status(400).json({
+      code: DISPOSITION_REQUIRED.body.code,
+      error: DISPOSITION_REQUIRED.body.error,
+    })
+  }
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const held = await client.query(
+      `SELECT id, status, voided_at, stipend, offering_recorded, mass_date
+         FROM ochr_mass_intentions
+        WHERE id = $1 AND organization_id = $2
+        FOR UPDATE`,
+      [id, req.organizationId])
+    if (!held.rows.length) {
+      await client.query('ROLLBACK')
+      return res.status(404).json({ error: 'Not found' })
+    }
+    const row = held.rows[0]
+    if (row.voided_at == null) {
+      await client.query('ROLLBACK')
+      return res.status(409).json({
+        code: 'not_voided',
+        error: 'Record a disposition through void when the intention is still open. Nothing was changed.',
+      })
+    }
+    // D449-4: after void, status is cancelled — recover "was fulfilled" from
+    // the latest void correction's before.status. Missing correction → fail
+    // closed (same code). Must run BEFORE the legacy recorded:legacy seed.
+    const voidCorr = await client.query(
+      `SELECT before FROM ochr_mass_intention_corrections
+        WHERE organization_id = $1 AND mass_intention_id = $2 AND kind = 'void'
+        ORDER BY id DESC
+        LIMIT 1`,
+      [req.organizationId, id])
+    const beforeSnap = voidCorr.rows[0]?.before
+    const beforeStatus = beforeSnap && typeof beforeSnap === 'object'
+      ? beforeSnap.status
+      : (typeof beforeSnap === 'string'
+          ? (() => { try { return JSON.parse(beforeSnap).status } catch { return undefined } })()
+          : undefined)
+    if (!voidCorr.rows.length || beforeStatus === 'fulfilled') {
+      await client.query('ROLLBACK')
+      return res.status(409).json({
+        code: DISPOSITION_FULFILLED_CODE,
+        error: REFUSE_DISPOSITION_FULFILLED,
+      })
+    }
+    const open = await openStipendLiability(client, {
+      organizationId: req.organizationId, massIntentionId: id,
+    })
+    if (!(open > 0) && !row.offering_recorded) {
+      await client.query('ROLLBACK')
+      return res.status(409).json({
+        code: 'no_open_stipend',
+        error: 'There is no open stipend liability on this intention. Nothing was changed.',
+      })
+    }
+    // N449-1 / N449-2: action day in the parish zone (same as void),
+    // never Mass day and never process UTC.
+    const actionDay = await orgCivilToday(client, req.organizationId)
+    // Legacy voided+paid with no recorded fact: seed one so writeDisposition can clear.
+    if (!(open > 0) && row.offering_recorded && row.stipend != null && Number(row.stipend) > 0) {
+      await recordStipendIfNeeded(client, {
+        organizationId: req.organizationId,
+        massIntentionId: id,
+        amount: row.stipend,
+        effectiveDate: actionDay,
+        userId: req.user?.id ?? null,
+        idempotencyKey: `recorded:legacy:${id}`,
+      })
+    }
+    if (!disposition.reason) {
+      disposition = { ...disposition, reason: 'Legacy disposition after void' }
+    }
+    const eff = actionDay
+    try {
+      await writeDisposition(client, {
+        organizationId: req.organizationId,
+        massIntentionId: id,
+        disposition,
+        voidReason: disposition.reason,
+        userId: req.user?.id ?? null,
+        effectiveDate: String(eff).slice(0, 10),
+      })
+    } catch (e) {
+      await client.query('ROLLBACK')
+      const msg = ({
+        disposition_amount_mismatch: 'The disposition amount must equal the open stipend liability. Nothing was changed.',
+        disposition_reason: 'A disposition reason is required. Nothing was changed.',
+        transfer_target: 'Transfer target must be another open intention in this parish. Nothing was changed.',
+        transfer_self: 'Cannot transfer a stipend to the same intention. Nothing was changed.',
+      })[e.code] || 'Disposition refused. Nothing was changed.'
+      return res.status(400).json({ code: e.code || 'disposition_refused', error: msg })
+    }
+    await writeMassIntentionAuditInTx(client, req, {
+      status: 200,
+      snapshot: { disposition: disposition.kind },
+    })
+    await client.query('COMMIT')
+    res.locals.auditRecorded = true
+    const liability = await openStipendLiability(pool, {
+      organizationId: req.organizationId, massIntentionId: id,
+    })
+    res.json({ id, disposition: disposition.kind, open_liability: liability.toFixed(2) })
+  } catch (err) {
+    try { await client.query('ROLLBACK') } catch { /* already closed */ }
+    monitor.error('massIntentions.disposition', err, { orgId: req.organizationId, id })
+    res.status(500).json({ error: 'Failed to record stipend disposition' })
+  } finally {
+    client.release()
   }
 })
 

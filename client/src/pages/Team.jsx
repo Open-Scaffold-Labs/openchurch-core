@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Users, Plus, X, Loader2, Mail, Lock, User as UserIcon, Shield, Eye, AlertTriangle } from 'lucide-react'
-import PageWrapper from '../components/PageWrapper'
+import PageWrapper, { PageHeader } from '../components/PageWrapper'
 import EmptyState from '../components/EmptyState'
 import { SkeletonRowList } from '../components/Skeleton'
 import { sheetOverlayCls, sheetPanelCls, MobileSheetGrip } from '../components/MobileSheet'
@@ -11,6 +11,7 @@ import { useLocale } from '../i18n'
 import CalendarSync from '../components/CalendarSync'
 import { useConfirm } from '../components/ConfirmProvider'
 import ClosureReceipt from '../components/ClosureReceipt'
+import { dialogMotionNow } from '../utils/motion'
 
 // Team-management page. Admin-only — the server enforces it on every
 // /api/users request; this page just hides itself from non-admins via
@@ -60,14 +61,14 @@ export default function Team() {
     try {
       const res = await fetch(apiUrl('/api/users'))
       if (gen !== usersLoadGen.current) return
-      if (res.status === 403) { setErr('You need admin access to view this page.'); setUsers([]); return }
+      if (res.status === 403) { setErr(t('tm.adminAccess')); setUsers([]); return }
       if (!res.ok) throw new Error(`Failed to load team (${res.status})`)
       const body = await res.json()
       if (gen !== usersLoadGen.current) return
       // A 200 that is not a list is not an empty team, and it must not
       // reach `.map`. Leave the people already on screen.
       if (!Array.isArray(body)) {
-        setErr("Couldn't load the team. Nothing was lost — please retry.")
+        setErr(t('tm.loadFailed'))
         return
       }
       // A null or id-less row is not a person. Mapping it throws on
@@ -75,7 +76,7 @@ export default function Team() {
       // failed read, not an empty team.
       const people = body.filter(row => row && row.id != null)
       if (people.length === 0 && body.length > 0) {
-        setErr("Couldn't load the team. Nothing was lost — please retry.")
+        setErr(t('tm.loadFailed'))
         return
       }
       // A current list establishes who is on the screen. It does not
@@ -85,7 +86,7 @@ export default function Team() {
     } catch (e) {
       if (gen !== usersLoadGen.current) return
       // A failed refetch is an error, not an empty team. Keep the rows.
-      setErr("Couldn't load the team. Nothing was lost — please retry.")
+      setErr(t('tm.loadFailed'))
     } finally {
       if (gen === usersLoadGen.current) setLoading(false)
     }
@@ -202,12 +203,13 @@ export default function Team() {
   // helpful message rather than a blank list.
   if (err && err.includes('admin access')) {
     return (
-      <PageWrapper>
-        <div className="max-w-2xl mx-auto py-16">
+      <PageWrapper type="list">
+        <div className="max-w-2xl mx-auto space-y-6 py-8">
+          <PageHeader title={t('nav.Team')} />
           <EmptyState
             icon={Shield}
-            title="Admins only"
-            body="Team management is restricted to admins. Ask an admin in your church to invite or update accounts on your behalf."
+            title={t('tm.adminsOnly')}
+            body={t('tm.adminsOnlyBody')}
           />
         </div>
       </PageWrapper>
@@ -215,14 +217,14 @@ export default function Team() {
   }
 
   return (
-    <PageWrapper>
+    <PageWrapper type="list">
       <div className="max-w-5xl mx-auto space-y-6">
         {/* Header */}
         <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} className="flex items-start justify-between gap-4 flex-wrap">
           <div>
-            <h1 className="font-display text-3xl font-semibold text-ink-900 dark:text-parchment-50 tracking-tight">Team</h1>
+            <PageHeader title={t('nav.Team')} />
             <p className="text-sm text-ink-500 dark:text-parchment-300/70 mt-1">
-              The people with login access to your workspace. Members of your church (parishioners, volunteers) live in the <span className="font-semibold">Members</span> page instead.
+              {t('tm.subtitlePrefix')} <span className="font-semibold">{t('tm.members')}</span> {t('tm.subtitleSuffix')}
             </p>
           </div>
           <button
@@ -230,7 +232,7 @@ export default function Team() {
             onClick={() => setShowAdd(true)}
             className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-church-900 dark:bg-church-700 text-parchment-50 text-sm font-bold shadow-warm hover:bg-church-800 dark:hover:bg-church-600 transition-colors"
           >
-            <Plus size={16} /> Add team member
+            <Plus size={16} /> {t('tm.add')}
           </button>
         </motion.div>
 
@@ -253,9 +255,9 @@ export default function Team() {
           err ? null : (
           <EmptyState
             icon={Users}
-            title="No team yet"
-            body="Add your first teammate to share the workload — pastors, staff, or volunteer coordinators."
-            action={{ label: 'Add team member', onClick: () => setShowAdd(true) }}
+            title={t('tm.emptyTitle')}
+            body={t('tm.emptyBody')}
+            action={{ label: t('tm.add'), onClick: () => setShowAdd(true) }}
           />
           )
         ) : (
@@ -264,8 +266,8 @@ export default function Team() {
             <table className="w-full text-sm min-w-[40rem]">
               <thead className="bg-parchment-100/60 dark:bg-ink-800/40 border-b border-parchment-300/60 dark:border-brass-900/30">
                 <tr>
-                  {['Name', 'Email', 'Role', 'Joined', ''].map(h => (
-                    <th key={h} className="text-left px-4 py-3 text-xs font-bold text-ink-500 dark:text-parchment-300/70 uppercase tracking-wider">{h}</th>
+                  {[t('tm.name'), t('tm.email'), t('tm.role'), t('tm.joined'), ''].map(h => (
+                    <th key={h || 'actions'} className="text-left px-4 py-3 text-xs font-bold text-ink-500 dark:text-parchment-300/70 uppercase tracking-wider">{h}</th>
                   ))}
                 </tr>
               </thead>
@@ -276,17 +278,17 @@ export default function Team() {
                     <tr key={u.id} className="hover:bg-parchment-100/40 dark:hover:bg-ink-800/40 transition-colors">
                       <td className="px-4 py-3 font-medium text-ink-900 dark:text-parchment-50">
                         {u.closed ? t('team.formerOperator') : u.name}
-                        {isMe && <span className="ml-2 text-[10px] font-semibold text-brass-600 dark:text-brass-300 uppercase tracking-wider">You</span>}
+                        {isMe && <span className="ml-2 text-[11px] font-semibold text-brass-600 dark:text-brass-300 uppercase tracking-wider">{t('tm.you')}</span>}
                         {outcomeUnknown.has(u.id) ? (
-                          <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-semibold uppercase tracking-wider bg-rose-50 text-rose-800 dark:bg-rose-900/30 dark:text-rose-200">
+                          <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-semibold uppercase tracking-wider bg-rose-50 text-rose-800 dark:bg-rose-900/30 dark:text-rose-200">
                             {t('team.turnOnUnknownStatus')}
                           </span>
                         ) : u.closed ? (
-                          <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-semibold uppercase tracking-wider bg-rose-50 text-rose-800 dark:bg-rose-900/30 dark:text-rose-200">
+                          <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-semibold uppercase tracking-wider bg-rose-50 text-rose-800 dark:bg-rose-900/30 dark:text-rose-200">
                             {t('team.loginClosed')}
                           </span>
                         ) : u.deactivated && (
-                          <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-semibold uppercase tracking-wider bg-rose-50 text-rose-800 dark:bg-rose-900/30 dark:text-rose-200">
+                          <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-semibold uppercase tracking-wider bg-rose-50 text-rose-800 dark:bg-rose-900/30 dark:text-rose-200">
                             {t('team.loginOff')}
                           </span>
                         )}
@@ -358,7 +360,7 @@ export default function Team() {
 
         {/* Helpful footer */}
         <p className="text-xs text-ink-500 dark:text-parchment-300/60 leading-relaxed">
-          New team members get a temporary password from you. They can change it at any time via <span className="font-mono">/forgot</span>. Email-based invites are coming once we wire up the email provider.
+          {t('tm.tempPasswordHint')} <span className="font-mono">/forgot</span>. {t('tm.emailInvitesLater')}
         </p>
       </div>
 
@@ -375,6 +377,7 @@ export default function Team() {
 }
 
 function AddTeamMemberModal({ onClose, onCreated }) {
+  const { t } = useLocale()
   const [name,     setName]     = useState('')
   const [email,    setEmail]    = useState('')
   const [password, setPassword] = useState('')
@@ -385,7 +388,7 @@ function AddTeamMemberModal({ onClose, onCreated }) {
   async function submit(e) {
     e.preventDefault()
     setErr('')
-    if (password.length < 8) return setErr('Password must be at least 8 characters.')
+    if (password.length < 8) return setErr(t('signup.passwordMin', { min: 8 }))
     setLoading(true)
     try {
       const res = await fetch(apiUrl('/api/users'), {
@@ -409,17 +412,13 @@ function AddTeamMemberModal({ onClose, onCreated }) {
       className={sheetOverlayCls}
       onClick={onClose}
     >
-      <motion.div
-        initial={{ opacity: 0, scale: 0.96, y: 12 }}
-        animate={{ opacity: 1, scale: 1, y: 0 }}
-        exit={{ opacity: 0, scale: 0.96, y: 12 }}
-        transition={{ duration: 0.22, ease: [0.25, 0.1, 0.25, 1] }}
+      <motion.div {...dialogMotionNow()}
         onClick={e => e.stopPropagation()}
         className={sheetPanelCls}
       >
         <MobileSheetGrip />
         <div className="flex items-center justify-between px-6 py-4 border-b border-parchment-300/60 dark:border-brass-900/30">
-          <h2 className="font-display text-lg font-semibold text-ink-900 dark:text-parchment-50">Add team member</h2>
+          <h2 className="font-display text-lg font-semibold text-ink-900 dark:text-parchment-50">{t('tm.add')}</h2>
           <button type="button" onClick={onClose} className="-m-2 p-2 text-ink-400 hover:text-ink-700 dark:text-parchment-400/60 dark:hover:text-parchment-100">
             <X size={18} />
           </button>
@@ -427,37 +426,37 @@ function AddTeamMemberModal({ onClose, onCreated }) {
 
         <form onSubmit={submit} className="px-6 py-5 space-y-4">
           <div>
-            <label className="block text-xs font-semibold text-ink-600 dark:text-parchment-200 mb-1.5">Name</label>
+            <label className="block text-xs font-semibold text-ink-600 dark:text-parchment-200 mb-1.5">{t('tm.name')}</label>
             <div className="relative">
               <UserIcon size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-ink-400 dark:text-parchment-400/60" />
-              <input required value={name} onChange={e => setName(e.target.value)} placeholder="Pastor Jane Doe"
+              <input required value={name} onChange={e => setName(e.target.value)} placeholder={t('tm.namePh')}
                 className="w-full pl-9 pr-3 py-2.5 text-sm rounded-lg bg-parchment-100 dark:bg-ink-800 border border-parchment-300/70 dark:border-brass-900/40 text-ink-900 dark:text-parchment-50 placeholder-ink-400 dark:placeholder-parchment-400/50 focus:outline-none focus:ring-2 focus:ring-brass-400" />
             </div>
           </div>
 
           <div>
-            <label className="block text-xs font-semibold text-ink-600 dark:text-parchment-200 mb-1.5">Email</label>
+            <label className="block text-xs font-semibold text-ink-600 dark:text-parchment-200 mb-1.5">{t('tm.email')}</label>
             <div className="relative">
               <Mail size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-ink-400 dark:text-parchment-400/60" />
-              <input type="email" required value={email} onChange={e => setEmail(e.target.value)} placeholder="jane@yourchurch.com"
+              <input type="email" required value={email} onChange={e => setEmail(e.target.value)} placeholder={t('tm.emailPh')}
                 className="w-full pl-9 pr-3 py-2.5 text-sm rounded-lg bg-parchment-100 dark:bg-ink-800 border border-parchment-300/70 dark:border-brass-900/40 text-ink-900 dark:text-parchment-50 placeholder-ink-400 dark:placeholder-parchment-400/50 focus:outline-none focus:ring-2 focus:ring-brass-400" />
             </div>
           </div>
 
           <div>
-            <label className="block text-xs font-semibold text-ink-600 dark:text-parchment-200 mb-1.5">Temporary password</label>
+            <label className="block text-xs font-semibold text-ink-600 dark:text-parchment-200 mb-1.5">{t('tm.tempPassword')}</label>
             <div className="relative">
               <Lock size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-ink-400 dark:text-parchment-400/60" />
-              <input type="text" required minLength={8} value={password} onChange={e => setPassword(e.target.value)} placeholder="At least 8 characters"
+              <input type="text" required minLength={8} value={password} onChange={e => setPassword(e.target.value)} placeholder={t('tm.passwordPh')}
                 className="w-full pl-9 pr-3 py-2.5 text-sm rounded-lg bg-parchment-100 dark:bg-ink-800 border border-parchment-300/70 dark:border-brass-900/40 text-ink-900 dark:text-parchment-50 placeholder-ink-400 dark:placeholder-parchment-400/50 focus:outline-none focus:ring-2 focus:ring-brass-400" />
             </div>
             <p className="mt-1.5 text-[11px] text-ink-500 dark:text-parchment-300/60">
-              Share this with the new member out-of-band. They can change it via Forgot Password.
+              {t('tm.sharePassword')}
             </p>
           </div>
 
           <div>
-            <label className="block text-xs font-semibold text-ink-600 dark:text-parchment-200 mb-1.5">Role</label>
+            <label className="block text-xs font-semibold text-ink-600 dark:text-parchment-200 mb-1.5">{t('tm.role')}</label>
             <div className="grid grid-cols-3 gap-2">
               {ROLES.map(r => (
                 <button
@@ -471,7 +470,7 @@ function AddTeamMemberModal({ onClose, onCreated }) {
                   }`}
                 >
                   <div>{r.label}</div>
-                  <div className={`mt-0.5 text-[10px] font-medium ${role === r.value ? 'text-parchment-200/80' : 'text-ink-500 dark:text-parchment-300/60'}`}>
+                  <div className={`mt-0.5 text-[11px] font-medium ${role === r.value ? 'text-parchment-200/80' : 'text-ink-500 dark:text-parchment-300/60'}`}>
                     {r.description}
                   </div>
                 </button>
@@ -487,7 +486,7 @@ function AddTeamMemberModal({ onClose, onCreated }) {
 
           <div className="flex items-center justify-end gap-2 pt-2 border-t border-parchment-300/60 dark:border-brass-900/30">
             <button type="button" onClick={onClose} className="px-4 py-2 rounded-lg text-sm font-semibold text-ink-500 hover:text-ink-800 dark:text-parchment-300/70 dark:hover:text-parchment-100 transition-colors">
-              Cancel
+              {t('tm.cancel')}
             </button>
             <button
               type="submit"

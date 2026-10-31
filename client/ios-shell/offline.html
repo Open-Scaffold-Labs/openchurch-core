@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#FBF8F2" />
+    <title>OpenChurch</title>
+    <style>
+      :root { color-scheme: light; }
+      html, body {
+        margin: 0;
+        min-height: 100%;
+        background: #FBF8F2;
+        color: #2C2416;
+      }
+      body {
+        box-sizing: border-box;
+        min-height: 100vh;
+        padding:
+          calc(24px + env(safe-area-inset-top, 0px))
+          calc(24px + env(safe-area-inset-right, 0px))
+          calc(24px + env(safe-area-inset-bottom, 0px))
+          calc(24px + env(safe-area-inset-left, 0px));
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-family: "Iowan Old Style", Palatino, Georgia, serif;
+      }
+      main { max-width: 28rem; text-align: center; }
+      h1 {
+        margin: 0 0 0.75rem;
+        font-weight: 500;
+        font-size: 2rem;
+        color: #7B2D26;
+      }
+      p { margin: 0.75rem 0 0; font-size: 1rem; line-height: 1.5; }
+      a {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 44px;
+        margin-top: 1.5rem;
+        padding: 0 1.25rem;
+        border-radius: 0.5rem;
+        background: #7B2D26;
+        color: #FBF8F2;
+        text-decoration: none;
+        font-family: system-ui, sans-serif;
+        font-size: 0.95rem;
+        font-weight: 600;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>OpenChurch</h1>
+      <p id="unknown">OpenChurch could not open the parish address. This screen does not know why.</p>
+      <p id="unknown-es">OpenChurch no pudo abrir la dirección parroquial. Esta pantalla no sabe por qué.</p>
+      <p id="offline" hidden>This device reports no connection. OpenChurch has not opened the parish office.</p>
+      <p id="offline-es" hidden>Este dispositivo informa que no hay conexión. OpenChurch no ha abierto la oficina parroquial.</p>
+      <p>Nothing was saved from this screen.</p>
+      <p>No se guardó nada desde esta pantalla.</p>
+      <a id="retry" href="__OC_RETRY__">Try again · Inténtelo de nuevo</a>
+    </main>
+    <script>
+      if (navigator.onLine === false) {
+        document.getElementById('unknown').hidden = true
+        document.getElementById('unknown-es').hidden = true
+        document.getElementById('offline').hidden = false
+        document.getElementById('offline-es').hidden = false
+      }
+    </script>
+  </body>
+</html>

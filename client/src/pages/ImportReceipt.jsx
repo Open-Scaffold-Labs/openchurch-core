@@ -147,7 +147,7 @@ export default function ImportReceipt() {
 
             {r.follow_up_reasons?.length > 0 && (
               <section className="mb-6">
-                <p className="text-[10px] font-semibold uppercase tracking-widest text-ink-500 mb-1.5">{t('mig.rFollowUp')}</p>
+                <p className="text-[11px] font-semibold uppercase tracking-widest text-ink-500 mb-1.5">{t('mig.rFollowUp')}</p>
                 <ul className="text-sm space-y-1">
                   {r.follow_up_reasons.map((fr, i) => (
                     <li key={i} className="flex justify-between gap-4">

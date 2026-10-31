@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Calendar, Copy, Check, ExternalLink, RefreshCw } from 'lucide-react'
 import { useToast } from './ToastProvider'
 import { useConfirm } from './ConfirmProvider'
+import { useLocale } from '../i18n'
 
 // Two modes:
 //   - admin/staff lookup (default): pass `clientId`. Hits /link/:clientId.
@@ -10,6 +11,7 @@ import { useConfirm } from './ConfirmProvider'
 //     the roster, the component renders nothing (silent hide) so the
 //     mounting page can include it unconditionally.
 export default function CalendarSync({ clientId, clientName, selfServe = false }) {
+  const { t } = useLocale()
   const [url, setUrl] = useState(null)
   const [copied, setCopied] = useState(false)
   const [loading, setLoading] = useState(false)
@@ -51,11 +53,11 @@ export default function CalendarSync({ clientId, clientName, selfServe = false }
     setLoading(true)
     try {
       const res = await fetch(endpoint)
-      if (!res.ok) throw new Error('Failed to get calendar link')
+      if (!res.ok) throw new Error(t('cal.getLinkFailed'))
       const data = await res.json()
       setUrl(data.url)
     } catch (e) {
-      toast.error(e.message || 'Failed to get calendar link')
+      toast.error(e.message || t('cal.getLinkFailed'))
     } finally {
       setLoading(false)
     }
@@ -68,7 +70,7 @@ export default function CalendarSync({ clientId, clientName, selfServe = false }
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)
     } catch {
-      toast.error('Could not copy to clipboard')
+      toast.error(t('cal.copyFailed'))
     }
   }
 
@@ -77,20 +79,20 @@ export default function CalendarSync({ clientId, clientName, selfServe = false }
   // resubscribe with the new URL.
   async function rotate() {
     const ok = await ask({
-      title: 'Generate a new calendar link?',
-      body: 'Any existing subscriptions stop working and will need to be added again with the new link.',
-      confirmLabel: 'Generate new link',
+      title: t('cal.regenTitle'),
+      body: t('cal.regenBody'),
+      confirmLabel: t('cal.regenConfirm'),
     })
     if (!ok) return
     setRotating(true)
     try {
       const res = await fetch(rotateEndpoint, { method: 'POST' })
-      if (!res.ok) throw new Error('Failed to rotate calendar link')
+      if (!res.ok) throw new Error(t('cal.rotateFailed'))
       const data = await res.json()
       setUrl(data.url)
-      toast.success('New calendar link generated')
+      toast.success(t('cal.newLink'))
     } catch (e) {
-      toast.error(e.message || 'Failed to rotate calendar link')
+      toast.error(e.message || t('cal.rotateFailed'))
     } finally {
       setRotating(false)
     }
@@ -120,7 +122,7 @@ export default function CalendarSync({ clientId, clientName, selfServe = false }
       {!url ? (
         <>
           <p className="text-[11px] text-ink-500 dark:text-parchment-300/70 mb-2 leading-snug">
-            Subscribe to see assigned events and tasks alongside personal calendar entries.
+            {t('cal.subscribeHint')}
           </p>
           <button
             onClick={getLink}
@@ -141,7 +143,7 @@ export default function CalendarSync({ clientId, clientName, selfServe = false }
             <button
               onClick={copy}
               className="p-1.5 rounded-md bg-white dark:bg-ink-800 border border-parchment-300/60 dark:border-brass-900/40 text-ink-400 hover:text-ink-700 dark:hover:text-parchment-50 transition-colors"
-              title="Copy link"
+              title={t('cal.copyLink')}
             >
               {copied ? <Check size={13} className="text-brass-500" /> : <Copy size={13} />}
             </button>
@@ -149,7 +151,7 @@ export default function CalendarSync({ clientId, clientName, selfServe = false }
               onClick={rotate}
               disabled={rotating}
               className="p-1.5 rounded-md bg-white dark:bg-ink-800 border border-parchment-300/60 dark:border-brass-900/40 text-ink-400 hover:text-ink-700 dark:hover:text-parchment-50 transition-colors disabled:opacity-50"
-              title="Regenerate link (invalidates existing subscriptions)"
+              title={t('cal.regenLink')}
             >
               <RefreshCw size={13} className={rotating ? 'animate-spin' : ''} />
             </button>
@@ -161,7 +163,7 @@ export default function CalendarSync({ clientId, clientName, selfServe = false }
                 className="inline-flex items-center gap-1.5 text-[11px] text-church-700 dark:text-parchment-300/70 hover:text-church-900 dark:hover:text-parchment-50 transition-colors"
               >
                 <ExternalLink size={11} />
-                Add to Apple Calendar
+                {t('cal.apple')}
               </a>
             )}
             {googleUrl && (
@@ -172,7 +174,7 @@ export default function CalendarSync({ clientId, clientName, selfServe = false }
                 className="inline-flex items-center gap-1.5 text-[11px] text-church-700 dark:text-parchment-300/70 hover:text-church-900 dark:hover:text-parchment-50 transition-colors"
               >
                 <ExternalLink size={11} />
-                Add to Google Calendar
+                {t('cal.google')}
               </a>
             )}
           </div>

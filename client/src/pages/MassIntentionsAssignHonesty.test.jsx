@@ -7,6 +7,7 @@
 //   4. Only the 60-day window is asked — GET /api/calendar/:id is skipped
 
 import { ToastProvider } from '../components/ToastProvider'
+import { ConfirmProvider } from '../components/ConfirmProvider'
 import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
@@ -49,7 +50,7 @@ function renderBook(path) {
     <MemoryRouter initialEntries={[path]}>
       <LocaleProvider>
         <Routes>
-          <Route path="/mass-intentions" element={<ToastProvider><MassIntentions /></ToastProvider>} />
+          <Route path="/mass-intentions" element={<ToastProvider><ConfirmProvider><MassIntentions /></ConfirmProvider></ToastProvider>} />
         </Routes>
       </LocaleProvider>
     </MemoryRouter>,
@@ -87,7 +88,7 @@ describe('assign dropdown helpers', () => {
   })
 
   it('formatMassOptionLabel does not invent a Mass from a date alone', () => {
-    expect(formatMassOptionLabel(FAR)).toBe('2026-03-01 — Mass IN MARCH (09:00)')
+    expect(formatMassOptionLabel(FAR)).toBe('Sun, Mar 1, 2026 — Mass IN MARCH (09:00)')
     expect(formatMassOptionLabel(null)).toBe('')
   })
 })

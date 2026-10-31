@@ -1,8 +1,10 @@
 import { useState, useRef } from 'react'
 import { Mic, MicOff } from 'lucide-react'
 import { useToast } from './ToastProvider'
+import { useLocale } from '../i18n'
 
 export default function DictationInput({ value, onChange, placeholder, className = '', ...props }) {
+  const { t } = useLocale()
   const toast = useToast()
   const [listening, setListening] = useState(false)
   const recognitionRef = useRef(null)
@@ -13,7 +15,7 @@ export default function DictationInput({ value, onChange, placeholder, className
       // Was a native alert() — the last one in the app. It is a fallback
       // notice rather than an error, so it goes through the toast channel
       // like every other message. (OPERATOR P1.)
-      toast.info('Dictation is not supported in this browser. You can still type.')
+      toast.info(t('dict.dictation_is_not_supported_in'))
       return
     }
 

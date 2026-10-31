@@ -7,6 +7,7 @@
 //   5. Durable ?event= no longer names the Mass in the page chrome
 
 import { ToastProvider } from '../components/ToastProvider'
+import { ConfirmProvider } from '../components/ConfirmProvider'
 import { render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
@@ -76,7 +77,7 @@ function renderBook(path) {
     <MemoryRouter initialEntries={[path]}>
       <LocaleProvider>
         <Routes>
-          <Route path="/mass-intentions" element={<><LocationProbe /><ToastProvider><MassIntentions /></ToastProvider></>} />
+          <Route path="/mass-intentions" element={<><LocationProbe /><ToastProvider><ConfirmProvider><MassIntentions /></ConfirmProvider></ToastProvider></>} />
         </Routes>
       </LocaleProvider>
     </MemoryRouter>,

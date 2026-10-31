@@ -583,3 +583,103 @@ describe('CSRF — production-like deploy with an EMPTY allowlist (the 2026-09-2
     expect(res.status).toBe(200)
   })
 })
+
+// Sentry G1 (2026-10-23) — native iOS shell regression locks. The shell
+// loads the parish https address via CAP_SERVER_URL, so page and /api share
+// one origin and nothing below needs to change. These lock that the server
+// was NOT widened to admit the Capacitor bundled origin or reopen Bearer.
+// Revoked (logout-all / token_version) is covered above; deactivated users
+// are covered by loginDeactivation.test.js.
+describe('native iOS shell — server stays same-origin only (G1 locks)', () => {
+  const org = {
+    organizationName: `Cookie Native ${RUN_ID}`,
+    name: 'Native Secretary',
+    email: `cookie_native_${RUN_ID}@example.com`,
+    password: 'cookie-session-pw-native',
+  }
+  const ENV_KEYS = ['VERCEL_ENV', 'CLIENT_URL', 'DIOCESE_CLIENT_URL', 'CORS_ORIGINS']
+  let saved
+  let cookie
+  let bearer
+
+  beforeAll(async () => {
+    const signup = await createOrg(server, org, '10.88.0.9')
+    expect(signup.status).toBe(201)
+    cleanupOrgIds.push(signup.body.user.organization.id)
+    cookie = cookieHeaderFrom(signup)
+    bearer = signup.body.token
+    expect(bearer).toBeTruthy() // NODE_ENV=test still echoes it
+  })
+
+  beforeEach(() => {
+    saved = Object.fromEntries(ENV_KEYS.map(k => [k, process.env[k]]))
+    delete process.env.CLIENT_URL
+    delete process.env.DIOCESE_CLIENT_URL
+    process.env.CORS_ORIGINS = 'https://parish.example'
+  })
+
+  afterEach(() => {
+    for (const k of ENV_KEYS) {
+      if (saved[k] === undefined) delete process.env[k]
+      else process.env[k] = saved[k]
+    }
+  })
+
+  const preflight = origin => request(server).options('/api/auth/me')
+    .set('Origin', origin)
+    .set('Access-Control-Request-Method', 'GET')
+
+  it('a capacitor://localhost preflight gets no Access-Control-Allow-Origin', async () => {
+    const res = await preflight('capacitor://localhost')
+    expect(res.headers['access-control-allow-origin']).toBeUndefined()
+    expect(res.headers['access-control-allow-credentials']).toBeUndefined()
+  })
+
+  it('ionic://localhost is not admitted either', async () => {
+    const res = await preflight('ionic://localhost')
+    expect(res.headers['access-control-allow-origin']).toBeUndefined()
+  })
+
+  it('a listed origin gets its exact origin back with credentials', async () => {
+    const res = await preflight('https://parish.example')
+    expect(res.headers['access-control-allow-origin']).toBe('https://parish.example')
+    expect(res.headers['access-control-allow-credentials']).toBe('true')
+  })
+
+  it('look-alike origins get nothing', async () => {
+    for (const bad of ['https://parish.example.evil.com', 'capacitor://evil', 'https://evilparish.example']) {
+      const res = await preflight(bad)
+      expect(res.headers['access-control-allow-origin'], bad).toBeUndefined()
+      expect(res.headers['access-control-allow-credentials'], bad).toBeUndefined()
+    }
+  })
+
+  it('a cookie POST with Origin capacitor://localhost is 403 csrf_origin', async () => {
+    const res = await request(server).post('/api/auth/logout-all')
+      .set('Cookie', cookie)
+      .set('Origin', 'capacitor://localhost')
+    expect(res.status).toBe(403)
+    expect(res.body.code).toBe('csrf_origin')
+  })
+
+  it('production: a Bearer-only request is 401', async () => {
+    // CONTROL: the same token works outside production.
+    const ok = await request(server).get('/api/auth/me').set('Authorization', `Bearer ${bearer}`)
+    expect(ok.status).toBe(200)
+    process.env.VERCEL_ENV = 'production'
+    const res = await request(server).get('/api/auth/me').set('Authorization', `Bearer ${bearer}`)
+    expect(res.status).toBe(401)
+  })
+
+  it('production: login sets the cookie and returns no token in the body', async () => {
+    process.env.VERCEL_ENV = 'production'
+    const res = await request(server).post('/api/auth/login')
+      .set('X-Forwarded-For', '10.88.0.10')
+      .send({ email: org.email, password: org.password })
+    expect(res.status).toBe(200)
+    expect(res.body.token).toBeUndefined()
+    expect(JSON.stringify(res.body)).not.toContain(bearer.split('.')[0] + '.')
+    expect(sessionCookieLine(res)).toMatch(/HttpOnly/i)
+    expect(sessionCookieLine(res)).toMatch(/Secure/i)
+  })
+})

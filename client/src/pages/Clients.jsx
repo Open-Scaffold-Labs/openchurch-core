@@ -4,7 +4,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import {
   Search, Plus, X, Pencil, Trash2, Users, TrendingUp,
   Activity, UserCheck, ChevronDown, MoreHorizontal,
-  Phone, Mail, Building2, FileText, Tag, Eye, Calendar, Upload,
+  Phone, Mail, Building2, MapPin, FileText, Tag, Eye, Calendar, Upload,
   ArrowRight,
 } from 'lucide-react'
 import DictationInput from '../components/DictationInput'
@@ -14,7 +14,7 @@ import CalendarSync from '../components/CalendarSync'
 import EmptyState from '../components/EmptyState'
 import { SkeletonRowList } from '../components/Skeleton'
 import { MembersIllustration } from '../components/illustrations'
-import PageWrapper from '../components/PageWrapper'
+import PageWrapper, { PageHeader } from '../components/PageWrapper'
 import ImportMembersModal from '../components/ImportMembersModal'
 import AvatarUploader from '../components/AvatarUploader'
 import { useAuth } from '../context/AuthContext'
@@ -25,7 +25,10 @@ import { initials, loadOne, loadList } from '../utils/format'
 import { celebrateFirstAction } from '../utils/firstActionToast'
 import { LIT_COLOR_DOT, LIT_COLOR_TEXT } from '../utils/liturgicalColors'
 import { useConfirm } from '../components/ConfirmProvider'
-import { scrimCls } from '../components/MobileSheet'
+import { scrimCls, sheetOverlayCls, sheetPanelCls, MobileSheetGrip } from '../components/MobileSheet'
+import { DialogFooter, DIALOG_TITLE_CLS } from '../components/DialogChrome'
+import { menuMotion, drawerMotion, dialogMotionNow } from '../utils/motion'
+import { formatMailingAddress } from '../utils/memberAddress'
 
 /* ── Helpers ── */
 // Warm-palette avatars (QA audit C3): per-member variety WITHOUT the
@@ -103,7 +106,8 @@ const STATUS_COLORS = {
   new:      'bg-church-50 text-church-800 dark:bg-church-900/40 dark:text-brass-200',
 }
 
-const empty = { name: '', company: '', email: '', phone: '', notes: '', status: 'active', role: 'Member', tags: '', birth_date: '', joined_date: '', avatar: null }
+const empty = { name: '', company: '', email: '', phone: '', notes: '', status: 'active', role: 'Member', tags: '', birth_date: '', joined_date: '', avatar: null,
+  mailing_address_line1: '', mailing_address_line2: '', mailing_city: '', mailing_state: '', mailing_postal: '' }
 
 /* ── Stat pill ── */
 function StatPill({ icon: Icon, label, value, sub, accent, index }) {
@@ -112,12 +116,12 @@ function StatPill({ icon: Icon, label, value, sub, accent, index }) {
       initial={{ opacity: 0, y: 12 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ delay: index * 0.06, duration: 0.28 }}
-      className="flex items-center gap-3 bg-parchment-50 dark:bg-ink-900/90 rounded-2xl px-5 py-4 border border-parchment-300/50 dark:border-brass-900/30 shadow-warm-md flex-1"
+      className="flex items-center gap-3 bg-parchment-50 dark:bg-ink-900/90 rounded-2xl px-5 py-4 border border-parchment-300/50 dark:border-brass-900/30 shadow-warm-md min-w-0"
     >
       <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${accent}`}>
         <Icon size={17} className="text-parchment-50" />
       </div>
-      <div>
+      <div className="min-w-0">
         <p className="text-2xl font-black text-ink-900 dark:text-parchment-50 tracking-tight leading-none">{value ?? '—'}</p>
         <p className="text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mt-0.5">{label}</p>
         {sub && <p className="text-xs text-ink-400 dark:text-parchment-400/50">{sub}</p>}
@@ -140,19 +144,16 @@ function ActionsMenu({ member, onEdit, onDelete, onView }) {
     <div ref={ref} className="relative" onClick={e => e.stopPropagation()}>
       <motion.button
         onClick={() => setOpen(o => !o)}
-        aria-label="Member actions"
+        aria-label={t('mem.actions')}
         aria-expanded={open}
-        className="p-1.5 text-ink-400 hover:text-ink-700 dark:hover:text-parchment-50 rounded-lg hover:bg-parchment-200 dark:hover:bg-ink-800 transition-colors"
+        className="tap inline-flex items-center justify-center min-h-[44px] min-w-[44px] p-1.5 text-ink-400 hover:text-ink-700 dark:hover:text-parchment-50 rounded-lg hover:bg-parchment-200 dark:hover:bg-ink-800 transition-colors"
       >
         <MoreHorizontal size={15} aria-hidden="true" />
       </motion.button>
       <AnimatePresence>
         {open && (
           <motion.div
-            initial={{ opacity: 0, scale: 0.92, y: -4 }}
-            animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.92, y: -4 }}
-            transition={{ duration: 0.13 }}
+            {...menuMotion}
             className="absolute right-0 mt-1 w-40 bg-parchment-50 dark:bg-ink-900 rounded-xl shadow-warm-lg border border-parchment-300/50 dark:border-brass-900/30 overflow-hidden z-30"
           >
             {[
@@ -160,7 +161,7 @@ function ActionsMenu({ member, onEdit, onDelete, onView }) {
               { icon: Pencil, label: t('mem.edit'),          action: () => { onEdit(member); setOpen(false) }, cls: '' },
               { icon: Trash2, label: t('mem.delete'),        action: () => { onDelete(member.id, member.name); setOpen(false) }, cls: 'text-rose-500 dark:text-rose-300' },
             ].map(({ icon: Icon, label, action, cls }) => (
-              <button key={label} onClick={action} className={`flex items-center gap-2.5 w-full px-3.5 py-2.5 text-sm hover:bg-parchment-100 dark:hover:bg-ink-800 transition-colors ${cls || 'text-ink-700 dark:text-parchment-100'}`}>
+              <button key={label} onClick={action} className={`flex items-center gap-2.5 w-full min-h-[44px] px-3.5 py-2.5 text-sm hover:bg-parchment-100 dark:hover:bg-ink-800 transition-colors ${cls || 'text-ink-700 dark:text-parchment-100'}`}>
                 <Icon size={13} /> {label}
               </button>
             ))}
@@ -183,6 +184,20 @@ function fmtBirthMonthDay(iso, dateLocale) {
 /* ── Slide-over panel ── */
 function SlideOver({ member, onClose, onEdit }) {
   const { t, dateLocale } = useLocale()
+  // Single role binding for the panel (TARS): canWrite (admin/staff) gates
+  // SP-167 Edit + Calendar actions and SP-176 notes. Viewers' edit/calendar
+  // are refused server-side, and the server omits notes for them; the panel
+  // gates too so a stale or cached row cannot show them.
+  const { canWrite } = useAuth()
+  // SP-176: Viewers get birth_month_day ("MM-DD") instead of birth_date.
+  const birthIso = member?.birth_date || (member?.birth_month_day ? `2000-${member.birth_month_day}` : null)
+  // SP-175: Esc closes the panel while it is open.
+  useEffect(() => {
+    if (!member) return
+    const onKey = (e) => { if (e.key === 'Escape') onClose() }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [member, onClose])
   const tags = member?.tags ? member.tags.split(',').filter(Boolean) : []
 
   // Liturgical feast-day overlap for the member's birthday. We use
@@ -208,13 +223,12 @@ function SlideOver({ member, onClose, onEdit }) {
         <>
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={onClose} className={`${scrimCls} z-40`} />
           <motion.div
-            initial={{ x: '100%' }} animate={{ x: 0 }} exit={{ x: '100%' }}
-            transition={{ type: 'spring', damping: 28, stiffness: 280 }}
+            {...drawerMotion}
             className="fixed right-0 top-0 h-full w-96 bg-parchment-50 dark:bg-ink-900 border-l border-parchment-300/60 dark:border-brass-900/30 shadow-warm-lg z-50 flex flex-col"
           >
             {/* Header */}
             <div className="flex items-center justify-between px-6 py-5 border-b border-parchment-300/50 dark:border-brass-900/30">
-              <h2 className="font-bold text-ink-900 dark:text-parchment-50">{t('mem.profile')}</h2>
+              <h2 className="font-display text-2xl font-semibold text-ink-900 dark:text-parchment-50 leading-snug">{t('mem.profile')}</h2>
               <motion.button transition={{ duration: 0.15 }} onClick={onClose} className="-m-2 p-2 text-ink-400 hover:text-ink-700 dark:hover:text-parchment-50">
                 <X size={18} />
               </motion.button>
@@ -234,8 +248,8 @@ function SlideOver({ member, onClose, onEdit }) {
                 </div>
               </div>
 
-              {/* Contact */}
-              <div className="space-y-3">
+              {/* Contact — mailing address same visibility as email/phone (SP-264) */}
+              <div className="space-y-3" data-testid="member-slide-contact">
                 <p className="text-xs font-bold text-ink-500 dark:text-parchment-300/70 uppercase tracking-widest">{t('mem.contact')}</p>
                 {[
                   { icon: Mail,      val: member.email,   label: 'Email' },
@@ -247,6 +261,12 @@ function SlideOver({ member, onClose, onEdit }) {
                     <span className="text-ink-700 dark:text-parchment-200">{val}</span>
                   </div>
                 ) : null)}
+                {formatMailingAddress(member) && (
+                  <div className="flex items-start gap-3 text-sm" data-testid="member-mailing-address">
+                    <MapPin size={14} className="text-ink-400 shrink-0 mt-0.5" />
+                    <span className="text-ink-700 dark:text-parchment-200 whitespace-pre-line">{formatMailingAddress(member)}</span>
+                  </div>
+                )}
               </div>
 
               {/* Tags */}
@@ -266,12 +286,12 @@ function SlideOver({ member, onClose, onEdit }) {
                   is a named feast (Christmas, Annunciation, Easter
                   Sunday for that particular year, etc.) — Ordinary-
                   Time birthdays render just the date. */}
-              {member.birth_date && (
+              {birthIso && (
                 <div className="space-y-2">
                   <p className="text-xs font-bold text-ink-500 dark:text-parchment-300/70 uppercase tracking-widest">{t('mem.birthday')}</p>
                   <div className="flex items-center gap-2 text-sm text-ink-700 dark:text-parchment-200">
                     <Calendar size={13} className="text-ink-400 shrink-0" />
-                    <span>{fmtBirthMonthDay(member.birth_date, dateLocale)}</span>
+                    <span>{fmtBirthMonthDay(String(birthIso).slice(0, 10), dateLocale)}</span>
                   </div>
                   {birthFeast?.feast_name && (
                     <div className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-md border text-[11px] font-medium ${LIT_COLOR_TEXT[birthFeast.color] ?? LIT_COLOR_TEXT.White}`}>
@@ -283,7 +303,7 @@ function SlideOver({ member, onClose, onEdit }) {
               )}
 
               {/* Notes */}
-              {member.notes && (
+              {canWrite && member.notes && (
                 <div className="space-y-2">
                   <p className="text-xs font-bold text-ink-500 dark:text-parchment-300/70 uppercase tracking-widest">{t('mem.notes')}</p>
                   <p className="text-sm text-ink-600 dark:text-parchment-300 leading-relaxed bg-parchment-100 dark:bg-ink-800 rounded-xl p-3">{member.notes}</p>
@@ -306,7 +326,7 @@ function SlideOver({ member, onClose, onEdit }) {
 
             {/* Footer */}
             <div className="px-6 py-4 border-t border-parchment-300/50 dark:border-brass-900/30 space-y-3">
-              <CalendarSync clientId={member.id} clientName={member.name} />
+              {canWrite && <CalendarSync clientId={member.id} clientName={member.name} />}
               {/* Open full profile — Sprint M / M.2. Slide-over stays
                   the quick-view; the full route hosts donation history
                   and richer detail. */}
@@ -317,9 +337,11 @@ function SlideOver({ member, onClose, onEdit }) {
               >
                 {t('mem.openFull')} <ArrowRight size={14} />
               </Link>
-              <AnimatedButton onClick={() => onEdit(member)} className="w-full flex items-center justify-center gap-2 bg-church-900 hover:bg-church-700 dark:bg-church-800 dark:hover:bg-church-700 text-parchment-50 py-2.5 rounded-xl text-sm font-semibold transition-colors">
+              {canWrite && (
+                <AnimatedButton onClick={() => onEdit(member)} className="w-full flex items-center justify-center gap-2 bg-church-900 hover:bg-church-700 dark:bg-church-800 dark:hover:bg-church-700 text-parchment-50 py-2.5 rounded-xl text-sm font-semibold transition-colors">
                 <Pencil size={14} /> {t('mem.editMember')}
               </AnimatedButton>
+              )}
             </div>
           </motion.div>
         </>
@@ -341,6 +363,7 @@ export default function Clients() {
   const [editing, setEditing]       = useState(null)
   const [selected, setSelected]     = useState(null)
   const [form, setForm]             = useState(empty)
+  const [dupMatches, setDupMatches] = useState([])
   const [loading, setLoading]       = useState(false)
   const [showImport, setShowImport] = useState(false)
   // Pagination (1.5). The list fetches a page at a time; "Load more"
@@ -367,15 +390,18 @@ export default function Clients() {
   useEffect(() => { fetchClients() }, [search, filterStatus, filterRole])
 
   // Observed 27 Aug: a 500 here assigned the ERROR BODY to `stats`, which is
-  // truthy, so the growth tile rendered the literal string "undefined%" and
-  // the three count tiles went blank — a measurement that failed presented as
-  // a measurement that came back empty. loadOne keeps `stats` null on
-  // failure, which the tiles already render as "—", and the flag says why.
+  // truthy, so a growth-% tile rendered the literal string "undefined%" and
+  // the count tiles went blank — a measurement that failed presented as a
+  // measurement that came back empty. loadOne keeps `stats` null on failure,
+  // which the tiles already render as "—", and the flag says why.
+  // Quiet craft 2: the Growth-% tile is gone (login: "nothing here counts";
+  // OPERATOR bans growth-% deltas). We still require finite membership
+  // counts; a bare `{}` must not pass.
   async function fetchStats() {
     // A 200 that is merely an object is not a count. `{}` used to pass
-    // loadOne and the growth tile rendered the literal "undefined%".
+    // loadOne and invent blank tiles.
     const counts = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
-      && ['total', 'newWeek', 'active', 'growth'].every((k) => Number.isFinite(v[k]))
+      && ['total', 'newWeek', 'active'].every((k) => Number.isFinite(v[k]))
     const { ok, data } = await loadOne(apiUrl('/api/clients/stats'), null, counts)
     setStats(ok ? data : null)
     setStatsFailed(!ok)
@@ -425,7 +451,7 @@ export default function Clients() {
     setLoadingMore(false)
   }
 
-  function openAdd() { setEditing(null); setForm(empty); setShowForm(true) }
+  function openAdd() { setEditing(null); setForm(empty); setDupMatches([]); setShowForm(true) }
 
   // Onboarding deep-link (POL.3): arriving at /clients?new=1 (from the
   // Dashboard checklist or the Welcome page) opens the add-member form
@@ -450,11 +476,41 @@ export default function Clients() {
       birth_date:  c.birth_date  ? String(c.birth_date).slice(0, 10) : '',
       joined_date: c.joined_date ? String(c.joined_date).slice(0, 10) : '',
       avatar:      c.avatar || null,
+      mailing_address_line1: c.mailing_address_line1 || '',
+      mailing_address_line2: c.mailing_address_line2 || '',
+      mailing_city: c.mailing_city || '',
+      mailing_state: c.mailing_state || '',
+      mailing_postal: c.mailing_postal || '',
     })
+    setDupMatches([])
     setSelected(null)
     setShowForm(true)
   }
   const field = (k) => (e) => setForm(f => ({ ...f, [k]: e.target.value }))
+
+  // SP-255: soft duplicate hint while typing name/email on Add/Edit.
+  useEffect(() => {
+    if (!showForm) return undefined
+    const email = (form.email || '').trim()
+    const name = (form.name || '').trim()
+    if (!email && !name) { setDupMatches([]); return undefined }
+    const ctrl = new AbortController()
+    const timer = setTimeout(async () => {
+      try {
+        const params = new URLSearchParams()
+        if (email) params.set('email', email)
+        if (name) params.set('name', name)
+        if (editing) params.set('exclude_id', String(editing))
+        const res = await fetch(apiUrl(`/api/clients/duplicate-check?${params}`), { signal: ctrl.signal })
+        if (!res.ok) return
+        const data = await res.json().catch(() => ({ matches: [] }))
+        setDupMatches(Array.isArray(data.matches) ? data.matches : [])
+      } catch (err) {
+        if (err?.name !== 'AbortError') setDupMatches([])
+      }
+    }, 280)
+    return () => { clearTimeout(timer); ctrl.abort() }
+  }, [showForm, form.email, form.name, editing])
 
   async function save(e) {
     e.preventDefault(); setLoading(true)
@@ -487,7 +543,7 @@ export default function Clients() {
     if (!(await ask({
       title: t('mem.removeConfirm'),
       body: t('mem.removeBody'),
-      confirmLabel: 'Remove member',
+      confirmLabel: t('mem.removeAction'),
       recoverable: true,
     }))) return
     const res = await fetch(apiUrl(`/api/clients/${id}`), { method: 'DELETE' })
@@ -499,42 +555,43 @@ export default function Clients() {
   const inputCls = 'w-full border border-parchment-300/60 dark:border-brass-900/30 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brass-400/50 bg-parchment-100 dark:bg-ink-800/80 text-ink-900 dark:text-parchment-50 placeholder-ink-400 dark:placeholder-parchment-400/50'
   const selectCls = inputCls + ' cursor-pointer'
 
+  // Quiet craft 2 / Jarvis: no Growth-% tile. A parish is a congregation,
+  // not a conversion funnel (Dashboard already cut this; Members follows).
   const statPills = [
     { icon: Users,     label: t('mem.total'),    value: stats?.total   ?? '—', accent: 'bg-church-900 dark:bg-church-700', index: 0 },
     { icon: TrendingUp,label: t('mem.newWeek'),    value: stats?.newWeek ?? '—', accent: 'bg-brass-700',                   index: 1 },
     { icon: UserCheck, label: t('mem.active'),   value: stats?.active  ?? '—', accent: 'bg-brass-700',                  index: 2 },
-    { icon: Activity,  label: t('mem.growth'),           value: stats ? `${stats.growth > 0 ? '+' : ''}${stats.growth}%` : '—', accent: 'bg-ink-700', index: 3 },
   ]
 
   return (
-    <PageWrapper className="max-w-6xl mx-auto space-y-6">
+    <PageWrapper type="list" className="max-w-6xl mx-auto space-y-6">
 
       {/* Header */}
-      <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} className="flex items-start justify-between gap-4 flex-wrap">
-        <div>
-          <h1 className="font-display text-3xl font-semibold text-ink-900 dark:text-parchment-50 tracking-tight">{t('mem.title')}</h1>
-          <p className="text-sm text-ink-500 dark:text-parchment-300/70 mt-1">{t('mem.sub')}</p>
-        </div>
-        {canWrite && (
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => setShowImport(true)}
-            className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold text-church-800 dark:text-brass-200 bg-parchment-100 dark:bg-ink-800/80 border border-parchment-300/60 dark:border-brass-900/30 hover:bg-parchment-200 dark:hover:bg-ink-800 transition-colors"
-          >
-            <Upload size={15} /> {t('mem.importCsv')}
-          </button>
-          <AnimatedButton
-            onClick={openAdd}
-            className="flex items-center gap-2 bg-church-900 hover:bg-church-700 dark:bg-church-700 dark:hover:bg-church-600 text-parchment-50 px-5 py-2.5 rounded-xl text-sm font-bold shadow-warm-md  transition-colors"
-          >
-            <Plus size={16} /> {t('mem.addMember')}
-          </AnimatedButton>
-        </div>
-        )}
+      <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }}>
+        <PageHeader
+          title={t('mem.title')}
+          subtitle={t('mem.sub')}
+          actions={canWrite ? (
+            <>
+              <button
+                onClick={() => setShowImport(true)}
+                className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold text-church-800 dark:text-brass-200 bg-parchment-100 dark:bg-ink-800/80 border border-parchment-300/60 dark:border-brass-900/30 hover:bg-parchment-200 dark:hover:bg-ink-800 transition-colors"
+              >
+                <Upload size={15} /> {t('mem.importCsv')}
+              </button>
+              <AnimatedButton
+                onClick={openAdd}
+                className="flex items-center gap-2 bg-church-900 hover:bg-church-700 dark:bg-church-700 dark:hover:bg-church-600 text-parchment-50 px-5 py-2.5 rounded-xl text-sm font-bold shadow-warm-md  transition-colors"
+              >
+                <Plus size={16} /> {t('mem.addMember')}
+              </AnimatedButton>
+            </>
+          ) : null}
+        />
       </motion.div>
 
       {/* Stats bar */}
-      <div className="flex gap-4">
+      <div data-testid="member-stats" className="grid grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
         {statPills.map(s => <StatPill key={s.label} {...s} />)}
       </div>
       {statsFailed && (
@@ -585,13 +642,18 @@ export default function Clients() {
         />
       ) : (
       <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2 }} className="bg-parchment-50 dark:bg-ink-900/90 rounded-2xl border border-parchment-300/50 dark:border-brass-900/30 shadow-warm-md overflow-hidden">
-        <div className="overflow-x-auto">
+        <p data-testid="table-scroll-hint" className="sm:hidden print:hidden px-4 pt-3 text-[11px] text-ink-500 dark:text-parchment-300/70">{t('table.swipeHint')}</p>
+        <div className="overflow-x-auto" tabIndex={0} role="region" aria-label={t('mem.tableRegion')}>
         <table className="w-full text-sm min-w-[44rem]">
           <thead className="bg-parchment-100/80 dark:bg-ink-800/60 border-b border-parchment-300/50 dark:border-brass-900/25">
             <tr>
-              {[t('mem.colMember'), t('mem.colRole'), t('mem.colContact'), t('mem.colTags'), t('mem.colJoined'), ''].map((h, hi) => (
+              {[t('mem.colMember'), t('mem.colRole'), t('mem.colContact'), t('mem.colTags'), t('mem.colJoined')].map((h, hi) => (
                 <th key={hi} className="text-left px-4 py-3.5 text-xs font-bold text-ink-500 dark:text-parchment-300/70 uppercase tracking-wider">{h}</th>
               ))}
+              {/* SP-292: pin actions so narrow viewports need no sideways swipe. */}
+              <th className="sticky right-0 pl-2 pr-3 py-3.5 text-xs font-bold text-ink-500 dark:text-parchment-300/70 uppercase tracking-wider bg-parchment-100/80 dark:bg-ink-800/60">
+                <span className="sr-only">{t('mem.actions')}</span>
+              </th>
             </tr>
           </thead>
           <tbody className="divide-y divide-parchment-200/50 dark:divide-brass-900/20">
@@ -651,10 +713,10 @@ export default function Clients() {
                     <td className="px-4 py-3.5 text-xs text-ink-500 dark:text-parchment-300/70">
                       {c.created_at ? new Date(c.created_at).toLocaleDateString(dateLocale, { month: 'short', day: 'numeric', year: 'numeric' }) : '—'}
                     </td>
-                    {/* Actions — viewers only see the row click-through */}
-                    <td className="px-4 py-3.5">
+                    {/* SP-292: sticky + always visible on touch (hover-only hid the menu). */}
+                    <td className="sticky right-0 pl-2 pr-3 py-3.5 bg-parchment-50 dark:bg-ink-900/95 shadow-[-6px_0_6px_-6px_rgba(0,0,0,0.15)]">
                       {canWrite && (
-                        <div className="flex justify-end opacity-0 group-hover:opacity-100 transition-opacity">
+                        <div className="flex justify-end">
                           <ActionsMenu member={c} onEdit={openEdit} onDelete={remove} onView={setSelected} />
                         </div>
                       )}
@@ -696,24 +758,26 @@ export default function Clients() {
         )}
       </AnimatePresence>
 
-      {/* Add/Edit Modal */}
+      {/* Add/Edit Modal — sheet on mobile with sticky actions (Saint 390 note) */}
       <AnimatePresence>
         {showForm && (
-          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className={`${scrimCls} flex items-center justify-center z-50 p-4`}>
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className={sheetOverlayCls}>
             <motion.div
-              initial={{ opacity: 0, scale: 0.94, y: 20 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.94, y: 10 }}
-              transition={{ duration: 0.22, ease: 'easeOut' }}
-              className="bg-parchment-50 dark:bg-ink-900 rounded-2xl shadow-warm-lg w-full max-w-lg border border-parchment-300/50 dark:border-brass-900/30 max-h-[90vh] overflow-y-auto"
+              {...dialogMotionNow()}
+              className={sheetPanelCls}
+              role="dialog"
+              aria-modal="true"
+              aria-label={editing ? t('mem.editMember') : t('mem.addNew')}
             >
-              <div className="flex items-center justify-between px-6 py-5 border-b border-parchment-300/50 dark:border-brass-900/30">
-                <h2 className="font-bold text-ink-900 dark:text-parchment-50 text-lg">{editing ? t('mem.editMember') : t('mem.addNew')}</h2>
-                <motion.button transition={{ duration: 0.15 }} onClick={() => setShowForm(false)} className="-m-2 p-2 text-ink-400 hover:text-ink-700 dark:hover:text-parchment-50">
+              <MobileSheetGrip />
+              <div className="flex items-center justify-between px-6 py-4 border-b border-parchment-300/50 dark:border-brass-900/30 shrink-0">
+                <h2 className={DIALOG_TITLE_CLS}>{editing ? t('mem.editMember') : t('mem.addNew')}</h2>
+                <motion.button transition={{ duration: 0.15 }} onClick={() => setShowForm(false)} className="-m-2 p-2 text-ink-400 hover:text-ink-700 dark:hover:text-parchment-50" aria-label={t('mem.cancel')}>
                   <X size={18} />
                 </motion.button>
               </div>
-              <form onSubmit={save} className="p-6 space-y-4">
+              <form onSubmit={save} className="flex flex-col flex-1 min-h-0">
+              <div className="p-6 space-y-4 overflow-y-auto flex-1 min-h-0">
                 <div>
                   <label className="block text-xs font-bold text-ink-500 dark:text-parchment-300/70 mb-2 uppercase tracking-wide">{t('mem.photo')}</label>
                   <AvatarUploader
@@ -723,8 +787,8 @@ export default function Clients() {
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-bold text-ink-500 dark:text-parchment-300/70 mb-1.5 uppercase tracking-wide">{t('mem.fullName')} *</label>
-                  <DictationInput value={form.name} onChange={field('name')} placeholder={t('mem.namePh')} className={inputCls} required />
+                  <label htmlFor="mem-full-name" className="block text-xs font-bold text-ink-500 dark:text-parchment-300/70 mb-1.5 uppercase tracking-wide">{t('mem.fullName')} *</label>
+                  <DictationInput id="mem-full-name" value={form.name} onChange={field('name')} placeholder={t('mem.namePh')} aria-label={t('mem.fullName')} className={inputCls} required />
                 </div>
                 <div className="grid grid-cols-2 gap-3">
                   <div>
@@ -751,7 +815,28 @@ export default function Clients() {
                   </div>
                   <div>
                     <label className="block text-xs font-bold text-ink-500 dark:text-parchment-300/70 mb-1.5 uppercase tracking-wide">{t('mem.phone')}</label>
-                    <input type="tel" value={form.phone} onChange={field('phone')} placeholder="(555) 000-0000" aria-label={t('mem.phone')} className={inputCls} />
+                    <input type="tel" value={form.phone} onChange={field('phone')} placeholder={t('mem.phonePh')} aria-label={t('mem.phone')} className={inputCls} />
+                  </div>
+                </div>
+                {dupMatches.length > 0 && (
+                  <div role="status" data-testid="member-dup-warning" className="rounded-xl border border-brass-300/70 bg-brass-50/80 dark:bg-brass-900/20 dark:border-brass-800/50 px-3 py-2.5 text-sm text-ink-800 dark:text-parchment-100">
+                    <p className="font-semibold">{t('mem.dupWarnTitle')}</p>
+                    <ul className="mt-1 space-y-0.5 text-xs text-ink-600 dark:text-parchment-300/80">
+                      {dupMatches.map(m => (
+                        <li key={m.id}>{m.name}{m.email ? ` · ${m.email}` : ''}{m.status ? ` · ${statusLabel(t, m.status)}` : ''}</li>
+                      ))}
+                    </ul>
+                    <p className="mt-1.5 text-xs text-ink-500 dark:text-parchment-300/70">{t('mem.dupWarnBody')}</p>
+                  </div>
+                )}
+                <div>
+                  <label className="block text-xs font-bold text-ink-500 dark:text-parchment-300/70 mb-1.5 uppercase tracking-wide">{t('mem.address')}</label>
+                  <input value={form.mailing_address_line1} onChange={field('mailing_address_line1')} placeholder={t('mem.address1Ph')} aria-label={t('mem.address1')} className={inputCls + ' mb-2'} />
+                  <input value={form.mailing_address_line2} onChange={field('mailing_address_line2')} placeholder={t('mem.address2Ph')} aria-label={t('mem.address2')} className={inputCls + ' mb-2'} />
+                  <div className="grid grid-cols-3 gap-2">
+                    <input value={form.mailing_city} onChange={field('mailing_city')} placeholder={t('mem.cityPh')} aria-label={t('mem.city')} className={inputCls} />
+                    <input value={form.mailing_state} onChange={field('mailing_state')} placeholder={t('mem.statePh')} aria-label={t('mem.state')} className={inputCls} />
+                    <input value={form.mailing_postal} onChange={field('mailing_postal')} placeholder={t('mem.postalPh')} aria-label={t('mem.postal')} className={inputCls} />
                   </div>
                 </div>
                 <div className="grid grid-cols-2 gap-3">
@@ -789,11 +874,16 @@ export default function Clients() {
                   <label className="block text-xs font-bold text-ink-500 dark:text-parchment-300/70 mb-1.5 uppercase tracking-wide flex items-center gap-1.5"><FileText size={11} /> {t('mem.notes')}</label>
                   <AITextArea value={form.notes} onChange={field('notes')} placeholder={t('mem.notesPh')} context="Church member management" className={`${inputCls} resize-none`} rows={3} />
                 </div>
-                <div className="flex justify-end gap-3 pt-2 border-t border-parchment-300/50 dark:border-brass-900/30 mt-2">
-                  <AnimatedButton type="button" onClick={() => setShowForm(false)} className="px-4 py-2.5 text-sm font-semibold text-ink-500 dark:text-parchment-300/70 hover:text-ink-800 dark:hover:text-parchment-50 transition-colors">{t('mem.cancel')}</AnimatedButton>
-                  <AnimatedButton type="submit" disabled={loading} className="px-6 py-2.5 bg-church-900 hover:bg-church-700 dark:bg-church-700 dark:hover:bg-church-600 text-parchment-50 text-sm font-bold rounded-xl transition-colors disabled:opacity-50 shadow-warm-md">
-                    {loading ? t('mem.saving') : editing ? t('mem.saveChanges') : t('mem.addMember')}
-                  </AnimatedButton>
+              </div>
+                <div className="shrink-0 px-6 py-4 border-t border-parchment-300/50 dark:border-brass-900/30 bg-parchment-50 dark:bg-ink-900">
+                  <DialogFooter
+                    className=""
+                    cancelLabel={t('mem.cancel')}
+                    onCancel={() => setShowForm(false)}
+                    primaryLabel={loading ? t('mem.saving') : editing ? t('mem.saveChanges') : t('mem.addMember')}
+                    primaryType="submit"
+                    primaryDisabled={loading}
+                  />
                 </div>
               </form>
             </motion.div>

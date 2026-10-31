@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Not referenced by the Xcode target. When the notice-permission flow
+  is ready to try on a device, add the Push Notifications capability in
+  Xcode. That sets CODE_SIGN_ENTITLEMENTS and provisions the App ID.
+  aps-environment stays development here. This repository does not
+  create an App Store build.
+-->
+<plist version="1.0">
+<dict>
+	<key>aps-environment</key>
+	<string>development</string>
+</dict>
+</plist>

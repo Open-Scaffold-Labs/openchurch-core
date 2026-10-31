@@ -3,6 +3,7 @@
 // pagination); the page only shows its per-row flag and asks the server for
 // view=past_scheduled. No copy may say the Mass was missed or said.
 import { ToastProvider } from '../components/ToastProvider'
+import { ConfirmProvider } from '../components/ConfirmProvider'
 import { render, screen, within, fireEvent, waitFor } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
@@ -34,7 +35,7 @@ function stubFetch(handler) {
   }))
   return urls
 }
-const book = () => render(<MemoryRouter initialEntries={['/mass-intentions']}><LocaleProvider><ToastProvider><Routes><Route path="/mass-intentions" element={<MassIntentions />} /></Routes></ToastProvider></LocaleProvider></MemoryRouter>)
+const book = () => render(<MemoryRouter initialEntries={['/mass-intentions']}><LocaleProvider><ToastProvider><Routes><Route path="/mass-intentions" element={<ConfirmProvider><MassIntentions /></ConfirmProvider>} /></Routes></ToastProvider></LocaleProvider></MemoryRouter>)
 const { en, es } = STRINGS
 const listUrls = urls => urls.filter(u => u.includes('/api/mass-intentions?'))
 

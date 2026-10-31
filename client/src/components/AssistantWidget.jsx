@@ -48,8 +48,12 @@ import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Feather, X, Send, Loader2, ThumbsUp, ThumbsDown, BookOpen } from 'lucide-react'
 import { apiUrl } from '../api'
+import { nativeAiFetchInit } from '../native/nativeAiCeiling'
 import { useLocale } from '../i18n'
 import { aiRefusalMessage } from '../utils/aiRefusal'
+import { allowsAiSend, aiSurfacesClosed } from '../native/aiGate'
+import { useNativeAi } from '../native/NativeAiContext'
+import { AiConsentScreen } from '../native/AiConsentScreen'
 import { mutate } from '../utils/format'
 import { helpKeyForPath, helpEntry } from '../assistant/helpGuide'
 
@@ -174,6 +178,10 @@ function GuideCard({ helpKey, reason, t, locale }) {
 
 export default function AssistantWidget() {
   const { t, locale } = useLocale()
+  const { kind: nativeAiKind } = useNativeAi()
+  const surfacesClosed = aiSurfacesClosed(nativeAiKind)
+  const needsConsent = nativeAiKind === 'consent'
+  const [consentOpen, setConsentOpen] = useState(false)
   const [open, setOpen] = useState(false)
   const [turns, setTurns] = useState([])
   const [input, setInput] = useState('')
@@ -183,7 +191,8 @@ export default function AssistantWidget() {
   const [fallback, setFallback] = useState(null)
   // Text for the polite live region (screen readers hear new replies).
   const [announce, setAnnounce] = useState('')
-  // 'yes' | 'no' | 'unknown'. A refused, thrown, or unreadable status is
+  // 'yes' | 'no' | 'nokey' | 'unknown'. 'nokey' (D-01): the parish has not
+  // added its own AI key; the quill stays and says so. A refused, thrown, or unreadable status is
   // unknown — the quill and composer stay, with no claim either way. Only
   // an explicit available:false hides the quill (and disables Ctrl+/).
   const [availability, setAvailability] = useState('unknown')
@@ -198,24 +207,56 @@ export default function AssistantWidget() {
   const panelId = useId()
   const titleId = useId()
 
-  useEffect(() => {
-    let cancelled = false
-    fetch(apiUrl('/api/assistant/status'))
+  // Read-only status probe. On mount the result sets the state; a recheck
+  // (R334-2: after a no-key state, when an admin may have added a key)
+  // bypasses the 60s cache, and a recheck that cannot be read keeps the
+  // current state rather than inventing one. No provider is contacted.
+  //
+  // R334-3: availability has ONE owner — the latest request. Every probe
+  // and every POST takes a new generation number; a response may change
+  // availability only if no newer probe or POST started after it. Older
+  // probes are aborted. Unmount retires the generation and aborts, so a
+  // late response from a gone widget changes nothing. No polling.
+  const genRef = useRef(0)
+  const probeAbortRef = useRef(null)
+  const probeStatus = useCallback((recheck = false) => {
+    const my = ++genRef.current
+    probeAbortRef.current?.abort()
+    const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null
+    probeAbortRef.current = ctrl
+    const current = () => genRef.current === my
+    fetch(apiUrl('/api/assistant/status'), nativeAiFetchInit({ ...(recheck ? { cache: 'no-store' } : {}), ...(ctrl ? { signal: ctrl.signal } : {}) }))
       .then(r => {
         if (!r.ok) throw new Error(`status ${r.status}`)
         return r.json()
       })
       .then(d => {
-        if (cancelled) return
+        if (!current()) return
         if (!d || typeof d.available !== 'boolean') {
-          setAvailability('unknown')
+          if (!recheck) setAvailability('unknown')
           return
         }
-        setAvailability(d.available ? 'yes' : 'no')
+        // D-01: no parish key is a setup step — keep the quill and say so.
+        const next = d.available ? 'yes' : d.code === 'ai_key_required' ? 'nokey' : 'no'
+        if (next !== 'nokey') setError('')
+        setAvailability(next)
       })
-      .catch(() => { if (!cancelled) setAvailability('unknown') })
-    return () => { cancelled = true }
+      .catch(() => { if (current() && !recheck) setAvailability('unknown') })
   }, [])
+
+  useEffect(() => {
+    if (surfacesClosed || needsConsent) return undefined
+    probeStatus(false)
+    return () => { genRef.current++; probeAbortRef.current?.abort() }
+  }, [probeStatus, surfacesClosed, needsConsent])
+
+  // An admin saved or removed the parish key in Org details (same tab).
+  useEffect(() => {
+    if (surfacesClosed || needsConsent) return undefined
+    const onChange = () => probeStatus(true)
+    window.addEventListener('ochr:ai-provider-changed', onChange)
+    return () => window.removeEventListener('ochr:ai-provider-changed', onChange)
+  }, [probeStatus, surfacesClosed, needsConsent])
 
   // What is actually on screen. An explicit off status hides the widget
   // even if the panel was opened while the probe was still pending
@@ -233,11 +274,16 @@ export default function AssistantWidget() {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: prefersReducedMotion() ? 'auto' : 'smooth' })
   }, [turns, shown, fallback])
 
+  // Opening the panel while it says "no key" rechecks, read-only, so a key
+  // added since (e.g. in another tab) is picked up.
+  const nokeyRef = useRef(false)
+  nokeyRef.current = availability === 'nokey'
   const openPanel = useCallback(() => {
+    if (nokeyRef.current) probeStatus(true)
     const active = typeof document !== 'undefined' ? document.activeElement : null
     returnFocusRef.current = active && active !== document.body ? active : null
     setOpen(true)
-  }, [])
+  }, [probeStatus])
   const closePanel = useCallback(() => setOpen(false), [])
 
   // Focus in on open, back out on close. If neither the earlier element
@@ -313,6 +359,12 @@ export default function AssistantWidget() {
   useEffect(() => {
     function onKey(e) {
       if (!isAssistantShortcut(e)) return
+      if (surfacesClosed) return
+      if (needsConsent) {
+        e.preventDefault()
+        setConsentOpen(true)
+        return
+      }
       // AI reported off: the quill is hidden and the shortcut does nothing
       // (no preventDefault either — the keystroke is not ours).
       if (hidden) return
@@ -322,7 +374,7 @@ export default function AssistantWidget() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [shown, hidden, openPanel, closePanel])
+  }, [shown, hidden, openPanel, closePanel, surfacesClosed, needsConsent])
 
   function onPanelKeyDown(e) {
     if (e.key === 'Escape') {
@@ -336,6 +388,7 @@ export default function AssistantWidget() {
   const helpKey = helpKeyForPath(path)
 
   async function ask(question) {
+    if (!allowsAiSend(nativeAiKind)) return
     const q = question.trim()
     if (!q || busy) return
     setError('')
@@ -344,14 +397,28 @@ export default function AssistantWidget() {
     const history = turns.map(turn => ({ role: turn.role, content: turn.content }))
     setTurns(prev => [...prev, { role: 'user', content: q }])
     setBusy(true)
+    // R334-3: this POST owns availability from now; an older status probe
+    // still in flight can no longer reopen (or close) the composer.
+    const myGen = ++genRef.current
+    probeAbortRef.current?.abort()
     try {
-      const res = await fetch(apiUrl('/api/assistant'), {
+      const res = await fetch(apiUrl('/api/assistant'), nativeAiFetchInit({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ question: q, page_route: path, help_key: helpKey ?? undefined, history }),
-      })
+      }))
       const data = await res.json().catch(() => ({}))
       if (!res.ok) {
+        // R334-2: a confirmed "no parish key" refusal IS the no-key state
+        // (the key was removed, or the first probe was unreadable).
+        if (data?.code === 'ai_key_required') {
+          setTurns(prev => prev.slice(0, -1))
+          setInput(q)
+          // A newer key recheck that started after this POST wins (R334-3 d).
+          if (genRef.current === myGen) setAvailability('nokey')
+          setAnnounce(t('ast.keyRequired'))
+          return
+        }
         const reason = fallbackReason(res.status, data?.code)
         const msg = res.status === 429 && !data?.code ? t('ast.limit') : aiRefusalMessage(t, data, 'ast.unavailable')
         const err = new Error(msg)
@@ -389,8 +456,23 @@ export default function AssistantWidget() {
     ? 'safe-pt safe-pb fixed inset-0 z-50 flex print:hidden h-[100dvh] w-full flex-col overflow-hidden bg-parchment-50 dark:bg-ink-900'
     : 'mb-3 flex h-[520px] max-h-[calc(100dvh-7rem)] w-[360px] max-w-[calc(100vw-2.5rem)] flex-col overflow-hidden rounded-2xl border border-parchment-300/70 bg-parchment-50 shadow-warm-lg dark:border-brass-900/30 dark:bg-ink-900'
 
-  // AI reported off: no quill, no panel (José, Oct 18 2026). After every
-  // hook, so the hook order never changes.
+  // AI reported off, or the native build has AI closed: no quill, no panel.
+  // After every hook, so the hook order never changes.
+  if (surfacesClosed) return null
+  if (needsConsent) {
+    return (
+      <>
+        <div className="safe-mb fixed bottom-5 right-5 z-40 print:hidden">
+          <button type="button" data-testid="assistant-consent-launcher" onClick={() => setConsentOpen(true)}
+            aria-label={t('ast.open')}
+            className="flex h-12 w-12 items-center justify-center rounded-full bg-church-800 text-parchment-50 shadow-warm-lg transition-colors hover:bg-church-900 dark:bg-brass-700 dark:hover:bg-brass-600">
+            <Feather size={20} aria-hidden="true" />
+          </button>
+        </div>
+        {consentOpen && <AiConsentScreen variant="dialog" onClose={() => setConsentOpen(false)} />}
+      </>
+    )
+  }
   if (hidden) return null
 
   const panel = shown && (
@@ -410,7 +492,16 @@ export default function AssistantWidget() {
 
       {/* Transcript */}
       <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto overscroll-contain px-4 py-3">
-        {turns.length === 0 && (
+        {availability === 'nokey' && (
+          <div>
+            <p data-testid="assistant-key-required" role="status" className="text-sm text-ink-700 dark:text-parchment-200">{t('ast.keyRequired')}</p>
+            <button type="button" data-testid="assistant-key-recheck" onClick={() => probeStatus(true)}
+              className="mt-3 rounded-xl border border-parchment-300/70 px-3 py-1.5 text-sm text-ink-700 hover:bg-parchment-100 dark:border-brass-900/30 dark:text-parchment-200 dark:hover:bg-ink-800">
+              {t('ast.keyRecheck')}
+            </button>
+          </div>
+        )}
+        {availability !== 'nokey' && turns.length === 0 && (
           <div>
             <p className="text-sm text-ink-600 dark:text-parchment-300/80">{t('ast.intro')}</p>
             <div className="mt-3 space-y-2">
@@ -433,8 +524,8 @@ export default function AssistantWidget() {
         {fallback && <GuideCard helpKey={helpKey} reason={fallback} t={t} locale={locale} />}
       </div>
 
-      {/* Composer */}
-      <div className="flex-none border-t border-parchment-300/60 p-3 dark:border-brass-900/30">
+      {/* Composer (none while the parish has no AI key: nothing could answer) */}
+      {availability !== 'nokey' && <div className="flex-none border-t border-parchment-300/60 p-3 dark:border-brass-900/30">
         <div className="flex items-end gap-2">
           <textarea
             ref={inputRef}
@@ -451,7 +542,7 @@ export default function AssistantWidget() {
             <Send size={15} aria-hidden="true" />
           </button>
         </div>
-      </div>
+      </div>}
     </div>
   )
 

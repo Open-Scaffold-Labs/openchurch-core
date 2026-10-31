@@ -19,9 +19,12 @@
 // keeps an unsubscribe token from ever being valid as anything else.
 
 import crypto from 'node:crypto'
+import { requireSigningSecret } from '../auth/signingSecrets.js'
 
 function key() {
-  const secret = process.env.JWT_SECRET || 'dev-only-change-me-please'
+  // Same fail-closed rule as auth.js: never derive from a dev constant
+  // on production or preview.
+  const secret = requireSigningSecret('JWT_SECRET', 'dev-only-change-me-please')
   return crypto.createHash('sha256').update(`${secret}:ochr-unsubscribe-v1`).digest()
 }
 

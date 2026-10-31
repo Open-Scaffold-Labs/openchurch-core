@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { BellRing, Loader2 } from 'lucide-react'
 import { apiUrl } from '../api'
 import { useLocale } from '../i18n'
+import { isNativeShell } from '../native/nativeShell'
 import { useToast } from './ToastProvider'
 
 // Web Push device-subscription toggle (Sprint PWA / PWA.4b).
@@ -112,6 +113,10 @@ export default function PushSubscriptionToggle({ probeNonce = 0 }) {
   useEffect(() => {
     let cancelled = false
     async function probeKey() {
+      // Web push's "install to the home screen" card is the wrong
+      // sentence inside the native shell. The iOS permission flow,
+      // when the build flag is on, is a separate card.
+      if (isNativeShell()) { setLoading(false); return }
       if (!supported) { setLoading(false); return }
       // A refresh of a device we already read leaves that answer on
       // screen. The first read is the one that has nothing to show.
@@ -188,7 +193,7 @@ export default function PushSubscriptionToggle({ probeNonce = 0 }) {
       if (p === 'default') p = await Notification.requestPermission()
       setPermission(p)
       if (p !== 'granted') {
-        toast.error('Notification permission was not granted')
+        toast.error(t('push.permNotGranted'))
         return
       }
 
@@ -208,12 +213,12 @@ export default function PushSubscriptionToggle({ probeNonce = 0 }) {
         // If the server can't accept it, tear down the local
         // subscription so the next attempt starts clean.
         await sub.unsubscribe().catch(() => {})
-        throw new Error(data.error || `Subscribe failed (${res.status})`)
+        throw new Error(data.error || t('push.subscribeFailed', { status: res.status }))
       }
       setSubscribed(true)
-      toast.success?.('Push notifications enabled on this device')
+      toast.success?.(t('push.enabledToast'))
     } catch (err) {
-      toast.error(err.message || 'Could not enable push')
+      toast.error(err.message || t('push.enableFailed'))
     } finally {
       setBusy(false)
     }
@@ -237,12 +242,12 @@ export default function PushSubscriptionToggle({ probeNonce = 0 }) {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ endpoint: sub.endpoint }),
         })
-        if (!res.ok) throw new Error('Could not disable push just now')
+        if (!res.ok) throw new Error(t('push.disableFailedNow'))
         await sub.unsubscribe().catch(() => {})
       }
       setSubscribed(false)
     } catch (err) {
-      toast.error(err.message || 'Could not disable push')
+      toast.error(err.message || t('push.disableFailed'))
     } finally {
       setBusy(false)
     }
@@ -251,6 +256,8 @@ export default function PushSubscriptionToggle({ probeNonce = 0 }) {
   // ---- Render branches --------------------------------------------------
 
   const containerCls = 'bg-parchment-50 dark:bg-ink-900/90 rounded-2xl border border-parchment-300/50 dark:border-brass-900/30 shadow-sm overflow-hidden'
+
+  if (isNativeShell()) return null
 
   if (loading) {
     return (
@@ -268,9 +275,7 @@ export default function PushSubscriptionToggle({ probeNonce = 0 }) {
       <div className={containerCls}>
         <Header />
         <div className="px-5 py-4 text-xs text-ink-500 dark:text-parchment-300/70">
-          Push notifications aren't supported in this browser. On iPhone,
-          install OpenChurch to your home screen first — push works inside
-          the installed app, not in the Safari tab.
+          {t('push.unsupported')}
         </div>
       </div>
     )
@@ -308,8 +313,8 @@ export default function PushSubscriptionToggle({ probeNonce = 0 }) {
       <div className={containerCls}>
         <Header />
         <Row
-          label="Push notifications on this device"
-          description="Server-side push isn't configured yet. Once your team lead adds VAPID keys this toggle will go live."
+          label={t('push.rowLabel')}
+          description={t('push.unsetBody')}
           enabled={false}
           disabled
         />
@@ -323,8 +328,8 @@ export default function PushSubscriptionToggle({ probeNonce = 0 }) {
       <div className={containerCls}>
         <Header />
         <Row
-          label="Push notifications on this device"
-          description="You blocked notifications for this site. Reset the permission in your browser settings to enable push."
+          label={t('push.rowLabel')}
+          description={t('push.deniedBody')}
           enabled={false}
           disabled
         />
@@ -337,10 +342,10 @@ export default function PushSubscriptionToggle({ probeNonce = 0 }) {
     <div className={containerCls}>
       <Header />
       <Row
-        label="Push notifications on this device"
+        label={t('push.rowLabel')}
         description={subscribed
-          ? "Reminders for the templates above will pop on this device. You'll see a small icon in your tray when one arrives."
-          : "Turn on to receive event + task reminders even when OpenChurch isn't open."
+          ? t('push.onBody')
+          : t('push.offBody')
         }
         enabled={subscribed}
         disabled={busy}
@@ -351,15 +356,17 @@ export default function PushSubscriptionToggle({ probeNonce = 0 }) {
 }
 
 function Header() {
+  const { t } = useLocale()
   return (
     <div className="px-5 py-4 border-b border-parchment-300/50 dark:border-brass-900/25 flex items-center gap-2">
       <BellRing size={15} className="text-brass-600 dark:text-brass-300" />
-      <h2 className="font-semibold text-ink-900 dark:text-parchment-50">Push on this device</h2>
+      <h2 className="font-semibold text-ink-900 dark:text-parchment-50">{t('push.title')}</h2>
     </div>
   )
 }
 
 function Row({ label, description, enabled, disabled, onClick }) {
+  const { t } = useLocale()
   return (
     <div className="px-5 py-4 flex items-start justify-between gap-4">
       <div className="min-w-0">
@@ -369,7 +376,7 @@ function Row({ label, description, enabled, disabled, onClick }) {
       <button
         role="switch"
         aria-checked={enabled}
-        aria-label={enabled ? 'Disable push on this device' : 'Enable push on this device'}
+        aria-label={enabled ? t('push.disableAria') : t('push.enableAria')}
         disabled={disabled}
         onClick={onClick}
         className={`relative shrink-0 w-11 h-6 rounded-full transition-colors disabled:opacity-50 ${

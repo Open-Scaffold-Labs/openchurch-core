@@ -400,7 +400,15 @@ describe('tenant isolation', () => {
     expect(list.status).toBe(200)
     const row = list.body.find(r => String(r.id) === String(created.body.id))
     expect(row).toBeTruthy()
-    expect(Object.keys(row).sort()).toEqual(PUBLIC)
+    // The log adds one derived object, `books` (void/refund marker and net).
+    // The gift columns stay the contract. A new gift column still fails this.
+    expect(Object.keys(row).sort()).toEqual([...PUBLIC, 'books'].sort())
+    expect(row.books.marker).toBe('none')
+    expect(Number(row.books.live_amount)).toBe(42.5)
+    expect(Number(row.books.refunded_total)).toBe(0)
+    expect(row.books.from_cash_count).toBe(false)
+    expect(row.books.statement_drift).toBe(false)
+    expect(row.books).not.toHaveProperty('search_vec')
 
     // The refund path returns a donation too, and must obey the same contract.
     await pool.query(
@@ -5410,7 +5418,7 @@ describe('cash count confirm (GIV.6) — double-confirm safety', () => {
 
   it('confirm posts the collection to the ledger exactly once', async () => {
     const res = await request(server).patch(`/api/donations/cash-counts/${sessionId}/confirm`)
-      .set('Authorization', `Bearer ${tokenA}`)
+      .set('Authorization', `Bearer ${tokenA}`).send({ single_count: true })
     expect(res.status).toBe(200)
     expect(res.body.session.status).toBe('confirmed')
     expect(Number(res.body.donation.amount)).toBe(123.45)
@@ -5419,7 +5427,7 @@ describe('cash count confirm (GIV.6) — double-confirm safety', () => {
 
   it('a second confirm is refused with 409 and does not double-post', async () => {
     const res = await request(server).patch(`/api/donations/cash-counts/${sessionId}/confirm`)
-      .set('Authorization', `Bearer ${tokenA}`)
+      .set('Authorization', `Bearer ${tokenA}`).send({ single_count: true })
     expect(res.status).toBe(409)
     expect(await postedCount()).toBe(1)
   })
@@ -5440,8 +5448,8 @@ describe('cash count confirm (GIV.6) — double-confirm safety', () => {
     const raceId = create.body.id
 
     const [a, b] = await Promise.all([
-      request(server).patch(`/api/donations/cash-counts/${raceId}/confirm`).set('Authorization', `Bearer ${tokenA}`),
-      request(server).patch(`/api/donations/cash-counts/${raceId}/confirm`).set('Authorization', `Bearer ${tokenA}`),
+      request(server).patch(`/api/donations/cash-counts/${raceId}/confirm`).set('Authorization', `Bearer ${tokenA}`).send({ single_count: true }),
+      request(server).patch(`/api/donations/cash-counts/${raceId}/confirm`).set('Authorization', `Bearer ${tokenA}`).send({ single_count: true }),
     ])
     expect([a.status, b.status].sort((x, y) => x - y)).toEqual([200, 409])
 
@@ -7133,10 +7141,19 @@ describe('mass intentions (MI.1)', () => {
     expect(del.status).toBe(404)
   })
 
-  it('deletes it', async () => {
+  // SP-133 (2026-10-23): it carries a recorded offering, so it is voided,
+  // never hard-deleted. A row with no offering still deletes.
+  it('refuses to delete it (offering recorded), and deletes a no-offering row', async () => {
     const del = await request(server).delete(`/api/mass-intentions/${miId}`)
       .set('Authorization', `Bearer ${tokenA}`)
-    expect(del.status).toBe(204)
+    expect(del.status).toBe(409)
+    expect(del.body.code).toBe('offering_recorded')
+    const plain = await request(server).post('/api/mass-intentions')
+      .set('Authorization', `Bearer ${tokenA}`).send({ intention: `+No offering ${RUN_ID}` })
+    expect(plain.status).toBe(201)
+    const gone = await request(server).delete(`/api/mass-intentions/${plain.body.id}`)
+      .set('Authorization', `Bearer ${tokenA}`)
+    expect(gone.status).toBe(204)
   })
 })
 
@@ -7179,16 +7196,16 @@ describe('finance ledger (FIN.1)', () => {
       .send({ donor_name: 'Ledger Donor', amount: 100, category: FIN_CAT, date: '2027-03-15' })
     expect(gift.status).toBe(201)
 
-    // Unmapped → the default gifts account (4420).
+    // After 2026-10-27 an unmapped category has no account. It is not 4420.
     const before = await request(server)
       .get('/api/finance/ledger?start=2027-03-01&end=2027-03-31&source=donation')
       .set('Authorization', `Bearer ${tokenA}`)
     const rowBefore = before.body.entries.find(e => e.memo === FIN_CAT)
     expect(rowBefore).toBeTruthy()
-    expect(rowBefore.account_code).toBe('4420')
+    expect(rowBefore.account_code).toBeNull()
 
-    // Map the category to Sunday offertory — the SAME donation now reads
-    // as 4110. No re-posting, no drift: the ledger is a projection.
+    // Map the category to Sunday offertory. The gift is dated after the
+    // mapping starts, so the same projection now reads 4110.
     const map = await request(server).put('/api/finance/mappings')
       .set('Authorization', `Bearer ${tokenA}`)
       .send({ mappings: [{ source_type: 'donation_category', source_key: FIN_CAT, account_code: '4110' }] })
@@ -7201,14 +7218,14 @@ describe('finance ledger (FIN.1)', () => {
     expect(rowAfter.account_code).toBe('4110')
   })
 
-  it('imports a trial balance with per-row errors', async () => {
-    const csv = 'account_code,amount,memo\n4310,1200.00,RE fees\n5210,-0,broken\n5310,80.50,Candles'
+  it('imports a balanced trial balance', async () => {
+    const csv = 'account_code,amount,memo\n1110,1119.50,Operating cash\n4310,1200.00,RE fees\n5310,80.50,Candles'
     const res = await request(server).post('/api/finance/ledger/import')
       .set('Authorization', `Bearer ${tokenA}`)
       .send({ csv, as_of: '2027-03-31' })
     expect(res.status).toBe(201)
-    expect(res.body.imported).toBe(2)
-    expect(res.body.errors.length).toBe(1)
+    expect(res.body.imported).toBe(3)
+    expect(res.body.errors).toEqual([])
     expect(res.body.batch).toBeTruthy()
   })
 
@@ -7233,9 +7250,11 @@ describe('finance ledger (FIN.1)', () => {
     expect(ledger.body.entries.some(e => e.memo === FIN_CAT || e.memo === `Utilities ${RUN_ID}`)).toBe(false)
 
     // Org B mapping the same category name must not reclassify org A's rows.
+    // (4410, not 4910: a parish can no longer send unknown money to a
+    // non-assessable account, OC-BOOKS-1 R3.)
     const map = await request(server).put('/api/finance/mappings')
       .set('Authorization', `Bearer ${tokenB}`)
-      .send({ mappings: [{ source_type: 'donation_category', source_key: FIN_CAT, account_code: '4910' }] })
+      .send({ mappings: [{ source_type: 'donation_category', source_key: FIN_CAT, account_code: '4410' }] })
     expect(map.status).toBe(200)
 
     const orgA = await request(server)
@@ -8741,7 +8760,7 @@ describe('stripe webhook — signed, fail-closed (BIL.4)', () => {
     expect(res.body.ignored).toBe('invoice.finalized')
   })
 
-  it('public give returns a checkout redirect in live mode (no premature row)', async () => {
+  it('public give in live mode refuses (409) when the parish has no saved Connect account (no platform-account pooling, no premature row)', async () => {
     // Org slug + an active fund are needed for the public give flow.
     const { rows: orgRows } = await pool.query('SELECT slug FROM ochr_organizations WHERE id = $1', [orgAId])
     const { rows: fundRows } = await pool.query(
@@ -8749,15 +8768,20 @@ describe('stripe webhook — signed, fail-closed (BIL.4)', () => {
       [orgAId, `Live Fund ${RUN_ID}`]
     )
     const realFetch = global.fetch
-    global.fetch = async (url) => {
-      expect(String(url)).toContain('api.stripe.com/v1/checkout/sessions')
+    let stripeCalls = 0
+    global.fetch = async () => {
+      stripeCalls++
       return { ok: true, json: async () => ({ id: 'cs_live_1', url: 'https://checkout.stripe.com/c/pay/cs_live_1' }) }
     }
     try {
       const res = await request(server).post(`/api/public/${orgRows[0].slug}/give`)
         .send({ fund_id: fundRows[0].id, amount: 40, donor_name: 'Redirect Donor' })
-      expect(res.status).toBe(200)
-      expect(res.body.checkout_url).toContain('checkout.stripe.com')
+      // No column stores a parish Connect account yet, so no parish has
+      // one: live giving must refuse rather than open Checkout on the
+      // platform account (which would pool every parish's gifts).
+      expect(res.status).toBe(409)
+      expect(res.body.checkout_url).toBeUndefined()
+      expect(stripeCalls).toBe(0)
       const { rows } = await pool.query(
         `SELECT 1 FROM ochr_donations WHERE organization_id = $1 AND donor_name = 'Redirect Donor'`,
         [orgAId]
@@ -11694,7 +11718,9 @@ describe('list endpoints do not leak per-member credentials (LEAK.1)', () => {
           `${who}: /api/clients/:id leaked ${f}`).toBe(false)
       }
       expect(res.body.id).toBe(memberId)
-      expect(res.body).toHaveProperty('notes')
+      // SP-176: notes are staff-only; a Viewer's row omits them.
+      if (who === 'viewer') expect(res.body).not.toHaveProperty('notes')
+      else expect(res.body).toHaveProperty('notes')
     }
   })
 
@@ -12056,10 +12082,14 @@ describe('in-app assistant (SUP.3)', () => {
       .set('Authorization', `Bearer ${tokenA}`)
     expect(off.status).toBe(200)
     expect(off.body.available).toBe(false)
+    // D-01: no parish key reads as a setup step, not an outage.
+    expect(off.body.code).toBe('ai_key_required')
+    // D-01 / R334-1: a platform key in the environment does not make the
+    // assistant available; only the parish's own key does.
     process.env.ANTHROPIC_API_KEY = 'test-key-present'
-    const on = await request(server).get('/api/assistant/status')
+    const stray = await request(server).get('/api/assistant/status')
       .set('Authorization', `Bearer ${tokenA}`)
-    expect(on.body.available).toBe(true)
+    expect(stray.body).toEqual({ available: false, code: 'ai_key_required' })
     delete process.env.ANTHROPIC_API_KEY
   })
 
@@ -12241,7 +12271,15 @@ describe('offerings & fees — catalog + invoices (BILL.0/BILL.1)', () => {
     // Refund split: staff 403, admin recomputes.
     const pay = await request(server).get(`/api/invoices/${inv1}`)
       .set('Authorization', `Bearer ${tokenA}`)
-    const paymentId = pay.body.payments[0].id
+    // 130: a deposit is not refunded in place; it goes through a
+    // second-admin request in /api/deposits. Refund the cash payment.
+    const depositRow = pay.body.payments.find(p => p.is_deposit)
+    const inPlace = await request(server)
+      .post(`/api/invoices/${inv1}/payments/${depositRow.id}/refund`)
+      .set('Authorization', `Bearer ${tokenA}`).send({ refund_ref: 'n/a' })
+    expect(inPlace.status).toBe(409)
+    expect(inPlace.body.code).toBe('deposit_refund_requires_request')
+    const paymentId = pay.body.payments.find(p => !p.is_deposit).id
     const staffRefund = await request(server)
       .post(`/api/invoices/${inv1}/payments/${paymentId}/refund`)
       .set('Authorization', `Bearer ${staffToken}`).send({})
@@ -12250,7 +12288,7 @@ describe('offerings & fees — catalog + invoices (BILL.0/BILL.1)', () => {
       .post(`/api/invoices/${inv1}/payments/${paymentId}/refund`)
       .set('Authorization', `Bearer ${tokenA}`).send({ refund_ref: 'check 1042 returned' })
     expect(refund.status).toBe(200)
-    expect(refund.body.status).toBe('partially_paid') // 350 of 550 remains paid
+    expect(refund.body.status).toBe('partially_paid') // the 200 deposit of 550 remains paid
   })
 
   it('the DB CHECK on line amounts is alive (decision #5)', async () => {
@@ -13846,7 +13884,21 @@ describe('release truth — the running build can say what it is', () => {
     // index.js legitimately reads the whole ledger — it is the RUNNER, and it
     // must see rows this build does not ship in order to skip them. applied.js
     // is the one bounded reader. Everything else asks applied.js.
-    const ALLOWED = ['migrations/applied.js', 'migrations/index.js']
+    //
+    // scripts/backup-export/ is also allowed, deliberately, and only by exact
+    // path. It does not ask "what version is this build at" — it records the
+    // RAW ledger (every row count, highest name) into the backup manifest and
+    // checks the restored copy matches it row for row. applied.js cannot do
+    // that job: it is bounded to names THIS build ships, so a row the build
+    // does not know (the R370-3 late-migration test inserts '999-late-x6')
+    // would vanish from the manifest instead of being caught; and it imports
+    // the server pg pool + names.js, which the Actions backup job does not
+    // install (it runs psql inside one exported-snapshot transaction, R370-3).
+    // e2e.test.mjs only seeds/deletes ledger rows on a throwaway cluster.
+    const ALLOWED = [
+      'migrations/applied.js', 'migrations/index.js',
+      'scripts/backup-export/pg.mjs', 'scripts/backup-export/e2e.test.mjs',
+    ]
     const offenders = []
     for (const root of roots) {
       for (const file of walk(root)) {
@@ -14275,11 +14327,13 @@ describe('Migration Studio — the boundaries it claims (MIG.1.1)', () => {
 })
 
 describe('the fund a gift belongs to decides its account (FIN.086)', () => {
-  let tok, orgId, roofFund, plateFund
-  const P = { start: '2026-02-01', end: '2026-02-28' }
+  let tok, orgId, roofFund, plateFund, day
+  // The parish clock, not a shifted year. A mapping effective today covers
+  // a gift dated today. 2026-01-15 history stays in ocBooks1Mappings.
+  const P = () => ({ start: day, end: day })
 
-  const money = async () => {
-    const res = await request(app).get(`/api/finance/summary?start=${P.start}&end=${P.end}`)
+    const money = async () => {
+    const res = await request(app).get(`/api/finance/summary?start=${P().start}&end=${P().end}`)
       .set('Authorization', `Bearer ${tok}`)
     return res.body
   }
@@ -14291,6 +14345,10 @@ describe('the fund a gift belongs to decides its account (FIN.086)', () => {
     expect(r.status).toBe(201)
     tok = r.body.token
     orgId = r.body.user.organization.id
+    const { rows: [clock] } = await pool.query(
+      `SELECT to_char((now() AT TIME ZONE COALESCE(timezone, 'UTC'))::date, 'YYYY-MM-DD') AS day
+         FROM ochr_organizations WHERE id = $1`, [orgId])
+    day = clock.day
 
     const mk = async (name) => {
       const f = await request(app).post('/api/funds').set('Authorization', `Bearer ${tok}`).send({ name })
@@ -14303,7 +14361,7 @@ describe('the fund a gift belongs to decides its account (FIN.086)', () => {
     // which is what a parish that uses funds properly actually looks like.
     for (const [fund, amount] of [[roofFund, 5000], [roofFund, 2500], [plateFund, 400], [plateFund, 600]]) {
       const d = await request(app).post('/api/donations').set('Authorization', `Bearer ${tok}`)
-        .send({ donor_name: 'A Giver', amount, date: '2026-02-08', fund_id: fund })
+        .send({ donor_name: 'A Giver', amount, date: day, fund_id: fund })
       expect(d.status).toBeLessThan(300)
     }
   })
@@ -14316,9 +14374,10 @@ describe('the fund a gift belongs to decides its account (FIN.086)', () => {
     expect(a.assessable).toBe(false)
   })
 
-  it('before mapping, EVERY gift lands in assessable revenue', async () => {
-    // The state of the world this migration exists to fix, asserted so
-    // the fix has something to be different from.
+  it('before a fund mapping, the gifts follow tithe and stay assessable', async () => {
+    // No category was typed, so the gift is stored as tithe. The template
+    // maps tithe to 4110. The whole 8500 is still in the base until the
+    // roof fund is pointed at 4450.
     const before = await money()
     expect(Number(before.totals.assessable_base)).toBe(8500)
   })
@@ -14335,7 +14394,15 @@ describe('the fund a gift belongs to decides its account (FIN.086)', () => {
   it('MAPPING THE FUND TAKES ITS GIFTS OUT OF THE ASSESSABLE BASE', async () => {
     const put = await request(app).put('/api/finance/mappings').set('Authorization', `Bearer ${tok}`)
       .send({ mappings: [{ source_type: 'fund', source_key: String(roofFund), account_code: '4450' }] })
-    expect(put.status).toBeLessThan(300)
+    expect(put.status).toBe(403)
+    expect(put.body.code).toBe('diocese_mapping_required')
+    expect(Number((await money()).totals.assessable_base)).toBe(8500)
+
+    await pool.query(
+      `INSERT INTO ochr_coa_mappings
+         (organization_id, source_type, source_key, account_code, effective_from, set_by)
+       SELECT $1, 'fund', $2, '4450', $3::date, 'diocese'`,
+      [orgId, String(roofFund), day])
 
     const after = await money()
     // The restricted roof money is still revenue…
@@ -14348,7 +14415,7 @@ describe('the fund a gift belongs to decides its account (FIN.086)', () => {
     // Somebody also maps the category these gifts happen to carry to an
     // assessable account. The designation must win.
     await request(app).post('/api/donations').set('Authorization', `Bearer ${tok}`)
-      .send({ donor_name: 'B Giver', amount: 1000, date: '2026-02-10',
+      .send({ donor_name: 'B Giver', amount: 1000, date: day,
               fund_id: roofFund, category: `Building ${RUN_ID}` })
     await request(app).put('/api/finance/mappings').set('Authorization', `Bearer ${tok}`)
       .send({ mappings: [{ source_type: 'donation_category', source_key: `Building ${RUN_ID}`, account_code: '4410' }] })
@@ -14360,19 +14427,29 @@ describe('the fund a gift belongs to decides its account (FIN.086)', () => {
 
   it('a gift with no fund still follows its category, exactly as before', async () => {
     await request(app).post('/api/donations').set('Authorization', `Bearer ${tok}`)
-      .send({ donor_name: 'C Giver', amount: 200, date: '2026-02-11', category: `Building ${RUN_ID}` })
+      .send({ donor_name: 'C Giver', amount: 200, date: day, category: `Building ${RUN_ID}` })
     const after = await money()
     expect(Number(after.totals.assessable_base)).toBe(1200)   // 4410 is assessable
   })
 
-  it('unmapping the fund puts the money back', async () => {
-    await request(app).put('/api/finance/mappings').set('Authorization', `Bearer ${tok}`)
+  it('unmapping the fund does not restate gifts already posted; from tomorrow it is allowed', async () => {
+    // BOOKS-1.1: roof was mapped by the diocese (set_by='diocese' above).
+    // Parish cannot supersede that row (N438-1) — same-day or later.
+    // Restate-posted date logic for parish-writable mappings stays in
+    // ocBooks1Mappings; chancery lock/unmap is in books11RestrictedFunds.
+    const same = await request(app).put('/api/finance/mappings').set('Authorization', `Bearer ${tok}`)
       .send({ mappings: [{ source_type: 'fund', source_key: String(roofFund), account_code: '' }] })
-    const after = await money()
-    expect(Number(after.totals.assessable_base)).toBe(9700)
-    // …and put it back where it was, so the rest of the suite is unaffected.
-    await request(app).put('/api/finance/mappings').set('Authorization', `Bearer ${tok}`)
-      .send({ mappings: [{ source_type: 'fund', source_key: String(roofFund), account_code: '4450' }] })
+    expect(same.status).toBe(403)
+    expect(same.body.code).toBe('diocese_mapping_locked')
+    expect(Number((await money()).totals.assessable_base)).toBe(1200)
+
+    const d = new Date(`${day}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + 1)
+    const tomorrow = d.toISOString().slice(0, 10)
+    const later = await request(app).put('/api/finance/mappings').set('Authorization', `Bearer ${tok}`)
+      .send({ mappings: [{ source_type: 'fund', source_key: String(roofFund), account_code: '' }], effective_from: tomorrow })
+    expect(later.status).toBe(403)
+    expect(later.body.code).toBe('diocese_mapping_locked')
+    expect(Number((await money()).totals.assessable_base)).toBe(1200)
   })
 
   it('A PARISH STILL CANNOT DECIDE WHAT IS ASSESSABLE', async () => {

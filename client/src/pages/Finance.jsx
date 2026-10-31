@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
+import { Link } from 'react-router-dom'
 import { Landmark, Loader2, Plus, Upload, RefreshCw } from 'lucide-react'
-import PageWrapper from '../components/PageWrapper'
+import PageWrapper, { PageHeader } from '../components/PageWrapper'
 import EmptyState from '../components/EmptyState'
 import LoadFailure from '../components/LoadFailure'
 import { useLoad } from '../hooks/useLoad'
@@ -90,7 +91,8 @@ export default function Finance() {
   const { t } = useLocale()
   const toast = useToast()
   const ask = useConfirm()
-  const canWrite = user?.role === 'admin' || user?.role === 'staff'
+  const isAdmin = user?.role === 'admin'
+  const canWrite = isAdmin
 
   const [{ start, end }, setPeriod] = useState(monthBounds)
   const [busy, setBusy]         = useState(false)
@@ -154,9 +156,9 @@ export default function Finance() {
 
   const submitPeriod = async () => {
     if (!(await ask({
-      title: `Submit ${start} → ${end} to ${aff?.diocese_name}?`,
-      body: 'The totals freeze exactly as they stand right now. Later edits to the ledger will not change what the chancery sees for this period.',
-      confirmLabel: 'Submit period',
+      title: t('fin.submitPeriodTitle', { start, end, diocese: aff?.diocese_name }),
+      body: t('fin.submitPeriodBody'),
+      confirmLabel: t('fin.submitPeriodConfirm'),
       tone: 'neutral',
     }))) return
     setBusy(true)
@@ -168,7 +170,7 @@ export default function Finance() {
       })
       const d = await res.json().catch(() => ({}))
       if (!res.ok) throw new Error(d.error || t('fin.saveError'))
-      toast.success('Period submitted to the diocese')
+      toast.success(t('fin.period_submitted_to_the_diocese'))
       loadDiocese()
     } catch (err) { toast.error(err.message) } finally { setBusy(false) }
   }
@@ -203,7 +205,8 @@ export default function Finance() {
   const settingsLoad = useLoad(async () => {
     const [c, m] = await Promise.all([readJson('/api/finance/coa')(), readJson('/api/finance/mappings')()])
     return { accounts: c.accounts ?? [], mappings: m.mappings ?? [],
-             categories: m.donation_categories ?? [], funds: m.funds ?? [] }
+             categories: m.donation_categories ?? [], funds: m.funds ?? [],
+             mappingPrompt: m.mapping_prompt ?? null }
   }, [], { isEmpty: () => false })
 
   const summary   = summaryLoad.data
@@ -212,6 +215,7 @@ export default function Finance() {
   const mappings   = settingsLoad.data?.mappings ?? []
   const categories = settingsLoad.data?.categories ?? []
   const funds      = settingsLoad.data?.funds ?? []
+  const mappingPrompt = settingsLoad.data?.mappingPrompt ?? null
   const loading = summaryLoad.state === 'loading' && ledgerLoad.state === 'loading'
   const load = async () => {
     await Promise.all([summaryLoad.reload(), ledgerLoad.reload(), settingsLoad.reload()])
@@ -277,15 +281,27 @@ export default function Finance() {
   const inputCls = 'w-full px-3 py-2 text-sm rounded-lg border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-100 dark:bg-ink-800 text-ink-900 dark:text-parchment-50 focus:outline-none focus:ring-2 focus:ring-church-500'
   const cardCls = 'rounded-2xl border border-parchment-300/60 dark:border-brass-900/30 bg-parchment-50 dark:bg-ink-900 shadow-warm p-4'
 
+  // SP-037 DiD: even if the shell route gate is bypassed, Staff must not see
+  // the ledger UI. Server mount is still the ACL.
+  if (!isAdmin) {
+    return (
+      <PageWrapper type="list">
+        <div className="max-w-2xl mx-auto py-16">
+          <EmptyState icon={Landmark} title={t('fin.adminOnly')} body={t('fin.adminOnlyBody')} />
+        </div>
+      </PageWrapper>
+    )
+  }
+
   return (
-    <PageWrapper>
+    <PageWrapper type="list">
       <div className="flex items-center justify-between gap-3 mb-5 flex-wrap">
-        <div className="flex items-center gap-2">
-          <Landmark size={20} className="text-church-700 dark:text-brass-300" />
-          <div>
-            <h1 className="text-2xl font-display font-bold text-ink-900 dark:text-parchment-50">{t('fin.title')}</h1>
-            <p className="text-sm text-ink-500 dark:text-parchment-300/70">{t('fin.sub')}</p>
-          </div>
+        <div>
+            <PageHeader
+              title={t('fin.title')}
+              leading={<Landmark size={20} />}
+              subtitle={<>{t('fin.sub')} <Link to="/finance/cutover" className="underline">{t('fin.cutoverLink')}</Link></>}
+            />
         </div>
         <div className="flex items-center gap-2">
           <input type="date" value={start} onChange={e => setPeriod(p => ({ ...p, start: e.target.value }))} className={inputCls} aria-label={t('fin.from')} />
@@ -348,9 +364,9 @@ export default function Finance() {
                     <tr key={i} className="border-t first:border-t-0 border-parchment-300/50 dark:border-brass-900/25 text-ink-800 dark:text-parchment-100">
                       <td className="py-1.5 pr-2">
                         {g.rollup_group}
-                        <span className="ml-2 text-[10px] uppercase tracking-wider text-ink-500 dark:text-parchment-300/70">{t(`fin.${g.acct_type}`)}</span>
+                        <span className="ml-2 text-[11px] uppercase tracking-wider text-ink-500 dark:text-parchment-300/70">{t(`fin.${g.acct_type}`)}</span>
                         {g.acct_type === 'revenue' && g.assessable && (
-                          <span className="ml-1.5 text-[10px] font-semibold text-brass-700 dark:text-brass-300">{t('fin.assessableTag')}</span>
+                          <span className="ml-1.5 text-[11px] font-semibold text-brass-700 dark:text-brass-300">{t('fin.assessableTag')}</span>
                         )}
                       </td>
                       <td className="py-1.5 text-right whitespace-nowrap font-medium">{fmtMoney(g.total)}</td>
@@ -425,6 +441,16 @@ export default function Finance() {
             <div className={cardCls}>
               <p className="text-[11px] font-semibold uppercase tracking-widest text-brass-700 dark:text-brass-300 mb-1">{t('fin.mappings')}</p>
               <p className="text-xs text-ink-500 dark:text-parchment-300/70 mb-3">{t('fin.mappingsSub')}</p>
+              {mappingPrompt?.lines?.length > 0 && (
+                <div data-testid="finance-mapping-prompt" className="mb-3 text-xs text-ink-700 dark:text-parchment-200">
+                  <p>{t('fin.unmappedPrompt')}</p>
+                  <ul className="mt-1 space-y-0.5">
+                    {mappingPrompt.lines.map(line => (
+                      <li key={line.category}>{line.category}: {fmtMoney(line.amount)}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 {categories.map(cat => (
                   <div key={cat} className="flex items-center gap-2">
@@ -463,7 +489,7 @@ export default function Finance() {
             <div className={cardCls}>
               <div className="flex items-center justify-between gap-3 flex-wrap">
                 <div>
-                  <p className="text-[11px] font-semibold uppercase tracking-widest text-brass-700 dark:text-brass-300">Diocese reporting</p>
+                  <p className="text-[11px] font-semibold uppercase tracking-widest text-brass-700 dark:text-brass-300">{t('fin.dioceseReporting')}</p>
                   <p className="text-xs text-ink-500 dark:text-parchment-300/70 mt-0.5">
                     Affiliated with {aff.diocese_name} · sharing: {aff.grant_level}. Submitting freezes the selected period's totals for chancery review.
                   </p>
@@ -579,7 +605,7 @@ export default function Finance() {
                 className="overflow-x-auto"
                 tabIndex={0}
                 role="region"
-                aria-label="Ledger entries — scrolls horizontally"
+                aria-label={t('fin.ledgerScrollAria')}
               >
                 <table className="w-full text-sm">
                   <thead>

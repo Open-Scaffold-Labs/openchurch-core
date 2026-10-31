@@ -1,17 +1,22 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import { Building2, AlertTriangle, Loader2, Globe, ExternalLink, Copy, Check, Bell, Cross, Plus, Trash2, Feather, Languages } from 'lucide-react'
-import PageWrapper from '../components/PageWrapper'
+import PageWrapper, { PageHeader } from '../components/PageWrapper'
 import EmptyState from '../components/EmptyState'
 import TextField from '../components/TextField'
 import SaveButton, { useSaveStatus } from '../components/SaveButton'
 import { useToast } from '../components/ToastProvider'
+import { showParishAiKey } from '../native/aiGate'
+import { useNativeAi } from '../native/NativeAiContext'
 import { useAuth } from '../context/AuthContext'
 import { apiUrl } from '../api'
+import { nativeAiFetchInit } from '../native/nativeAiCeiling'
 import { LIT_COLOR_DOT, LIT_COLORS, LIT_COLOR_DOT_NONE } from '../utils/liturgicalColors'
 import { useConfirm } from '../components/ConfirmProvider'
 import { useLocale } from '../i18n'
-import { offeredParishTimeZones } from '../utils/parishTimeZone'
+import { colorLabel } from '../i18n/liturgical'
+import { offeredParishTimeZones, parishTimeZoneLabel } from '../utils/parishTimeZone'
 
 // The parish's clock (C4). ochr_organizations.timezone has driven the
 // kiosk's "today" since CHK.7 and defaulted to UTC, and until this field no
@@ -45,6 +50,7 @@ const TIMEZONES = allTimezones()
 // The custody promise every rector asks about, made self-serve: one
 // click, one complete JSON file, no email to the vendor required.
 function DataExportCard() {
+  const { t } = useLocale()
   const [busy, setBusy] = useState(false)
   const [err,  setErr]  = useState('')
 
@@ -70,11 +76,9 @@ function DataExportCard() {
 
   return (
     <div className="rounded-2xl border border-parchment-300/60 dark:border-brass-900/30 bg-white dark:bg-ink-900 shadow-warm p-5">
-      <h2 className="text-sm font-semibold text-ink-800 dark:text-parchment-100">Your data</h2>
+      <h2 className="text-sm font-semibold text-ink-800 dark:text-parchment-100">{t('orgs.data.title')}</h2>
       <p className="mt-1 text-xs text-ink-500 dark:text-parchment-300/70">
-        Download a complete copy of your parish's records — the register, intentions,
-        members, giving, everything — as a single file. It's yours; take it whenever
-        you like.
+        {t('orgs.data.body')}
       </p>
       {err && <p className="mt-2 text-xs text-rose-700 dark:text-rose-300">{err}</p>}
       <button
@@ -83,7 +87,7 @@ function DataExportCard() {
         disabled={busy}
         className="mt-3 inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium rounded-lg border border-parchment-300/70 dark:border-brass-900/40 text-ink-700 dark:text-parchment-100 hover:bg-parchment-100 dark:hover:bg-ink-800 disabled:opacity-50"
       >
-        {busy ? 'Preparing…' : 'Download parish export'}
+        {busy ? t('orgs.data.preparing') : t('orgs.data.download')}
       </button>
     </div>
   )
@@ -128,7 +132,7 @@ function DioceseCard() {
       const d = await res.json().catch(() => ({}))
       if (!res.ok) throw new Error(d.error || "That didn't save — nothing was lost. Please try again.")
       setAff(d.affiliation ?? null)
-      toast.success('Diocese affiliation updated')
+      toast.success(t('org.diocese_affiliation_updated'))
     } catch (err) { toast.error(err.message) } finally { setBusy(false) }
   }
 
@@ -146,7 +150,7 @@ function DioceseCard() {
     >
       <div className="flex items-center gap-2 pb-3 border-b border-parchment-300/60 dark:border-brass-900/25">
         <Building2 size={14} className="text-brass-600 dark:text-brass-300" />
-        <h2 className="text-sm font-semibold text-ink-800 dark:text-parchment-100">Diocese</h2>
+        <h2 className="text-sm font-semibold text-ink-800 dark:text-parchment-100">{t('orgs.dio.title')}</h2>
       </div>
 
       {loading ? (
@@ -155,52 +159,50 @@ function DioceseCard() {
         <p role="status" className="text-sm text-amber-800 dark:text-amber-300">{t('org.affUnread')}</p>
       ) : !aff ? (
         <p className="text-sm text-ink-500 dark:text-parchment-300/70">
-          This parish is independent. If your diocese uses OpenDiocese, an
-          invitation from the chancery will appear here.
+          {t('orgs.dio.independent')}
         </p>
       ) : aff.status === 'invited' ? (
         <div className="space-y-3">
           <p className="text-sm text-ink-800 dark:text-parchment-100">
-            <span className="font-semibold">{aff.diocese_name}</span> has invited
-            this parish to affiliate. Accepting shares financial reporting at the
-            level you choose — never member or donor records.
+            <span className="font-semibold">{aff.diocese_name}</span>{' '}
+            {t('org.has_invited_this_parish_to')}
           </p>
           <div>
-            <label className="block text-[11px] font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">Sharing level</label>
+            <label className="block text-[11px] font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">{t('orgs.dio.level')}</label>
             <select value={grant} onChange={e => setGrant(e.target.value)}
               className="px-3 py-2 text-sm rounded-lg bg-parchment-50 dark:bg-ink-800 border border-parchment-300/70 dark:border-brass-900/40 text-ink-900 dark:text-parchment-50 focus:outline-none focus:ring-2 focus:ring-brass-400">
-              <option value="summary">Summary — period totals only</option>
-              <option value="detail">Detail — account-level lines</option>
+              <option value="summary">{t('orgs.dio.summary')}</option>
+              <option value="detail">{t('orgs.dio.detail')}</option>
             </select>
             <p className="mt-1 text-[11px] text-ink-500 dark:text-parchment-300/70">{GRANT_HELP[grant]}</p>
           </div>
           <div className="flex items-center gap-2">
             <button type="button" disabled={busy} onClick={() => act('/accept', { grant_level: grant })}
               className="px-4 py-2 text-sm font-semibold rounded-lg bg-church-900 dark:bg-parchment-100 text-parchment-50 dark:text-church-900 hover:opacity-90 disabled:opacity-40">
-              Accept invitation
+              {t('orgs.dio.accept')}
             </button>
             <button type="button" disabled={busy} onClick={() => act('/decline')}
               className="px-3 py-2 text-sm text-ink-500 dark:text-parchment-300/70 hover:underline">
-              Decline
+              {t('orgs.dio.decline')}
             </button>
           </div>
         </div>
       ) : (
         <div className="space-y-3">
           <p className="text-sm text-ink-800 dark:text-parchment-100">
-            Affiliated with <span className="font-semibold">{aff.diocese_name}</span>
+            {t('orgs.dio.affiliated')} <span className="font-semibold">{aff.diocese_name}</span>
             {aff.status === 'suspended' && (
-              <span className="ml-2 inline-block px-2 py-0.5 rounded-full text-[11px] font-semibold bg-parchment-200/80 text-ink-600 dark:bg-ink-800 dark:text-parchment-300">Suspended by diocese</span>
+              <span className="ml-2 inline-block px-2 py-0.5 rounded-full text-[11px] font-semibold bg-parchment-200/80 text-ink-600 dark:bg-ink-800 dark:text-parchment-300">{t('orgs.dio.suspended')}</span>
             )}
           </p>
           {aff.status === 'active' && (
             <div>
-              <label className="block text-[11px] font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">Sharing level</label>
+              <label className="block text-[11px] font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">{t('orgs.dio.level')}</label>
               <select value={aff.grant_level} disabled={busy}
                 onChange={e => act('/grant', { grant_level: e.target.value })}
                 className="px-3 py-2 text-sm rounded-lg bg-parchment-50 dark:bg-ink-800 border border-parchment-300/70 dark:border-brass-900/40 text-ink-900 dark:text-parchment-50 focus:outline-none focus:ring-2 focus:ring-brass-400">
-                <option value="summary">Summary — period totals only</option>
-                <option value="detail">Detail — account-level lines</option>
+                <option value="summary">{t('orgs.dio.summary')}</option>
+                <option value="detail">{t('orgs.dio.detail')}</option>
               </select>
               <p className="mt-1 text-[11px] text-ink-500 dark:text-parchment-300/70">{GRANT_HELP[aff.grant_level]}</p>
             </div>
@@ -208,13 +210,13 @@ function DioceseCard() {
           <button type="button" disabled={busy}
             onClick={async () => {
               if (await ask({
-                title: 'Leave this diocese?',
-                body: 'Consolidated reporting stops immediately. Your parish records are unaffected.',
-                confirmLabel: 'Leave diocese',
+                title: t('orgs.dio.leaveTitle'),
+                body: t('orgs.dio.leaveBody'),
+                confirmLabel: t('orgs.dio.leaveConfirm'),
               })) act('/leave')
             }}
             className="text-[12px] text-rose-700 dark:text-rose-300 hover:underline">
-            Leave the diocese
+            {t('orgs.dio.leave')}
           </button>
         </div>
       )}
@@ -224,8 +226,8 @@ function DioceseCard() {
 
 // Bring-your-own AI key (AIP.1). The key is write-only: we send it once,
 // the server stores it encrypted, and from then on only the provider name
-// and the last four characters ever come back. Clearing reverts the org
-// to the platform's built-in AI.
+// and the last four characters ever come back. D-01 (2026-10-19): there is
+// no platform-managed key, so clearing it turns the parish's AI off.
 function AIProviderCard() {
   const toast = useToast()
   const ask = useConfirm()
@@ -238,7 +240,7 @@ function AIProviderCard() {
   const [form, setForm]       = useState({ provider: 'anthropic', api_key: '', model: '' })
 
   useEffect(() => {
-    fetch(apiUrl('/api/ai/provider'))
+    fetch(apiUrl('/api/ai/provider'), nativeAiFetchInit())
       .then(async r => {
         // `null` on a 500 said the parish was on the built-in assistant.
         if (!r.ok) throw new Error('unread')
@@ -255,10 +257,10 @@ function AIProviderCard() {
 
   const save = async (e) => {
     e.preventDefault()
-    if (form.api_key.trim().length < 20) { toast.error('That does not look like a valid API key'); return }
+    if (form.api_key.trim().length < 20) { toast.error(t('org.that_does_not_look_like')); return }
     setBusy(true)
     try {
-      const res = await fetch(apiUrl('/api/ai/provider'), {
+      const res = await fetch(apiUrl('/api/ai/provider'), nativeAiFetchInit({
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -266,29 +268,31 @@ function AIProviderCard() {
           api_key: form.api_key.trim(),
           ...(form.model.trim() ? { model: form.model.trim() } : {}),
         }),
-      })
+      }))
       const d = await res.json().catch(() => ({}))
       if (!res.ok) throw new Error(d.error || "That didn't save — please try again.")
       setCfg(d)
       setEditing(false)
       setForm(f => ({ ...f, api_key: '' }))
-      toast.success('AI provider saved — your generations now use your own key')
+      toast.success(t('org.ai_provider_saved_your_generations'))
+      window.dispatchEvent(new Event('ochr:ai-provider-changed')) // the assistant rechecks its status
     } catch (err) { toast.error(err.message) } finally { setBusy(false) }
   }
 
   const clear = async () => {
     if (!(await ask({
       title: 'Remove your API key?',
-      body: "AI features go back to using OpenChurch's built-in provider.",
+      body: "AI features that need your parish's key stop working until a key is added again.",
       confirmLabel: 'Remove key',
     }))) return
     setBusy(true)
     try {
-      const res = await fetch(apiUrl('/api/ai/provider'), { method: 'DELETE' })
+      const res = await fetch(apiUrl('/api/ai/provider'), nativeAiFetchInit({ method: 'DELETE' }))
       const d = await res.json().catch(() => ({}))
       if (!res.ok) throw new Error(d.error || "That didn't save — please try again.")
       setCfg(d)
-      toast.success('Back on the built-in AI')
+      toast.success(t('org.api_key_removed'))
+      window.dispatchEvent(new Event('ochr:ai-provider-changed')) // the assistant rechecks its status
     } catch (err) { toast.error(err.message) } finally { setBusy(false) }
   }
 
@@ -303,7 +307,7 @@ function AIProviderCard() {
     >
       <div className="flex items-center gap-2 pb-3 border-b border-parchment-300/60 dark:border-brass-900/25">
         <Feather size={14} className="text-brass-600 dark:text-brass-300" />
-        <h2 className="text-sm font-semibold text-ink-800 dark:text-parchment-100">AI provider</h2>
+        <h2 className="text-sm font-semibold text-ink-800 dark:text-parchment-100">{t('orgs.ai.title')}</h2>
       </div>
 
       {loading ? (
@@ -314,38 +318,36 @@ function AIProviderCard() {
         <div className="space-y-3">
           {cfg?.source === 'org' ? (
             <p className="text-sm text-ink-800 dark:text-parchment-100">
-              Using <span className="font-semibold capitalize">{cfg.provider}</span> with
-              your own key <span className="font-mono text-xs">····{cfg.key_last4}</span>
+              {t('org.using')} <span className="font-semibold capitalize">{cfg.provider}</span> {t('org.with_your_own_key')}{' '}
+              <span className="font-mono text-xs">····{cfg.key_last4}</span>
               {cfg.model && <> · model <span className="font-mono text-xs">{cfg.model}</span></>}
             </p>
           ) : (
             <p className="text-sm text-ink-500 dark:text-parchment-300/70">
-              Using OpenChurch's built-in AI. Plug in your church's own
-              Anthropic or OpenAI key to run generations on your account
-              with your own limits.
+              {t('orgs.ai.none')}
             </p>
           )}
 
           {editing ? (
             <form onSubmit={save} className="space-y-3">
               <div>
-                <label className="block text-[11px] font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">Provider</label>
+                <label className="block text-[11px] font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">{t('orgs.ai.provider')}</label>
                 <select value={form.provider} onChange={e => setForm(f => ({ ...f, provider: e.target.value }))} className={inputCls}>
                   <option value="anthropic">Anthropic (Claude)</option>
                   <option value="openai">OpenAI (GPT)</option>
                 </select>
               </div>
               <div>
-                <label className="block text-[11px] font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">API key</label>
+                <label className="block text-[11px] font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">{t('orgs.ai.key')}</label>
                 <input type="password" value={form.api_key} autoComplete="off"
                   placeholder={form.provider === 'anthropic' ? 'sk-ant-…' : 'sk-…'}
                   onChange={e => setForm(f => ({ ...f, api_key: e.target.value }))} className={inputCls} />
                 <p className="mt-1 text-[11px] text-ink-500 dark:text-parchment-300/70">
-                  Stored encrypted. Never shown again — only the last four characters.
+                  {t('orgs.ai.stored')}
                 </p>
               </div>
               <div>
-                <label className="block text-[11px] font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">Model <span className="font-normal">(optional)</span></label>
+                <label className="block text-[11px] font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">{t('orgs.ai.model')} <span className="font-normal">{t('orgs.optional')}</span></label>
                 <input type="text" value={form.model}
                   placeholder={form.provider === 'anthropic' ? 'claude-haiku-4-5-20251001' : 'gpt-4o-mini'}
                   onChange={e => setForm(f => ({ ...f, model: e.target.value }))} className={inputCls} />
@@ -353,11 +355,11 @@ function AIProviderCard() {
               <div className="flex items-center gap-2">
                 <button type="submit" disabled={busy}
                   className="px-4 py-2 text-sm font-semibold rounded-lg bg-church-900 dark:bg-parchment-100 text-parchment-50 dark:text-church-900 hover:opacity-90 disabled:opacity-40">
-                  {busy ? 'Saving…' : 'Save key'}
+                  {busy ? t('orgs.saving') : t('orgs.ai.save')}
                 </button>
                 <button type="button" disabled={busy} onClick={() => { setEditing(false); setForm(f => ({ ...f, api_key: '' })) }}
                   className="px-3 py-2 text-sm text-ink-500 dark:text-parchment-300/70 hover:underline">
-                  Cancel
+                  {t('orgs.cancel')}
                 </button>
               </div>
             </form>
@@ -365,12 +367,12 @@ function AIProviderCard() {
             <div className="flex items-center gap-3">
               <button type="button" onClick={() => setEditing(true)}
                 className="px-4 py-2 text-sm font-semibold rounded-lg border border-parchment-300/70 dark:border-brass-900/40 text-ink-800 dark:text-parchment-100 hover:bg-parchment-100 dark:hover:bg-ink-800/60">
-                {cfg?.source === 'org' ? 'Replace key' : 'Use my own key'}
+                {cfg?.source === 'org' ? t('orgs.ai.replace') : t('orgs.ai.useOwn')}
               </button>
               {cfg?.source === 'org' && (
                 <button type="button" disabled={busy} onClick={clear}
                   className="text-[12px] text-rose-700 dark:text-rose-300 hover:underline">
-                  Remove key · use built-in AI
+                  {t('orgs.ai.remove')}
                 </button>
               )}
             </div>
@@ -432,7 +434,7 @@ function ParishFeastsCard() {
       // Upsert: one feast per date, kept sorted.
       setFeasts(list => [...list.filter(f => f.date !== d.date), d].sort((a, b) => a.date.localeCompare(b.date)))
       setForm({ date: '', feast_name: '', liturgical_color: 'White' })
-      toast.success('Parish feast saved')
+      toast.success(t('org.parish_feast_saved'))
     } catch (err) {
       toast.error(err.message)
     } finally {
@@ -459,13 +461,11 @@ function ParishFeastsCard() {
     >
       <div className="flex items-center gap-2 pb-3 border-b border-parchment-300/60 dark:border-brass-900/25">
         <Cross size={14} className="text-brass-600 dark:text-brass-300" />
-        <h2 className="text-sm font-semibold text-ink-800 dark:text-parchment-100">Parish feasts</h2>
+        <h2 className="text-sm font-semibold text-ink-800 dark:text-parchment-100">{t('orgs.feast.title')}</h2>
       </div>
 
       <p className="text-[11px] text-ink-500 dark:text-parchment-300/70 -mt-1">
-        Your church's own days — patronal feast, dedication anniversary, a
-        locally-kept saint. These name the day on your schedule and check-in
-        without changing the universal season.
+        {t('orgs.feast.hint')}
       </p>
 
       {loading ? (
@@ -473,7 +473,7 @@ function ParishFeastsCard() {
       ) : failed ? (
         <p role="status" className="text-sm text-amber-800 dark:text-amber-300">{t('feast.unread')}</p>
       ) : feasts.length === 0 ? (
-        <p className="text-sm text-ink-500 dark:text-parchment-300/70">No parish feasts yet.</p>
+        <p className="text-sm text-ink-500 dark:text-parchment-300/70">{t('orgs.feast.none')}</p>
       ) : (
         <ul className="divide-y divide-parchment-200/60 dark:divide-brass-900/20">
           {feasts.map(f => (
@@ -487,7 +487,7 @@ function ParishFeastsCard() {
                 type="button"
                 onClick={() => remove(f.id)}
                 className="shrink-0 p-1.5 rounded-lg text-ink-400 hover:text-rose-700 hover:bg-rose-50 dark:hover:bg-rose-900/20 transition-colors"
-                aria-label={`Remove ${f.feast_name}`}
+                aria-label={t('orgs.feast.removeAria', { name: f.feast_name })}
               >
                 <Trash2 size={15} />
               </button>
@@ -500,7 +500,7 @@ function ParishFeastsCard() {
         <div className="flex flex-col sm:flex-row gap-2">
           <input
             type="date"
-            aria-label="Feast date"
+            aria-label={t('orgs.feast.date')}
             value={form.date}
             onChange={e => setForm(f => ({ ...f, date: e.target.value }))}
             className="px-3 py-2 text-sm rounded-lg bg-parchment-50 dark:bg-ink-800 border border-parchment-300/70 dark:border-brass-900/40 text-ink-900 dark:text-parchment-50 focus:outline-none focus:ring-2 focus:ring-brass-400"
@@ -509,26 +509,26 @@ function ParishFeastsCard() {
             type="text"
             value={form.feast_name}
             onChange={e => setForm(f => ({ ...f, feast_name: e.target.value }))}
-            placeholder="Feast name (e.g. St. Anne, Patron)"
+            placeholder={t('orgs.feast.namePh')}
             maxLength={120}
             className="flex-1 min-w-0 px-3 py-2 text-sm rounded-lg bg-parchment-50 dark:bg-ink-800 border border-parchment-300/70 dark:border-brass-900/40 text-ink-900 dark:text-parchment-50 placeholder-ink-400 focus:outline-none focus:ring-2 focus:ring-brass-400"
           />
         </div>
         <div className="flex items-center gap-2">
           <select
-            aria-label="Liturgical colour"
+            aria-label={t('orgs.feast.color')}
             value={form.liturgical_color}
             onChange={e => setForm(f => ({ ...f, liturgical_color: e.target.value }))}
             className="px-3 py-2 text-sm rounded-lg bg-parchment-50 dark:bg-ink-800 border border-parchment-300/70 dark:border-brass-900/40 text-ink-900 dark:text-parchment-50 focus:outline-none focus:ring-2 focus:ring-brass-400"
           >
-            {LIT_COLORS.map(c => <option key={c} value={c}>{c}</option>)}
+            {LIT_COLORS.map(c => <option key={c} value={c}>{colorLabel(t, c)}</option>)}
           </select>
           <button
             type="submit"
             disabled={saving || !form.date || !form.feast_name.trim()}
             className="flex items-center gap-1.5 px-4 py-2 text-sm font-semibold rounded-lg bg-church-900 dark:bg-parchment-100 text-parchment-50 dark:text-church-900 hover:opacity-90 disabled:opacity-40 transition-opacity"
           >
-            <Plus size={15} /> {saving ? 'Adding…' : 'Add feast'}
+            <Plus size={15} /> {saving ? t('orgs.adding') : t('orgs.feast.add')}
           </button>
         </div>
       </form>
@@ -558,7 +558,17 @@ const FIELDS = [
 
 export default function OrgSettings() {
   const { user, updateUser } = useAuth()
-  const { t } = useLocale()
+  const { t, dateLocale } = useLocale()
+  // Timezone options show a localized name ("Pacific Time — Los Angeles",
+  // "hora del Pacífico — Los Angeles"); the value stays the IANA id that a
+  // save stores. Built once per locale — ~400 zones, two Intl calls each.
+  const tzLabels = useMemo(() => {
+    const m = new Map()
+    for (const z of TIMEZONES) m.set(z, parishTimeZoneLabel(z, dateLocale))
+    return m
+  }, [dateLocale])
+  const tzLabel = (z) => tzLabels.get(z) ?? parishTimeZoneLabel(z, dateLocale)
+  const { kind: nativeAiKind } = useNativeAi()
   const isAdmin = user?.role === 'admin'
   const toast = useToast()
 
@@ -578,7 +588,7 @@ export default function OrgSettings() {
       setCopied(true)
       setTimeout(() => setCopied(false), 1500)
     } catch {
-      toast.error('Copy failed — select the link and copy manually.')
+      toast.error(t('org.copy_failed_select_the_link'))
     }
   }
 
@@ -607,6 +617,9 @@ export default function OrgSettings() {
           about:                d.about                ?? '',
           service_times:        d.service_times        ?? '',
           page_published:       d.page_published       ?? false,
+          public_display_name:  d.public_display_name  ?? '',
+          public_logo_url:      d.public_logo_url      ?? '',
+          public_accent_hex:    d.public_accent_hex    ?? '',
           // Reminders (RM.3).
           reminder_lead_hours:  d.reminder_lead_hours  ?? 24,
           // The parish's clock (C4). NOT NULL DEFAULT 'UTC' server-side.
@@ -660,7 +673,7 @@ export default function OrgSettings() {
       // Subtle confirmation — SaveButton's checkmark covers the
       // primary signal; the toast is for the rare case a screen
       // reader doesn't catch the inline state change.
-      toast.info('Org details saved')
+      toast.info(t('org.org_details_saved'))
     },
   })
 
@@ -673,12 +686,13 @@ export default function OrgSettings() {
 
   if (!isAdmin || err === 'admin-only') {
     return (
-      <PageWrapper>
-        <div className="max-w-2xl mx-auto py-16">
+      <PageWrapper type="list">
+        <div className="max-w-2xl mx-auto space-y-6 py-8">
+          <PageHeader title={t('orgs.title')} />
           <EmptyState
             icon={AlertTriangle}
-            title="Admins only"
-            body="Organization settings are restricted to admins. Ask an admin in your church to update the letterhead and signatory details."
+            title={t('orgs.adminOnly')}
+            body={t('orgs.adminOnlyBody')}
           />
         </div>
       </PageWrapper>
@@ -687,7 +701,7 @@ export default function OrgSettings() {
 
   if (loading) {
     return (
-      <PageWrapper>
+      <PageWrapper type="list">
         <div className="flex items-center justify-center py-24">
           <Loader2 size={20} className="animate-spin text-church-700 dark:text-brass-300" />
         </div>
@@ -697,11 +711,11 @@ export default function OrgSettings() {
 
   if (err) {
     return (
-      <PageWrapper>
+      <PageWrapper type="list">
         <div className="max-w-2xl mx-auto py-16">
           <EmptyState
             icon={AlertTriangle}
-            title="Couldn't load settings"
+            title={t('orgs.loadFailed')}
             body={err}
           />
         </div>
@@ -710,7 +724,7 @@ export default function OrgSettings() {
   }
 
   return (
-    <PageWrapper>
+    <PageWrapper type="list">
       <div className="max-w-2xl mx-auto space-y-6">
         {/* Header */}
         <motion.div
@@ -718,12 +732,9 @@ export default function OrgSettings() {
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.25 }}
         >
-          <h1 className="font-display text-3xl font-semibold text-ink-900 dark:text-parchment-50 tracking-tight">
-            Organization settings
-          </h1>
+          <PageHeader title={t('orgs.title')} />
           <p className="text-sm text-ink-500 dark:text-parchment-300/70 mt-1">
-            Letterhead, EIN, and signatory details for printed giving
-            statements and future tax documents.
+            {t('orgs.subtitle')}
           </p>
         </motion.div>
 
@@ -738,18 +749,18 @@ export default function OrgSettings() {
           <div className="flex items-center gap-2 pb-3 border-b border-parchment-300/60 dark:border-brass-900/25">
             <Building2 size={14} className="text-brass-600 dark:text-brass-300" />
             <h2 className="text-sm font-semibold text-ink-800 dark:text-parchment-100">
-              Letterhead
+              {t('orgs.letterhead')}
             </h2>
           </div>
 
           {FIELDS.map(f => (
             <TextField
               key={f.key}
-              label={f.label}
+              label={t(`orgs.f.${f.key}.label`)}
               value={form[f.key] ?? ''}
               onChange={field(f.key)}
-              placeholder={f.placeholder}
-              hint={f.hint}
+              placeholder={t(`orgs.f.${f.key}.ph`)}
+              hint={t(`orgs.f.${f.key}.hint`)}
               autoComplete="off"
             />
           ))}
@@ -758,23 +769,23 @@ export default function OrgSettings() {
               textarea rather than TextField. Same styling spine. */}
           <div>
             <label htmlFor="statement_letterhead" className="block text-xs font-semibold text-ink-600 dark:text-parchment-200 mb-1.5">
-              Statement letterhead (optional)
+              {t('orgs.stmtLetterhead')}
             </label>
             <textarea
               id="statement_letterhead"
               value={form.statement_letterhead ?? ''}
               onChange={field('statement_letterhead')}
               rows={3}
-              placeholder="Optional preamble that prints under the church name. Denomination line, fiscal-sponsor note, custom IRS verbiage, etc." aria-label="Optional preamble that prints under the church name. Denomination line, fiscal-sponsor note, custom IRS verbiage, etc."
+              placeholder={t('orgs.stmtLetterheadPh')}
               className="w-full px-3 py-2.5 text-sm rounded-lg bg-parchment-50 dark:bg-ink-800 border border-parchment-300/70 dark:border-brass-900/40 text-ink-900 dark:text-parchment-50 placeholder-ink-400 dark:placeholder-parchment-400/50 focus:outline-none focus:ring-2 focus:ring-brass-400 resize-none"
             />
             <p className="mt-1.5 text-[11px] text-ink-500 dark:text-parchment-300/70">
-              Leave blank to print only the church name + address block.
+              {t('orgs.stmtHint')}
             </p>
           </div>
 
           <div className="pt-3 flex items-center justify-end gap-3 border-t border-parchment-300/60 dark:border-brass-900/25">
-            <SaveButton status={status}>Save settings</SaveButton>
+            <SaveButton status={status}>{t('orgs.saveSettings')}</SaveButton>
           </div>
         </motion.form>
 
@@ -793,13 +804,13 @@ export default function OrgSettings() {
             <div className="flex items-center gap-2">
               <Globe size={14} className="text-brass-600 dark:text-brass-300" />
               <h2 className="text-sm font-semibold text-ink-800 dark:text-parchment-100">
-                Public church page
+                {t('orgs.page.title')}
               </h2>
             </div>
             {/* Publish toggle */}
             <label className="flex items-center gap-2 cursor-pointer select-none">
               <span className="text-xs font-medium text-ink-600 dark:text-parchment-200">
-                {form.page_published ? 'Published' : 'Draft'}
+                {form.page_published ? t('orgs.page.published') : t('orgs.page.draft')}
               </span>
               <input
                 type="checkbox"
@@ -809,6 +820,18 @@ export default function OrgSettings() {
               />
               <span className="relative w-9 h-5 rounded-full bg-parchment-300 dark:bg-ink-700 peer-checked:bg-church-800 dark:peer-checked:bg-church-600 transition-colors after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:w-4 after:h-4 after:rounded-full after:bg-white after:shadow after:transition-transform peer-checked:after:translate-x-4" />
             </label>
+          </div>
+
+          <div className="space-y-1">
+            <Link
+              to="/settings/site"
+              className="inline-flex items-center min-h-[44px] text-sm font-semibold text-church-800 dark:text-brass-300 underline-offset-2 hover:underline rounded-md focus:outline-none focus:ring-2 focus:ring-brass-400"
+            >
+              {t('site.pub.settingsLink')}
+            </Link>
+            <p className="text-sm text-ink-500 dark:text-parchment-300/70">
+              {t('site.pub.settingsLinkHint')}
+            </p>
           </div>
 
           {form.page_published && slug ? (
@@ -822,7 +845,7 @@ export default function OrgSettings() {
                 onClick={copyPublicUrl}
                 className="shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-semibold text-church-800 dark:text-brass-300 hover:bg-parchment-200/70 dark:hover:bg-ink-700/70 transition-colors"
               >
-                {copied ? <><Check size={12} /> Copied</> : <><Copy size={12} /> Copy</>}
+                {copied ? <><Check size={12} /> {t('orgs.copied')}</> : <><Copy size={12} /> {t('orgs.copy')}</>}
               </button>
               <a
                 href={`/p/${slug}`}
@@ -830,61 +853,89 @@ export default function OrgSettings() {
                 rel="noopener noreferrer"
                 className="shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-semibold text-church-800 dark:text-brass-300 hover:bg-parchment-200/70 dark:hover:bg-ink-700/70 transition-colors"
               >
-                View <ExternalLink size={11} />
+                {t('orgs.view')} <ExternalLink size={11} />
               </a>
             </div>
           ) : (
             <p className="text-[11px] text-ink-500 dark:text-parchment-300/70 -mt-1">
-              When published, your homepage goes live at{' '}
+              {t('orgs.page.liveAt')}{' '}
               <span className="font-mono">/p/{slug || 'your-church'}</span>.
             </p>
           )}
 
           <TextField
-            label="Tagline"
+            label={t('orgs.page.tagline')}
             value={form.tagline ?? ''}
             onChange={field('tagline')}
-            placeholder="A welcoming parish in the heart of town"
-            hint="One short line shown under your church name in the hero."
+            placeholder={t('orgs.page.taglinePh')}
+            hint={t('orgs.page.taglineHint')}
+            autoComplete="off"
+          />
+
+          <TextField
+            label={t('orgs.page.displayName')}
+            value={form.public_display_name ?? ''}
+            onChange={field('public_display_name')}
+            placeholder={t('orgs.page.displayNamePh')}
+            hint={t('orgs.page.displayNameHint')}
+            autoComplete="off"
+          />
+
+          <TextField
+            label={t('orgs.page.logoUrl')}
+            value={form.public_logo_url ?? ''}
+            onChange={field('public_logo_url')}
+            placeholder={t('orgs.page.logoUrlPh')}
+            hint={t('orgs.page.logoUrlHint')}
+            autoComplete="off"
+            inputMode="url"
+          />
+
+          <TextField
+            label={t('orgs.page.accentHex')}
+            value={form.public_accent_hex ?? ''}
+            onChange={field('public_accent_hex')}
+            placeholder={t('orgs.page.accentHexPh')}
+            hint={t('orgs.page.accentHexHint')}
             autoComplete="off"
           />
 
           <div>
             <label htmlFor="service_times" className="block text-xs font-semibold text-ink-600 dark:text-parchment-200 mb-1.5">
-              Service times (optional)
+              {t('orgs.page.times')}
             </label>
             <textarea
               id="service_times"
               value={form.service_times ?? ''}
               onChange={field('service_times')}
               rows={3}
-              placeholder={'Sundays · 9am & 11am\nWednesday · 7pm'} aria-label={'Sundays · 9am & 11am\nWednesday · 7pm'}
+              placeholder={t('orgs.page.timesPh')} aria-label={t('orgs.page.timesPh')}
               className="w-full px-3 py-2.5 text-sm rounded-lg bg-parchment-50 dark:bg-ink-800 border border-parchment-300/70 dark:border-brass-900/40 text-ink-900 dark:text-parchment-50 placeholder-ink-400 dark:placeholder-parchment-400/50 focus:outline-none focus:ring-2 focus:ring-brass-400 resize-none"
             />
             <p className="mt-1.5 text-[11px] text-ink-500 dark:text-parchment-300/70">
-              One service per line.
+              {t('orgs.page.timesHint')}
             </p>
           </div>
 
           <div>
             <label htmlFor="about" className="block text-xs font-semibold text-ink-600 dark:text-parchment-200 mb-1.5">
-              About / welcome (optional)
+              {t('orgs.page.about')}
             </label>
             <textarea
               id="about"
               value={form.about ?? ''}
               onChange={field('about')}
               rows={4}
-              placeholder="Tell visitors who you are. One paragraph per line." aria-label="Tell visitors who you are. One paragraph per line."
+              placeholder={t('orgs.page.aboutPh')} aria-label={t('orgs.page.aboutPh')}
               className="w-full px-3 py-2.5 text-sm rounded-lg bg-parchment-50 dark:bg-ink-800 border border-parchment-300/70 dark:border-brass-900/40 text-ink-900 dark:text-parchment-50 placeholder-ink-400 dark:placeholder-parchment-400/50 focus:outline-none focus:ring-2 focus:ring-brass-400 resize-none"
             />
             <p className="mt-1.5 text-[11px] text-ink-500 dark:text-parchment-300/70">
-              Location uses the mailing address from the letterhead above.
+              {t('orgs.page.location')}
             </p>
           </div>
 
           <div className="pt-3 flex items-center justify-end gap-3 border-t border-parchment-300/60 dark:border-brass-900/25">
-            <SaveButton status={status}>Save page</SaveButton>
+            <SaveButton status={status}>{t('orgs.page.save')}</SaveButton>
           </div>
         </motion.form>
 
@@ -900,7 +951,7 @@ export default function OrgSettings() {
           <div className="flex items-center gap-2 pb-3 border-b border-parchment-300/60 dark:border-brass-900/25">
             <Bell size={14} className="text-brass-600 dark:text-brass-300" />
             <h2 className="text-sm font-semibold text-ink-800 dark:text-parchment-100">
-              Reminders
+              {t('orgs.rem.title')}
             </h2>
           </div>
 
@@ -919,14 +970,14 @@ export default function OrgSettings() {
               className="w-full px-3 py-2.5 text-sm rounded-lg bg-parchment-50 dark:bg-ink-800 border border-parchment-300/70 dark:border-brass-900/40 text-ink-900 dark:text-parchment-50 focus:outline-none focus:ring-2 focus:ring-brass-400"
             >
               {form.timezone && !TIMEZONES.includes(form.timezone) && (
-                <option value={form.timezone}>{form.timezone}</option>
+                <option value={form.timezone}>{tzLabel(form.timezone)}</option>
               )}
               <optgroup label={t('org.tz.common')}>
-                {COMMON_TIMEZONES.map(z => <option key={z} value={z}>{z}</option>)}
+                {COMMON_TIMEZONES.map(z => <option key={z} value={z}>{tzLabel(z)}</option>)}
               </optgroup>
               {TIMEZONES.length > COMMON_TIMEZONES.length && (
                 <optgroup label={t('org.tz.other')}>
-                  {TIMEZONES.filter(z => !COMMON_TIMEZONES.includes(z)).map(z => <option key={z} value={z}>{z}</option>)}
+                  {TIMEZONES.filter(z => !COMMON_TIMEZONES.includes(z)).map(z => <option key={z} value={z}>{tzLabel(z)}</option>)}
                 </optgroup>
               )}
             </select>
@@ -937,7 +988,7 @@ export default function OrgSettings() {
 
           <div>
             <label htmlFor="reminder_lead_hours" className="block text-xs font-semibold text-ink-600 dark:text-parchment-200 mb-1.5">
-              Serving reminder lead time
+              {t('orgs.rem.lead')}
             </label>
             <select
               id="reminder_lead_hours"
@@ -945,18 +996,18 @@ export default function OrgSettings() {
               onChange={e => setForm(f => ({ ...f, reminder_lead_hours: Number(e.target.value) }))}
               className="w-full px-3 py-2.5 text-sm rounded-lg bg-parchment-50 dark:bg-ink-800 border border-parchment-300/70 dark:border-brass-900/40 text-ink-900 dark:text-parchment-50 focus:outline-none focus:ring-2 focus:ring-brass-400"
             >
-              <option value={12}>12 hours before</option>
-              <option value={24}>1 day before</option>
-              <option value={48}>2 days before</option>
-              <option value={72}>3 days before</option>
+              <option value={12}>{t('orgs.rem.12')}</option>
+              <option value={24}>{t('orgs.rem.24')}</option>
+              <option value={48}>{t('orgs.rem.48')}</option>
+              <option value={72}>{t('orgs.rem.72')}</option>
             </select>
             <p className="mt-1.5 text-[11px] text-ink-500 dark:text-parchment-300/70">
-              How far ahead members are reminded about events they're assigned to serve.
+              {t('orgs.rem.hint')}
             </p>
           </div>
 
           <div className="pt-3 flex items-center justify-end gap-3 border-t border-parchment-300/60 dark:border-brass-900/25">
-            <SaveButton status={status}>Save reminders</SaveButton>
+            <SaveButton status={status}>{t('orgs.rem.save')}</SaveButton>
           </div>
         </motion.form>
 
@@ -976,13 +1027,13 @@ export default function OrgSettings() {
           <div className="flex items-center gap-2 pb-3 border-b border-parchment-300/60 dark:border-brass-900/25">
             <Languages size={14} className="text-brass-600 dark:text-brass-300" />
             <h2 className="text-sm font-semibold text-ink-800 dark:text-parchment-100">
-              Language
+              {t('orgs.lang.title')}
             </h2>
           </div>
 
           <div>
             <label htmlFor="org_locale" className="block text-xs font-semibold text-ink-600 dark:text-parchment-200 mb-1.5">
-              Parish language
+              {t('orgs.lang.label')}
             </label>
             <select
               id="org_locale"
@@ -994,14 +1045,12 @@ export default function OrgSettings() {
               <option value="es">Español</option>
             </select>
             <p className="mt-1.5 text-[11px] text-ink-500 dark:text-parchment-300/70">
-              The language everyone here sees unless they choose otherwise on their
-              own device. Individual members can still be recorded as preferring a
-              different language on the roster.
+              {t('orgs.lang.hint')}
             </p>
           </div>
 
           <div className="pt-3 flex items-center justify-end gap-3 border-t border-parchment-300/60 dark:border-brass-900/25">
-            <SaveButton status={status}>Save language</SaveButton>
+            <SaveButton status={status}>{t('orgs.lang.save')}</SaveButton>
           </div>
         </motion.form>
 
@@ -1011,7 +1060,7 @@ export default function OrgSettings() {
 
         {/* Bring-your-own AI key (AIP.1) — admin-only page, so no extra
             role gate needed here; the server enforces regardless. */}
-        <AIProviderCard />
+        {showParishAiKey(nativeAiKind) && <AIProviderCard />}
 
         {/* Diocese affiliation (DIO.1) — invitation / grant level / leave. */}
         <DioceseCard />
@@ -1020,8 +1069,7 @@ export default function OrgSettings() {
         <DataExportCard />
 
         <p className="text-xs text-ink-500 dark:text-parchment-300/70 px-1">
-          Changes propagate immediately — the next giving statement you
-          open will use the updated letterhead.
+          {t('orgs.propagate')}
         </p>
       </div>
     </PageWrapper>

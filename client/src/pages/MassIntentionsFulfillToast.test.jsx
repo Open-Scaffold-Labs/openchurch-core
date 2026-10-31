@@ -4,6 +4,7 @@
 // before the write await (R313-1 delta) — the toast must not bring a stale
 // reload back.
 import { ToastProvider } from '../components/ToastProvider'
+import { ConfirmProvider } from '../components/ConfirmProvider'
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
@@ -28,7 +29,7 @@ function book() {
     <MemoryRouter initialEntries={['/mass-intentions']}>
       <LocaleProvider>
         <Routes>
-          <Route path="/mass-intentions" element={<ToastProvider><MassIntentions /></ToastProvider>} />
+          <Route path="/mass-intentions" element={<ToastProvider><ConfirmProvider><MassIntentions /></ConfirmProvider></ToastProvider>} />
         </Routes>
       </LocaleProvider>
     </MemoryRouter>,

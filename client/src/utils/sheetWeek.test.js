@@ -13,6 +13,8 @@ import {
   resolveWeeklyWindow,
   sheetWeekStart,
   usableTimeZone,
+  thisSundayPair,
+  thisSundaySpan,
   vigilWeekStart,
 } from '../../../server/src/utils/sheetWeek.js'
 
@@ -36,6 +38,27 @@ describe('vigilWeekStart', () => {
     expect(resolveWeeklyWindow(null, null, '2026-10-05')).toEqual({
       start: '2026-10-10', end: '2026-10-16',
     })
+  })
+})
+
+describe('thisSundaySpan', () => {
+  it('is the vigil Saturday and the Sunday the weekly sheet opens on', () => {
+    expect(thisSundaySpan('2026-10-04')).toEqual({ saturday: '2026-10-03', sunday: '2026-10-04' })
+    expect(thisSundaySpan('2026-10-03')).toEqual({ saturday: '2026-10-03', sunday: '2026-10-04' })
+    expect(thisSundaySpan('2026-10-02')).toEqual({ saturday: '2026-10-03', sunday: '2026-10-04' })
+    expect(thisSundaySpan('2026-10-05')).toEqual({ saturday: '2026-10-10', sunday: '2026-10-11' })
+    expect(thisSundaySpan('not-a-day')).toBeNull()
+  })
+})
+
+describe('thisSundayPair', () => {
+  it('accepts only a real Saturday and the next civil day', () => {
+    expect(thisSundayPair('2026-10-03', '2026-10-04')).toEqual({ saturday: '2026-10-03', sunday: '2026-10-04' })
+    expect(thisSundayPair('2026-02-30', '2026-03-01')).toBeNull()
+    expect(thisSundayPair('2026-10-04', '2026-10-03')).toBeNull()
+    expect(thisSundayPair('2026-10-03', '2026-10-05')).toBeNull()
+    expect(thisSundayPair('2026-10-02', '2026-10-03')).toBeNull()
+    expect(thisSundayPair('soon', '2026-10-04')).toBeNull()
   })
 })
 

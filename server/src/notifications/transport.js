@@ -78,9 +78,16 @@ async function writeLog({
 // recipient kind: types in RECORD_ADDRESSED_TYPES are sent to an
 // ochr_clients / donor address and are exempt from by_former_address; every
 // other type (including an unknown one) is treated as login-addressed and
-// stays suppressed (fail closed). by_id / by_address / row_withdrawn are
-// unchanged for every type. tests/closedAddressAudienceF1 asserts every
-// template type is classified exactly once.
+// stays suppressed (fail closed). by_id / row_withdrawn are unchanged for
+// every type. tests/closedAddressAudienceF1 asserts every template type is
+// classified exactly once.
+// Ledger #430 P3-1 / CAROLINA-430 #10: by_address (the address is held by a
+// closed or DEACTIVATED login and no live login there holds it) takes the
+// same record-type exemption. Deactivation keeps the login's address, so
+// without it a donation receipt, gift notice or serving reminder to a member
+// or donor record sharing that address was refused, sent immediately or from
+// the queue. Login-addressed and unknown types to that address are still
+// refused, and so is anything addressed to the deactivated login's id.
 export const RECORD_ADDRESSED_TYPES = new Set([
   'donation_receipt', 'recurring_gift_needs_attention', 'recurring_gift_stopped',
   'event_assignment_added', 'assignment_reminder', 'weekly_serving_digest',
@@ -102,12 +109,14 @@ export const REFUSAL_REASONS = {
 
 // Returns the first matching refusal rule's reason text, or null.
 export async function recipientRefusal({ organizationId, userId, recipient, scheduledId = null, notification_type = null }) {
-  const formerApplies = !RECORD_ADDRESSED_TYPES.has(notification_type)
+  // Address-matched rules (by_address, by_former_address) apply to every
+  // type except record-addressed ones; an unknown or missing type fails closed.
+  const addressRulesApply = !RECORD_ADDRESSED_TYPES.has(notification_type)
   const { rows } = await pool.query(
     `SELECT
        EXISTS (SELECT 1 FROM ochr_users u WHERE u.id = $2
                  AND (u.closed_at IS NOT NULL OR u.deactivated_at IS NOT NULL)) AS by_id,
-       ($3::text IS NOT NULL
+       ($5::boolean AND $3::text IS NOT NULL
         AND EXISTS (SELECT 1 FROM ochr_users u WHERE u.organization_id = $1
                       AND ${sqlNormEmail('u.email')} = ${sqlNormEmail('$3::text')}
                       AND (u.closed_at IS NOT NULL OR u.deactivated_at IS NOT NULL))
@@ -122,7 +131,7 @@ export async function recipientRefusal({ organizationId, userId, recipient, sche
                       AND u.closed_at IS NULL AND u.deactivated_at IS NULL)) AS by_former_address,
        ($4::int IS NOT NULL AND NOT EXISTS (SELECT 1 FROM ochr_scheduled_notifications q
                       WHERE q.id = $4 AND q.organization_id = $1 AND q.status = 'processing')) AS row_withdrawn`,
-    [organizationId, userId ?? null, recipient ?? null, scheduledId, formerApplies])
+    [organizationId, userId ?? null, recipient ?? null, scheduledId, addressRulesApply])
   for (const k of ['by_id', 'by_address', 'by_former_address', 'row_withdrawn']) {
     if (rows[0][k]) return REFUSAL_REASONS[k]
   }

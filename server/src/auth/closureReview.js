@@ -12,6 +12,7 @@ export async function closureReviewReport(client, organizationId, userId) {
             '', 'Created user', 'Updated user', 'Deleted user',
             'Created user #' || $2, 'Updated user #' || $2, 'Deleted user #' || $2,
             'Closed login #' || $2, 'Closed own login #' || $2,
+            'Deleted own login #' || $2,
             'Closed login #' || $2 || ' (already closed)',
             'Closed own login #' || $2 || ' (already closed)',
             'Turned login off #' || $2, 'Turned own login off #' || $2,

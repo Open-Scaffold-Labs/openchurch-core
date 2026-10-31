@@ -166,7 +166,7 @@ export default function InvoicePrint() {
 
             {inv.payments.filter(p => !p.refunded_at).length > 0 && (
               <section className="mb-8 text-xs text-ink-600">
-                <p className="font-semibold uppercase tracking-widest text-[10px] text-ink-500 mb-1">{t('bil.payments')}</p>
+                <p className="font-semibold uppercase tracking-widest text-[11px] text-ink-500 mb-1">{t('bil.payments')}</p>
                 {inv.payments.filter(p => !p.refunded_at).map(p => (
                   <p key={p.id}>
                     {money(p.amount, unavailable)} · {t(`bil.method.${p.method}`)}{p.is_deposit ? ` · ${t('bil.deposit')}` : ''} · {fmtDate(p.received_at, { month: 'long', day: 'numeric', year: 'numeric' })}

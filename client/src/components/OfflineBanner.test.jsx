@@ -110,3 +110,26 @@ describe('OfflineBanner chrome is offline-honest (OC-READY-01-024)', () => {
     expect(STRINGS.es['offline.banner']).not.toMatch(CACHED_DATA_CLAIM)
   })
 })
+
+describe('back online (V1.5, study #13)', () => {
+  it('after an outage the bar says it is back, then leaves on its own', async () => {
+    vi.useFakeTimers()
+    try {
+      render(<LocaleProvider><OfflineBanner /></LocaleProvider>)
+      expect(screen.queryByRole('status')).not.toBeInTheDocument()
+      await act(async () => { window.dispatchEvent(new Event('offline')) })
+      expect(screen.getByRole('status')).toHaveTextContent(/you're offline/i)
+      await act(async () => { window.dispatchEvent(new Event('online')) })
+      expect(screen.getByRole('status')).toHaveTextContent(/back online/i)
+      await act(async () => { vi.advanceTimersByTime(2100) })
+      await act(async () => { vi.runAllTimers() })
+      expect(screen.queryByText(/back online/i)).not.toBeInTheDocument()
+    } finally { vi.useRealTimers() }
+  })
+
+  it('CONTROL: a page that loads online never says it is back', async () => {
+    render(<LocaleProvider><OfflineBanner /></LocaleProvider>)
+    await act(async () => { window.dispatchEvent(new Event('online')) })
+    expect(screen.queryByText(/back online/i)).not.toBeInTheDocument()
+  })
+})

@@ -3,6 +3,7 @@
 // save shows its inline message and NO toast. The toast confirms the write
 // only; it fires before the reload and never claims the list refreshed.
 import { ToastProvider } from '../components/ToastProvider'
+import { ConfirmProvider } from '../components/ConfirmProvider'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
@@ -31,7 +32,7 @@ function stub({ write = (init) => ok({ id: 99 }, init.method === 'POST' ? 201 : 
   }))
   return calls
 }
-const book = () => render(<MemoryRouter initialEntries={['/mass-intentions']}><LocaleProvider><Routes><Route path="/mass-intentions" element={<ToastProvider><MassIntentions /></ToastProvider>} /></Routes></LocaleProvider></MemoryRouter>)
+const book = () => render(<MemoryRouter initialEntries={['/mass-intentions']}><LocaleProvider><Routes><Route path="/mass-intentions" element={<ToastProvider><ConfirmProvider><MassIntentions /></ConfirmProvider></ToastProvider>} /></Routes></LocaleProvider></MemoryRouter>)
 
 async function addAndSave(L = STRINGS.en) {
   fireEvent.click(await screen.findByRole('button', { name: new RegExp(L['mi.add'], 'i') }))

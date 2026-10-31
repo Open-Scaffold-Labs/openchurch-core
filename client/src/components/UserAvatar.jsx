@@ -32,7 +32,7 @@ export default function UserAvatar({
       className={`${className} ${textClassName} rounded-full bg-church-900 dark:bg-brass-200 flex items-center justify-center text-brass-200 dark:text-church-900 font-bold shadow-warm shrink-0`}
       aria-hidden="true"
     >
-      {initials(name) || 'OC'}
+      {initials(name) || '·'}
     </div>
   )
 }

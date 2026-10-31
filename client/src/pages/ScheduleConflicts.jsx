@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { AlertTriangle, Loader2, CheckCircle2, Calendar } from 'lucide-react'
 import { apiUrl } from '../api'
-import PageWrapper from '../components/PageWrapper'
+import PageWrapper, { PageHeader } from '../components/PageWrapper'
 import EmptyState from '../components/EmptyState'
 import { useLocale } from '../i18n'
 import { formatStoredDate, parseStoredDate } from '../utils/dates'
@@ -111,17 +111,10 @@ export default function ScheduleConflicts() {
   const weekKeys = Array.from(byWeek.keys()).sort()
 
   return (
-    <PageWrapper>
+    <PageWrapper type="list">
       <div className="max-w-4xl mx-auto p-4 md:p-6 space-y-5">
         <div className="flex items-start justify-between gap-4 flex-wrap">
-          <div className="min-w-0">
-            <h1 className="text-2xl md:text-3xl font-display text-ink-900 dark:text-parchment-50">
-              {t('conflicts.title')}
-            </h1>
-            <p className="text-sm text-ink-500 dark:text-parchment-300/70 mt-1">
-              {lead(t, weeks)}
-            </p>
-          </div>
+          <PageHeader title={t('conflicts.title')} subtitle={lead(t, weeks)} />
           <div className="flex items-center gap-1">
             {WEEK_OPTIONS.map(n => (
               <button
@@ -186,7 +179,7 @@ export default function ScheduleConflicts() {
                             <p className="text-sm font-semibold text-ink-900 dark:text-parchment-50 mt-0.5">
                               {c.members.map(m => m.name).join(', ')}
                               <span className="font-normal text-ink-500 dark:text-parchment-300/70">
-                                {' '}— double-booked
+                                {' '}{t('conflicts.doubleBooked')}
                               </span>
                             </p>
                             <ul className="mt-2 space-y-1">

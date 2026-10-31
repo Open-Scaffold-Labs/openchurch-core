@@ -1,8 +1,10 @@
 import { viewerMayOpen } from './auth/viewerPages'
-import { BrowserRouter, Routes, Route, NavLink, useNavigate, Navigate, useLocation } from 'react-router-dom'
-import { useRef, useState, useEffect, lazy, Suspense } from 'react'
+import { BrowserRouter, Routes, Route, NavLink, useNavigate, Navigate, useLocation, matchPath } from 'react-router-dom'
+import NotFound from './pages/NotFound'
+import { useCallback, useRef, useState, useEffect, useId, lazy, Suspense } from 'react'
+import useDialogFocus from './components/useDialogFocus'
 import { Users, Calendar, DollarSign, Heart, CheckSquare, Clock, Search, Bell, Sun, Moon, LayoutDashboard, LogOut, Settings, User, ChevronDown, ChevronsLeft, ChevronsRight, Loader2, Feather, Shield, CreditCard, ScrollText, SlidersHorizontal, BookOpen, Building2, BarChart3, FileText, UserCheck, Menu, Newspaper, ListMusic, Church, Flame, MessageCircle, Landmark, HelpCircle, LifeBuoy, ArchiveRestore, HandCoins, PackageOpen, Compass } from 'lucide-react'
-import { AlertTriangle } from 'lucide-react'
+import { AlertTriangle, X } from 'lucide-react'
 import { Users2 } from 'lucide-react'
 import FeedbackModal from './components/FeedbackModal'
 import OpenMark from './components/OpenMark'
@@ -17,11 +19,19 @@ import { apiUrl } from './api'
 import GlobalSearchPalette from './components/GlobalSearchPalette'
 import InstallPrompt from './components/InstallPrompt'
 import OfflineBanner from './components/OfflineBanner'
+import NativeShellGate from './native/NativeShellGate'
+import { NativeAiProvider, useNativeAi } from './native/NativeAiContext'
+import { AiSurfaceGate } from './native/AiConsentScreen'
+import { navItemVisible } from './native/aiGate'
+import { navItemOfferedInShell } from './native/planPurchase'
+import { isNativeShell } from './native/nativeShell'
 import UpdatePrompt from './components/UpdatePrompt'
 import PageErrorBoundary from './components/PageErrorBoundary'
 import SessionUnconfirmed from './components/SessionUnconfirmed'
 import UserAvatar from './components/UserAvatar'
 import { mutate, loadList } from './utils/format'
+import { motion } from 'framer-motion'
+import { EASE_SETTLE, menuMotion } from './utils/motion'
 
 // Route-split pages (POL.1). Each becomes its own chunk via React.lazy,
 // so the initial download is the shell + the current route — not all 36
@@ -30,6 +40,8 @@ import { mutate, loadList } from './utils/format'
 // chunk fetch.
 const Clients = lazy(() => import('./pages/Clients'))
 const Events = lazy(() => import('./pages/Events'))
+const HallBookings = lazy(() => import('./pages/HallBookings'))
+const SignHallAgreement = lazy(() => import('./pages/SignHallAgreement'))
 const Schedule = lazy(() => import('./pages/Schedule'))
 const ScheduleConflicts = lazy(() => import('./pages/ScheduleConflicts'))
 const Groups = lazy(() => import('./pages/Groups'))
@@ -39,21 +51,27 @@ const MemberOutreachUnbuilt = lazy(() =>
 const Tasks = lazy(() => import('./pages/Tasks'))
 const Payroll = lazy(() => import('./pages/Payroll'))
 const Finance = lazy(() => import('./pages/Finance'))
+const FinanceCutover = lazy(() => import('./pages/FinanceCutover'))
 const Donations = lazy(() => import('./pages/Donations'))
 const GivingStatements = lazy(() => import('./pages/GivingStatements'))
 const DonorStatement = lazy(() => import('./pages/DonorStatement'))
 const OrgSettings = lazy(() => import('./pages/OrgSettings'))
+const SitePublish = lazy(() => import('./pages/SitePublish'))
 const Insights = lazy(() => import('./pages/Insights'))
 const MemberDetail = lazy(() => import('./pages/MemberDetail'))
 const SacramentRecord = lazy(() => import('./pages/SacramentRecord'))
 const PublicEvents = lazy(() => import('./pages/PublicEvents'))
 const PublicChurch = lazy(() => import('./pages/PublicChurch'))
+// Stage 11 private preview: only a build with VITE_OC_PREVIEW=1 registers it.
+const PREVIEW_ENABLED = import.meta.env.VITE_OC_PREVIEW === '1'
+const PreviewOverview = PREVIEW_ENABLED ? lazy(() => import('./pages/PreviewOverview')) : null
 const PublicGive = lazy(() => import('./pages/PublicGive'))
 const PublicForm = lazy(() => import('./pages/PublicForm'))
 const PublicSwap = lazy(() => import('./pages/PublicSwap'))
 const Kiosk = lazy(() => import('./pages/Kiosk'))
 const Pledges = lazy(() => import('./pages/Pledges'))
 const Offerings = lazy(() => import('./pages/Offerings'))
+const DepositsHeld = lazy(() => import('./pages/DepositsHeld'))
 const InvoicePrint = lazy(() => import('./pages/InvoicePrint'))
 const MigrationStudio = lazy(() => import('./pages/MigrationStudio'))
 const ImportReceipt = lazy(() => import('./pages/ImportReceipt'))
@@ -65,6 +83,8 @@ const Signup = lazy(() => import('./pages/Signup'))
 const Welcome = lazy(() => import('./pages/Welcome'))
 const ForgotPassword = lazy(() => import('./pages/ForgotPassword'))
 const ResetPassword = lazy(() => import('./pages/ResetPassword'))
+const Contact = lazy(() => import('./pages/Contact'))
+const Privacy = lazy(() => import('./pages/Privacy'))
 const Team = lazy(() => import('./pages/Team'))
 const Billing = lazy(() => import('./pages/Billing'))
 const Audit = lazy(() => import('./pages/Audit'))
@@ -128,6 +148,7 @@ const NAV_ITEMS = [
   { to: '/service-planner', icon: ListMusic, label: 'Worship',    section: 'Pastoral' },
   { to: '/schedule/conflicts', icon: AlertTriangle, label: 'Conflicts', section: 'Pastoral', adminOnly: true },
   { to: '/events',    icon: Clock,         label: 'Events',      section: 'Pastoral' },
+  { to: '/hall',      icon: Church,        label: 'Hall',        section: 'Pastoral' },
   { to: '/tasks',     icon: CheckSquare,   label: 'Daily Tasks', section: 'Pastoral' },
   { to: '/forms',     icon: FileText,      label: 'Forms',       section: 'Pastoral', adminOnly: true },
   { to: '/bulletin',  icon: Newspaper,     label: 'Bulletin',    section: 'Pastoral', adminOnly: true },
@@ -173,11 +194,22 @@ const NAV_ITEMS = [
 // Returns NAV_ITEMS filtered by the current user's role. adminOnly
 // items are hidden for staff/viewer; affiliatedOnly items are hidden
 // until this parish actually has a live diocese affiliation.
-function visibleNavFor(role, affiliated) {
-  return NAV_ITEMS.filter(item =>
+export function visibleNavFor(role, affiliated, kind = 'web') {
+  // SP-290: Viewers may SEE Mass Intentions (José Oct 28) via the weekly
+  // sheet. The book editor stays closed; rewrite the Intentions nav target
+  // before the Viewer allow-list filter so the link appears.
+  const items = NAV_ITEMS.map(item =>
+    role === 'viewer' && item.to === '/mass-intentions'
+      ? { ...item, to: '/mass-intentions/print' }
+      : item
+  )
+  return items.filter(item =>
     (!item.adminOnly || role === 'admin') && (!item.affiliatedOnly || affiliated)
     // SP-021: a Viewer's sidebar lists only the pages their role can read.
-    && (role !== 'viewer' || viewerMayOpen(item.to)))
+    && (role !== 'viewer' || viewerMayOpen(item.to))
+    && navItemVisible(item, kind)
+    // C2: the iOS app is a free companion app, so no Billing link.
+    && navItemOfferedInShell(item, kind !== 'web' || isNativeShell()))
 }
 
 // Bucket nav items into sections preserving NAV_ITEMS order. Items
@@ -212,10 +244,22 @@ function BrandMark() {
 // rail state, labels + section headings + the legal footer are
 // hidden, icons center, and nav items carry a native `title` tooltip
 // so the destination is still discoverable on hover.
-export function Sidebar({ collapsed: collapsedProp, onToggle, mobileOpen }) {
+// Keyboard contract of the open mobile drawer: focus moves in, Tab wraps
+// inside it, Escape closes it, and focus returns to the hamburger. Mounted
+// only while the drawer is a modal (below md and open), so the docked
+// desktop sidebar is never a focus trap.
+function DrawerFocus({ panelRef, onClose }) {
+  useDialogFocus(panelRef, onClose)
+  return null
+}
+
+export const SIDEBAR_ID = 'app-sidebar'
+
+export function Sidebar({ collapsed: collapsedProp, onToggle, mobileOpen, onClose }) {
   const { dark, toggle } = useTheme()
   const { user } = useAuth()
   const { t } = useLocale()
+  const { kind: nativeAiKind } = useNativeAi()
   // One cheap read, cached for the session: does this parish have a live
   // diocese? Failure is treated as "no" — a missing nav item is a smaller
   // wrong than a nav item leading to an empty page.
@@ -232,7 +276,7 @@ export function Sidebar({ collapsed: collapsedProp, onToggle, mobileOpen }) {
       .catch(() => {})
     return () => { alive = false }
   }, [viewerRole])
-  const items = visibleNavFor(user?.role, affiliated)
+  const items = visibleNavFor(user?.role, affiliated, nativeAiKind)
 
   // POL.4 — below md the sidebar is an off-canvas drawer, so the
   // desktop "rail" (collapsed) mode never applies there: a narrow rail
@@ -248,6 +292,13 @@ export function Sidebar({ collapsed: collapsedProp, onToggle, mobileOpen }) {
     return () => mq.removeEventListener('change', onChange)
   }, [])
   const collapsed = collapsedProp && !isMobile
+  // Below md the drawer is either a modal (open) or off-screen (closed).
+  // Off-screen it is inert, so Tab no longer walks through ~30 invisible
+  // links; open, it is a labelled modal dialog with a focus trap
+  // (App Review finding 6).
+  const asideRef = useRef(null)
+  const drawerModal = isMobile && !!mobileOpen
+  const drawerHidden = isMobile && !mobileOpen
 
   // Feedback & Support — a gated, in-app line to the founder (FB.1).
   const [feedbackOpen, setFeedbackOpen] = useState(false)
@@ -259,7 +310,28 @@ export function Sidebar({ collapsed: collapsedProp, onToggle, mobileOpen }) {
   }`
 
   return (
-    <aside className={`${collapsed ? 'w-16' : 'w-60'} ${mobileOpen ? 'translate-x-0' : '-translate-x-full'} md:translate-x-0 flex flex-col safe-pt safe-pb fixed inset-y-0 left-0 z-30 bg-parchment-100 dark:bg-ink-900 border-r border-parchment-300/60 dark:border-brass-900/30 transition-[width,transform] duration-200 ease-out print:hidden`}>
+    <aside
+      id={SIDEBAR_ID}
+      ref={asideRef}
+      role={drawerModal ? 'dialog' : undefined}
+      aria-modal={drawerModal ? 'true' : undefined}
+      aria-label={drawerModal ? t('shell.navDrawer') : undefined}
+      inert={drawerHidden ? true : undefined}
+      className={`${collapsed ? 'w-16' : 'w-60'} ${mobileOpen ? 'translate-x-0' : '-translate-x-full'} md:translate-x-0 flex flex-col safe-pt safe-pb fixed inset-y-0 left-0 z-30 bg-parchment-100 dark:bg-ink-900 border-r border-parchment-300/60 dark:border-brass-900/30 transition-[width,transform] duration-200 ease-out print:hidden`}
+    >
+      {drawerModal && onClose && <DrawerFocus panelRef={asideRef} onClose={onClose} />}
+      {/* A visible way out for touch and screen-reader users; the backdrop
+          is aria-hidden and Escape needs a keyboard. */}
+      {drawerModal && onClose && (
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label={t('shell.closeNav')}
+          className="tap md:hidden absolute top-3 right-2 z-10 inline-flex items-center justify-center p-2 rounded-lg text-ink-500 dark:text-parchment-300/70 hover:bg-parchment-200/60 dark:hover:bg-ink-800/80 transition-colors"
+        >
+          <X size={18} aria-hidden="true" />
+        </button>
+      )}
       {/* Wordmark — mark only when collapsed, mark + text when open */}
       <NavLink
         to="/"
@@ -279,11 +351,13 @@ export function Sidebar({ collapsed: collapsedProp, onToggle, mobileOpen }) {
       </NavLink>
 
       {/* Nav */}
-      <nav className={`flex-1 py-4 overflow-y-auto overflow-x-hidden ${collapsed ? 'px-2' : 'px-3'}`}>
+      {/* layoutScroll: the nav scrolls, so the gliding marker below must
+          measure inside it (V1.3). */}
+      <motion.nav layoutScroll className={`flex-1 py-4 overflow-y-auto overflow-x-hidden ${collapsed ? 'px-2' : 'px-3'}`}>
         {groupNavBySection(items).map((group, gIdx) => (
           <div key={group.section ?? '__top__'} className={gIdx === 0 ? '' : 'mt-5'}>
             {group.section && !collapsed && (
-              <p className="px-3 mb-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-500 dark:text-parchment-300/60">
+              <p className="px-3 mb-1.5 text-[11px] font-semibold uppercase tracking-[0.14em] text-ink-500 dark:text-parchment-300/60">
                 {t(`navsec.${group.section}`)}
               </p>
             )}
@@ -305,19 +379,34 @@ export function Sidebar({ collapsed: collapsedProp, onToggle, mobileOpen }) {
                       collapsed ? 'justify-center px-0 py-2.5' : 'gap-3 px-3 py-2.5'
                     } ${
                       isActive
-                        ? 'bg-parchment-50 dark:bg-ink-800 text-church-900 dark:text-parchment-50 shadow-warm before:absolute before:left-0 before:top-1/2 before:-translate-y-1/2 before:w-[3px] before:h-5 before:rounded-r-full before:bg-brass-500'
+                        ? 'text-church-900 dark:text-parchment-50'
                         : 'text-ink-600 dark:text-parchment-200/70 hover:bg-parchment-200/60 dark:hover:bg-ink-800/60 hover:text-ink-900 dark:hover:text-parchment-50'
                     }`
                   }
                 >
-                  {to === '/' ? <BrandMark /> : <Icon size={17} />}
-                  {!collapsed && <span className="flex-1">{t(`nav.${label}`)}</span>}
+                  {({ isActive }) => (
+                    <>
+                      {/* One marker for the whole sidebar: the parchment pill
+                          and brass bar glide to the page you chose instead of
+                          jumping (V1.3, motion study #10). */}
+                      {isActive && (
+                        <motion.span
+                          layoutId="nav-active-marker"
+                          aria-hidden="true"
+                          transition={{ duration: 0.22, ease: EASE_SETTLE }}
+                          className="absolute inset-0 rounded-lg bg-parchment-50 dark:bg-ink-800 shadow-warm before:absolute before:left-0 before:top-1/2 before:-translate-y-1/2 before:w-[3px] before:h-5 before:rounded-r-full before:bg-brass-500"
+                        />
+                      )}
+                      <span className="relative flex items-center">{to === '/' ? <BrandMark /> : <Icon size={17} />}</span>
+                      {!collapsed && <span className="relative flex-1">{t(`nav.${label}`)}</span>}
+                    </>
+                  )}
                 </NavLink>
               ))}
             </div>
           </div>
         ))}
-      </nav>
+      </motion.nav>
 
       {/* Feedback & Support + collapse toggle + theme toggle + legal footer */}
       <div className={`py-4 border-t border-parchment-300/60 dark:border-brass-900/30 ${collapsed ? 'px-2' : 'px-3'}`}>
@@ -362,7 +451,7 @@ export function Sidebar({ collapsed: collapsedProp, onToggle, mobileOpen }) {
             single most repeated contrast failure in the app. /70 is 5.74:1
             and still reads as quiet legal small print. */}
         {!collapsed && (
-          <p className="px-3 mt-3 text-[10px] leading-relaxed text-ink-500 dark:text-parchment-300/70">
+          <p className="px-3 mt-3 text-[11px] leading-relaxed text-ink-500 dark:text-parchment-300/70">
             © {new Date().getFullYear()} Open Scaffold Labs, LLC
             <br />
             Lafayette, California
@@ -375,7 +464,7 @@ export function Sidebar({ collapsed: collapsedProp, onToggle, mobileOpen }) {
   )
 }
 
-export function Header({ onMenuClick }) {
+export function Header({ onMenuClick, menuOpen = false }) {
   const { t } = useLocale()
   const [open, setOpen] = useState(false)
   const [helpOpen, setHelpOpen] = useState(false)
@@ -424,7 +513,7 @@ export function Header({ onMenuClick }) {
   // legacy rows with no `type`) goes to /tasks.
   function openNotification(n) {
     markRead(n.id)
-    const path = n.type === 'event' ? '/events' : '/tasks'
+    const path = n.type === 'event' ? '/events' : n.type === 'cash_count_void_request' ? '/donations' : '/tasks'
     navigate(path)
     setOpen(false)
   }
@@ -483,6 +572,8 @@ export function Header({ onMenuClick }) {
           type="button"
           onClick={onMenuClick}
           aria-label={t('shell.openNav')}
+          aria-expanded={menuOpen}
+          aria-controls={SIDEBAR_ID}
           className="tap md:hidden -ml-1 shrink-0 inline-flex items-center justify-center p-2 rounded-lg text-ink-500 dark:text-parchment-300/70 hover:bg-parchment-200/60 dark:hover:bg-ink-800/80 transition-colors"
         >
           <Menu size={18} />
@@ -498,7 +589,7 @@ export function Header({ onMenuClick }) {
           <Search size={14} className="shrink-0" />
           <span className="text-sm flex-1 text-left hidden sm:inline">{t('shell.search')}</span>
           <span className="text-sm flex-1 text-left sm:hidden">{t('shell.searchShort')}</span>
-          <kbd className="hidden md:inline px-1.5 py-0.5 rounded border border-parchment-300 dark:border-brass-900/40 bg-parchment-100 dark:bg-ink-900 font-mono text-[10px] text-ink-500 dark:text-parchment-300/70">
+          <kbd className="hidden md:inline px-1.5 py-0.5 rounded border border-parchment-300 dark:border-brass-900/40 bg-parchment-100 dark:bg-ink-900 font-mono text-[11px] text-ink-500 dark:text-parchment-300/70">
             ⌘K
           </kbd>
         </button>
@@ -533,7 +624,7 @@ export function Header({ onMenuClick }) {
           >
             <Bell size={18} aria-hidden="true" />
             {unread > 0 && (
-              <span className="absolute top-1 right-1 min-w-[16px] h-4 px-1 bg-brass-500 text-church-900 text-[9px] font-bold rounded-full flex items-center justify-center leading-none">
+              <span className="absolute top-1 right-1 min-w-[16px] h-4 px-1 bg-brass-500 text-church-900 text-[11px] font-bold rounded-full flex items-center justify-center leading-none">
                 {unread > 9 ? '9+' : unread}
               </span>
             )}
@@ -548,7 +639,11 @@ export function Header({ onMenuClick }) {
             // dark its hue is imperceptible and reads cool next to the
             // burgundy + brass chrome. This tone is lighter AND warmer
             // so the panel clearly reads as a warm elevated surface.
-            <div className="absolute right-0 mt-2 w-80 bg-parchment-50 dark:bg-[#322920] border border-parchment-300/60 dark:border-brass-900/30 rounded-xl shadow-warm-lg overflow-hidden z-50">
+            <motion.div
+              initial={menuMotion.initial}
+              animate={menuMotion.animate}
+              className="absolute right-0 mt-2 w-80 bg-parchment-50 dark:bg-[#322920] border border-parchment-300/60 dark:border-brass-900/30 rounded-xl shadow-warm-lg overflow-hidden z-50"
+            >
               {/* Notifications section */}
               <div className="flex items-center justify-between px-4 py-2.5 border-b border-parchment-300/60 dark:border-brass-900/30">
                 <p className="text-xs font-semibold text-ink-500 dark:text-parchment-300/70 uppercase tracking-wider">
@@ -577,6 +672,7 @@ export function Header({ onMenuClick }) {
                 <ul className="max-h-56 overflow-y-auto divide-y divide-parchment-200/60 dark:divide-brass-900/25">
                   {notifications.slice(0, 8).map(n => {
                     const isEvent = n.type === 'event'
+                    const isCashVoid = n.type === 'cash_count_void_request'
                     const TypeIcon = isEvent ? Clock : CheckSquare
                     return (
                       <li key={n.id}
@@ -588,9 +684,9 @@ export function Header({ onMenuClick }) {
                           <p className={`text-xs leading-relaxed ${n.read ? 'text-ink-500 dark:text-parchment-300/60' : 'text-ink-800 dark:text-parchment-100 font-medium'}`}>
                             {n.message}
                           </p>
-                          <p className="flex items-center gap-1.5 text-[10px] text-ink-400 dark:text-parchment-400/50 mt-0.5">
+                          <p className="flex items-center gap-1.5 text-[11px] text-ink-400 dark:text-parchment-400/50 mt-0.5">
                             <TypeIcon size={10} className={isEvent ? 'text-church-700 dark:text-brass-300' : 'text-ink-400 dark:text-parchment-400/60'} />
-                            <span>{isEvent ? t('shell.notif.event') : t('shell.notif.task')}</span>
+                            <span>{isEvent ? t('shell.notif.event') : isCashVoid ? t('shell.notif.cashVoid') : t('shell.notif.task')}</span>
                             <span>·</span>
                             <span>{timeAgo(n.created_at)}</span>
                           </p>
@@ -601,7 +697,7 @@ export function Header({ onMenuClick }) {
                 </ul>
               )}
 
-            </div>
+            </motion.div>
           )}
         </div>
         <ProfileDropdown />
@@ -630,6 +726,9 @@ function ProfileDropdown() {
   const [open, setOpen] = useState(false)
   const [stats, setStats] = useState({ members: null, events: null, tasks: null })
   const ref = useRef(null)
+  const triggerRef = useRef(null)
+  const panelRef = useRef(null)
+  const panelId = useId()
   const { dark, toggle } = useTheme()
   const { user, logout } = useAuth()
   const navigate = useNavigate()
@@ -652,6 +751,33 @@ function ProfileDropdown() {
     document.addEventListener('mousedown', handleClickOutside)
     return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [])
+
+  // Focus management (App Review finding 8): opening moves focus to the
+  // first control in the panel, Escape closes it and returns focus to the
+  // avatar button, and tabbing out of the panel closes it so it never
+  // lingers over the page behind a keyboard user.
+  useEffect(() => {
+    if (!open) return
+    panelRef.current?.querySelector('button, a[href]')?.focus()
+  }, [open])
+
+  function closeToTrigger() {
+    setOpen(false)
+    triggerRef.current?.focus()
+  }
+
+  function onMenuKeyDown(e) {
+    if (e.key === 'Escape' && open) {
+      e.stopPropagation()
+      closeToTrigger()
+    }
+  }
+
+  function onMenuBlur(e) {
+    // relatedTarget is null when a click lands on non-focusable chrome
+    // (and on Safari, on buttons). Only a real focus move elsewhere closes.
+    if (open && e.relatedTarget && ref.current && !ref.current.contains(e.relatedTarget)) setOpen(false)
+  }
 
   // Load counts whenever the dropdown opens (fresh without being wasteful).
   useEffect(() => {
@@ -680,11 +806,14 @@ function ProfileDropdown() {
   const fmt = (n) => n == null ? '—' : n
 
   return (
-    <div className="relative" ref={ref}>
+    <div className="relative" ref={ref} onKeyDown={onMenuKeyDown} onBlur={onMenuBlur}>
       <button
+        type="button"
+        ref={triggerRef}
         onClick={() => setOpen(o => !o)}
         aria-label={t('shell.account.menu', { name: displayName })}
         aria-expanded={open}
+        aria-controls={open ? panelId : undefined}
         className="tap flex items-center gap-2 p-1 pr-2 rounded-lg hover:bg-parchment-200/60 dark:hover:bg-ink-800 transition-colors"
       >
         <UserAvatar avatar={user?.avatar} name={displayName} className="w-8 h-8" textClassName="text-xs" />
@@ -692,7 +821,7 @@ function ProfileDropdown() {
       </button>
 
       {open && (
-        <div className="absolute right-0 mt-2 w-72 bg-parchment-50 dark:bg-ink-900 border border-parchment-300/60 dark:border-brass-900/30 rounded-xl shadow-warm-lg overflow-hidden z-50">
+        <div id={panelId} ref={panelRef} className="absolute right-0 mt-2 w-72 bg-parchment-50 dark:bg-ink-900 border border-parchment-300/60 dark:border-brass-900/30 rounded-xl shadow-warm-lg overflow-hidden z-50">
           {/* Profile header */}
           <div className="px-4 py-4 border-b border-parchment-300/60 dark:border-brass-900/30">
             <div className="flex items-center gap-3">
@@ -703,7 +832,7 @@ function ProfileDropdown() {
               </div>
             </div>
             <div className="flex items-center gap-2 mt-2">
-              <span className="inline-block px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider rounded-full bg-church-50 text-church-900 dark:bg-church-900/30 dark:text-brass-200">
+              <span className="inline-block px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wider rounded-full bg-church-50 text-church-900 dark:bg-church-900/30 dark:text-brass-200">
                 {displayRole}
               </span>
               <span className="text-[11px] text-ink-500 dark:text-parchment-300/70 truncate">{orgName}</span>
@@ -714,15 +843,15 @@ function ProfileDropdown() {
           <div className="grid grid-cols-3 divide-x divide-parchment-300/60 dark:divide-brass-900/30 border-b border-parchment-300/60 dark:border-brass-900/30">
             <button onClick={() => { navigate('/clients'); setOpen(false) }} className="px-3 py-3 text-center hover:bg-parchment-100 dark:hover:bg-ink-800/60 transition-colors cursor-pointer">
               <p className="text-sm font-bold text-ink-900 dark:text-parchment-50">{fmt(stats.members)}</p>
-              <p className="text-[10px] text-ink-500 dark:text-parchment-300/70 uppercase tracking-wider">{t('dash.glance.members')}</p>
+              <p className="text-[11px] text-ink-500 dark:text-parchment-300/70 uppercase tracking-wider">{t('dash.glance.members')}</p>
             </button>
             <button onClick={() => { navigate('/events'); setOpen(false) }} className="px-3 py-3 text-center hover:bg-parchment-100 dark:hover:bg-ink-800/60 transition-colors cursor-pointer">
               <p className="text-sm font-bold text-ink-900 dark:text-parchment-50">{fmt(stats.events)}</p>
-              <p className="text-[10px] text-ink-500 dark:text-parchment-300/70 uppercase tracking-wider">{t('dash.glance.events')}</p>
+              <p className="text-[11px] text-ink-500 dark:text-parchment-300/70 uppercase tracking-wider">{t('dash.glance.events')}</p>
             </button>
             <button onClick={() => { navigate('/tasks'); setOpen(false) }} className="px-3 py-3 text-center hover:bg-parchment-100 dark:hover:bg-ink-800/60 transition-colors cursor-pointer">
               <p className="text-sm font-bold text-ink-900 dark:text-parchment-50">{fmt(stats.tasks)}</p>
-              <p className="text-[10px] text-ink-500 dark:text-parchment-300/70 uppercase tracking-wider">{t('dash.glance.tasks')}</p>
+              <p className="text-[11px] text-ink-500 dark:text-parchment-300/70 uppercase tracking-wider">{t('dash.glance.tasks')}</p>
             </button>
           </div>
 
@@ -790,9 +919,87 @@ function ViewerNotAvailable() {
   )
 }
 
-function ProtectedLayout() {
+// SP-037: Staff (and anyone who is not admin) hitting /finance by URL must
+// not see the money UI. Nav already hides Finance (adminOnly); this is the
+// route gate. Server requireRole('admin') remains the source of truth.
+export function financeRouteNeedsAdmin(pathname) {
+  return pathname === '/finance' || pathname.startsWith('/finance/')
+}
+
+function AdminNotAvailable() {
+  const { t } = useLocale()
+  return (
+    <div role="status" className="max-w-lg mx-auto mt-16 text-center">
+      <h1 className="font-display text-2xl font-semibold text-ink-900 dark:text-parchment-50">{t('fin.adminOnly')}</h1>
+      <p className="mt-2 text-sm text-ink-600 dark:text-parchment-300/80">{t('fin.adminOnlyBody')}</p>
+    </div>
+  )
+}
+
+// SP-135: the signed-in shell's route patterns. A signed-out visit to one of
+// these goes to /login (and returns after sign-in); any other path is a calm
+// 404 instead of a login bounce or a blank page. SaintSp135Routes.test.js
+// keeps this list in step with the <Route>s below.
+export const APP_ROUTE_PATHS = [
+  '/',
+  '/messages',
+  '/clients',
+  '/groups',
+  '/clients/:id',
+  '/events',
+  '/hall',
+  '/schedule',
+  '/checkin',
+  '/schedule/conflicts',
+  '/tasks',
+  '/payroll',
+  '/finance',
+  '/finance/cutover',
+  '/diocese',
+  '/donations',
+  '/donations/statements',
+  '/donations/statements/:donorKey',
+  '/pledges',
+  '/offerings',
+  '/offerings/deposits',
+  '/offerings/:id/print',
+  '/migration',
+  '/migration/:id/receipt',
+  '/forms',
+  '/forms/:id/responses',
+  '/settings',
+  '/settings/site',
+  '/insights',
+  '/ai',
+  '/library',
+  '/bulletin',
+  '/service-planner',
+  '/service-mode/:planId',
+  '/packet',
+  '/register',
+  '/register/drafts',
+  '/admin/workbench',
+  '/register/:id',
+  '/register/:id/certificate',
+  '/mass-intentions',
+  '/mass-intentions/print',
+  '/team',
+  '/billing',
+  '/audit',
+  '/archive',
+  '/getting-settled',
+  '/getting-settled/record',
+  '/support',
+  '/notifications',
+  '/preferences',
+]
+const isAppRoute = pathname => APP_ROUTE_PATHS.some(p => matchPath(p, pathname))
+
+export function ProtectedLayout() {
   const { isAuthenticated, loading, user, authUnavailable } = useAuth()
   const location = useLocation()
+  const { t } = useLocale()
+  const mainRef = useRef(null)
 
   // Multi-tenant title: reflect the signed-in org's name in the browser
   // tab / bookmark once the session is known. Defensive fallback to the
@@ -821,6 +1028,7 @@ function ProtectedLayout() {
   // tapping a nav item doesn't leave the drawer covering the page.
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
   useEffect(() => { setMobileNavOpen(false) }, [location.pathname])
+  const closeMobileNav = useCallback(() => setMobileNavOpen(false), [])
 
   if (loading) {
     return (
@@ -834,16 +1042,30 @@ function ProtectedLayout() {
   // of a 500 from the auth check — and cost her her password to undo it.
   if (authUnavailable) return <SessionUnconfirmed />
   if (!isAuthenticated) {
+    if (!isAppRoute(location.pathname)) {
+      return <main className="min-h-screen bg-parchment-50 dark:bg-ink-950"><NotFound home="/login" /></main>
+    }
     return <Navigate to="/login" replace state={{ from: location }} />
   }
 
   return (
-    // Print overrides (P7): the artifact pages own the printed sheet.
-    // h-screen + overflow-auto would clip a long manifest to one page,
-    // and the sidebar's padding would print the artifact off-center —
-    // in print the shell flattens to a plain full-width flow.
+    <NativeAiProvider>
+    {/* Print overrides (P7): the artifact pages own the printed sheet.
+        h-screen + overflow-auto would clip a long manifest to one page,
+        and the sidebar's padding would print the artifact off-center —
+        in print the shell flattens to a plain full-width flow. */}
     <div className="flex h-screen bg-parchment-50 dark:bg-ink-950 print:block print:h-auto print:bg-white">
-      <Sidebar collapsed={sidebarCollapsed} onToggle={toggleSidebar} mobileOpen={mobileNavOpen} />
+      {/* Skip link (App Review finding 9): the first Tab used to land on
+          the sidebar and the page body was ~39 Tabs away. Hidden until
+          focused; moves focus to <main>. */}
+      <a
+        href="#main-content"
+        onClick={e => { e.preventDefault(); mainRef.current?.focus() }}
+        className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-[60] focus:px-4 focus:py-2 focus:rounded-lg focus:bg-church-900 focus:text-parchment-50 focus:text-sm focus:font-semibold focus:shadow-warm print:hidden"
+      >
+        {t('shell.skipToContent')}
+      </a>
+      <Sidebar collapsed={sidebarCollapsed} onToggle={toggleSidebar} mobileOpen={mobileNavOpen} onClose={closeMobileNav} />
       {/* Backdrop behind the mobile drawer (POL.4). Only rendered on
           mobile when open; tapping it dismisses. Sits below the sidebar
           (z-30) and above the content/header (z-10). */}
@@ -855,16 +1077,18 @@ function ProtectedLayout() {
         />
       )}
       <div className={`flex-1 flex flex-col min-w-0 transition-[padding] duration-200 ease-out pl-0 print:!pl-0 print:block ${sidebarCollapsed ? 'md:pl-16' : 'md:pl-60'}`}>
-        <Header onMenuClick={() => setMobileNavOpen(true)} />
+        <Header onMenuClick={() => setMobileNavOpen(true)} menuOpen={mobileNavOpen} />
         {/* min-w-0: a flex child will not shrink below its content's intrinsic
             width. Defensive hardening so one wide table can never push the
             shell past the viewport again. */}
-        <main className="flex-1 min-w-0 overflow-auto p-4 sm:p-6 print:overflow-visible print:p-0">
+        <main className="oc-fab-clearance flex-1 min-w-0 overflow-auto p-4 sm:p-6 focus:outline-none print:overflow-visible print:p-0" id="main-content" ref={mainRef} tabIndex={-1}>
           {/* Suspense scoped to the content area only — during a lazy
               route's chunk fetch the sidebar + header stay put and just
               the page body shows the spinner (POL.1). */}
           <Suspense fallback={<PageFallback />}>
-          {user?.role === 'viewer' && !viewerMayOpen(location.pathname) ? <ViewerNotAvailable /> : (
+          {user?.role === 'viewer' && !viewerMayOpen(location.pathname) ? <ViewerNotAvailable />
+           : user?.role !== 'admin' && financeRouteNeedsAdmin(location.pathname) ? <AdminNotAvailable />
+           : (
           <Routes>
             {/* Each route is wrapped in a PageErrorBoundary so a render
                 error inside a single page leaves the sidebar + header
@@ -879,12 +1103,14 @@ function ProtectedLayout() {
             <Route path="/groups"    element={<PageErrorBoundary scope="Groups"><Groups /></PageErrorBoundary>} />
             <Route path="/clients/:id" element={<PageErrorBoundary scope="Member profile"><MemberDetail /></PageErrorBoundary>} />
             <Route path="/events"    element={<PageErrorBoundary scope="Events"><Events /></PageErrorBoundary>} />
+            <Route path="/hall"      element={<PageErrorBoundary scope="Hall"><HallBookings /></PageErrorBoundary>} />
             <Route path="/schedule"  element={<PageErrorBoundary scope="Schedule"><Schedule /></PageErrorBoundary>} />
             <Route path="/checkin"   element={<PageErrorBoundary scope="Check-in"><Checkin /></PageErrorBoundary>} />
             <Route path="/schedule/conflicts" element={<PageErrorBoundary scope="Schedule conflicts"><ScheduleConflicts /></PageErrorBoundary>} />
             <Route path="/tasks"     element={<PageErrorBoundary scope="Tasks"><Tasks /></PageErrorBoundary>} />
             <Route path="/payroll"   element={<PageErrorBoundary scope="Payroll"><Payroll /></PageErrorBoundary>} />
             <Route path="/finance"   element={<PageErrorBoundary scope="Finance"><Finance /></PageErrorBoundary>} />
+            <Route path="/finance/cutover" element={<PageErrorBoundary scope="Cutover"><FinanceCutover /></PageErrorBoundary>} />
             {/* DIO.6 — the route exists whether or not the nav shows it, so
                 a bookmarked link still works and an unaffiliated parish gets
                 an explanation rather than a 404. */}
@@ -894,15 +1120,17 @@ function ProtectedLayout() {
             <Route path="/donations/statements/:donorKey" element={<PageErrorBoundary scope="Donor statement"><DonorStatement /></PageErrorBoundary>} />
             <Route path="/pledges"   element={<PageErrorBoundary scope="Pledges"><Pledges /></PageErrorBoundary>} />
             <Route path="/offerings" element={<PageErrorBoundary scope="Offerings"><Offerings /></PageErrorBoundary>} />
+            <Route path="/offerings/deposits" element={<PageErrorBoundary scope="Deposits held"><DepositsHeld /></PageErrorBoundary>} />
             <Route path="/offerings/:id/print" element={<PageErrorBoundary scope="Offerings sheet"><InvoicePrint /></PageErrorBoundary>} />
             <Route path="/migration" element={<PageErrorBoundary scope="Migration Studio"><MigrationStudio /></PageErrorBoundary>} />
             <Route path="/migration/:id/receipt" element={<PageErrorBoundary scope="Import receipt"><ImportReceipt /></PageErrorBoundary>} />
             <Route path="/forms"     element={<PageErrorBoundary scope="Forms"><Forms /></PageErrorBoundary>} />
             <Route path="/forms/:id/responses" element={<PageErrorBoundary scope="Form responses"><FormResponses /></PageErrorBoundary>} />
             <Route path="/settings"  element={<PageErrorBoundary scope="Org settings"><OrgSettings /></PageErrorBoundary>} />
+            <Route path="/settings/site" element={<PageErrorBoundary scope="Parish page"><SitePublish /></PageErrorBoundary>} />
             <Route path="/insights"  element={<PageErrorBoundary scope="Insights"><Insights /></PageErrorBoundary>} />
-            <Route path="/ai"        element={<PageErrorBoundary scope="AI Studio"><AI /></PageErrorBoundary>} />
-            <Route path="/library"   element={<PageErrorBoundary scope="Library"><Library /></PageErrorBoundary>} />
+            <Route path="/ai"        element={<PageErrorBoundary scope="AI Studio"><AiSurfaceGate><AI /></AiSurfaceGate></PageErrorBoundary>} />
+            <Route path="/library"   element={<PageErrorBoundary scope="Library"><AiSurfaceGate><Library /></AiSurfaceGate></PageErrorBoundary>} />
             <Route path="/bulletin"  element={<PageErrorBoundary scope="Bulletin"><Bulletin /></PageErrorBoundary>} />
             <Route path="/service-planner" element={<PageErrorBoundary scope="Service Planner"><ServicePlanner /></PageErrorBoundary>} />
             <Route path="/service-mode/:planId" element={<PageErrorBoundary scope="Service Mode"><ServiceMode /></PageErrorBoundary>} />
@@ -923,6 +1151,8 @@ function ProtectedLayout() {
             <Route path="/support"     element={<PageErrorBoundary scope="Support"><Support /></PageErrorBoundary>} />
             <Route path="/notifications" element={<PageErrorBoundary scope="Notifications"><Notifications /></PageErrorBoundary>} />
             <Route path="/preferences" element={<PageErrorBoundary scope="Preferences"><Preferences /></PageErrorBoundary>} />
+            {/* SP-135: unknown signed-in paths get a calm 404, not a blank page. */}
+            <Route path="*" element={<NotFound home="/" />} />
           </Routes>
           )}
           </Suspense>
@@ -933,6 +1163,7 @@ function ProtectedLayout() {
         <AssistantWidget />
       </Suspense>
     </div>
+    </NativeAiProvider>
   )
 }
 
@@ -983,6 +1214,7 @@ export default function App() {
               Workbox serves cached API data underneath; the banner
               just makes the state visible. */}
           <OfflineBanner />
+          <NativeShellGate />
           {/* Update prompt (PWA.6) — opt-in refresh banner shown when
               vite-plugin-pwa detects a newer build. Pairs with the
               SKIP_WAITING listener in sw.js. */}
@@ -995,7 +1227,15 @@ export default function App() {
             <Route path="/signup"  element={<RedirectIfAuthed><Signup         /></RedirectIfAuthed>} />
             <Route path="/forgot"  element={<RedirectIfAuthed><ForgotPassword /></RedirectIfAuthed>} />
             <Route path="/reset"   element={<RedirectIfAuthed><ResetPassword  /></RedirectIfAuthed>} />
-            <Route path="/welcome" element={<RequireAuth><Welcome /></RequireAuth>} />
+            {/* Public Support / contact (OC-READY-01-007). Logged-out
+                reviewers and parishioners. Does not collide with the
+                authenticated admin ticket queue at /support. */}
+            <Route path="/contact" element={<Contact />} />
+            {/* Public privacy notice SHELL (P1 lane B). Logged-out. Renders a
+                DRAFT marker, not a finished policy: final wording waits for
+                the existing approval gates (docs/app-store/P1-PRIVACY-NOTICE-DRAFT.md). */}
+            <Route path="/privacy" element={<Privacy />} />
+            <Route path="/welcome" element={<RequireAuth><NativeAiProvider><Welcome /></NativeAiProvider></RequireAuth>} />
             {/* Public parishioner-facing routes (Sprint P). No auth, no
                 app shell. Each church gets /p/:slug/events. */}
             <Route path="/p/:slug/events" element={<PublicEvents />} />
@@ -1019,6 +1259,9 @@ export default function App() {
             <Route path="/p/swap/:token"              element={<PublicSwap />} />
             {/* Self-serve check-in kiosk (CHK.7) — token-gated, no login. */}
             <Route path="/kiosk/:token"               element={<Kiosk />} />
+            {/* Hall agreement. The token is the credential. No charge. */}
+            <Route path="/sign/hall/:token"           element={<SignHallAgreement />} />
+            {PREVIEW_ENABLED && <Route path="/preview/overview" element={<PreviewOverview />} />}
             <Route path="/*"       element={<ProtectedLayout />} />
           </Routes>
           </Suspense>

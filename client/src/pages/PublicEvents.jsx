@@ -136,7 +136,7 @@ export default function PublicEvents() {
         className="w-full max-w-2xl mx-auto"
       >
         {/* Brand mark — same one used on auth pages, gives parishioners
-            a quiet 'powered by OpenChurch' confidence cue without
+            a quiet 'powered by ScaffoldLabs' confidence cue without
             screaming SaaS. */}
         <div className="flex items-center justify-center gap-3 mb-8">
           <div className="w-10 h-10 rounded-xl bg-church-900 dark:bg-brass-200 flex items-center justify-center shadow-warm">
@@ -166,6 +166,9 @@ export default function PublicEvents() {
               </p>
               <p className="text-xs text-ink-500 dark:text-parchment-300/70 mt-0.5">
                 {t('events.calendarHelp')}
+              </p>
+              <p className="text-xs text-ink-500 dark:text-parchment-300/70 mt-1">
+                {t('events.calendarSampleNote')}
               </p>
             </div>
             <div className="flex items-center gap-2 shrink-0">

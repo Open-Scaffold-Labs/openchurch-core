@@ -12,7 +12,17 @@ import { storeVerifiedEvent, applyStoredEvent } from '../billing/webhookReceipts
 import { Router } from 'express'
 import express from 'express'
 import pool from '../db.js'
-import { getPlan, PLANS } from '../billing/plans.js'
+import {
+  getPlan,
+  PLANS,
+  PARISH_PRICING_TIERS,
+  PARISH_PRICING_FLOOR_V21,
+  COVER_FEE_DEFAULT_CHECKED,
+  STRIPE_CONNECT_MODE_A0,
+  buildStripeNonprofitAndMcc8398Guide,
+  evaluateParishPricingFloor,
+} from '../billing/plans.js'
+import { isBetaBillingOn, stripPlanAmounts } from '../billing/beta.js'
 import {
   createCheckoutSession,
   createPortalSession,
@@ -24,6 +34,28 @@ const CLIENT_URL = (process.env.CLIENT_URL || 'http://localhost:5202').replace(/
 
 // ── Public router (no auth) ──────────────────────────────────────
 export const publicRouter = Router()
+
+// GET /api/billing/nonprofit-fee-guide & /api/billing/nonprofit-rate-guide
+// Public transparency guide for 501(c)(3) parishes: how to apply directly to
+// Stripe for the 2.2% + 30c Nonprofit Rate (>=80% tax-deductible donations)
+// and MCC 8398 Visa Charity Interchange (1.35% + 5c on OSL Rail B), plus
+// the Published Entry vs $15M+/mo Scale rate comparison.
+function handleNonprofitRateGuide(_req, res) {
+  const benchmark = evaluateParishPricingFloor()
+  res.json({
+    guide: buildStripeNonprofitAndMcc8398Guide(),
+    connect_mode: STRIPE_CONNECT_MODE_A0,
+    cover_fee_default_checked: COVER_FEE_DEFAULT_CHECKED,
+    pricing_approval_status: 'illustrative_unapproved',
+    parish_pricing_tiers: PARISH_PRICING_TIERS,
+    pricing_floor_v21: PARISH_PRICING_FLOOR_V21,
+    parish_pricing_floor_v21: PARISH_PRICING_FLOOR_V21,
+    medium_parish_benchmark: benchmark,
+    sample_500k_parish_model: benchmark,
+  })
+}
+publicRouter.get('/nonprofit-fee-guide', handleNonprofitRateGuide)
+publicRouter.get('/nonprofit-rate-guide', handleNonprofitRateGuide)
 
 // POST /api/billing/webhook
 // Provider posts subscription lifecycle events here (and completed giving
@@ -119,13 +151,23 @@ authRouter.get('/status', async (req, res) => {
     )
     if (!rows.length) return res.status(404).json({ error: 'Organization not found' })
     const o = rows[0]
+    const beta = isBetaBillingOn()
+    const shape = beta ? stripPlanAmounts : (p) => p
     res.json({
       plan:               o.plan || 'free',
-      planDetails:        getPlan(o.plan || 'free'),
+      planDetails:        shape(getPlan(o.plan || 'free')),
       billing_status:     o.billing_status,
       current_period_end: o.current_period_end,
       trial_ends_at:      o.trial_ends_at,
-      availablePlans:     Object.values(PLANS),
+      // SP-186 S4 / R398-2: during the beta no plan tiers (and so no
+      // tier limits) are announced. Enforcement and planDetails unchanged.
+      availablePlans:     beta ? [] : Object.values(PLANS).map(shape),
+      beta_billing:       beta,
+      ...(beta ? {} : { parishPricingTiers: PARISH_PRICING_TIERS }),
+      pricingApprovalStatus: 'illustrative_unapproved',
+      connectMode:        STRIPE_CONNECT_MODE_A0,
+      coverFeeDefaultChecked: COVER_FEE_DEFAULT_CHECKED,
+      nonprofitFeeGuide:  buildStripeNonprofitAndMcc8398Guide({ id: req.organizationId }),
     })
   } catch (err) {
     console.error('billing status failed:', err)
@@ -138,6 +180,8 @@ authRouter.get('/status', async (req, res) => {
 // URL the client should redirect the browser to. Admin-only (gate
 // applied at the app.js mount).
 authRouter.post('/checkout', async (req, res) => {
+  // Open beta: no NEW paid checkouts (R398-1). Portal stays open below.
+  if (isBetaBillingOn()) return res.status(409).json({ error: 'beta_billing_disabled' })
   try {
     const { planId } = req.body ?? {}
     const plan = getPlan(planId)

@@ -9,8 +9,9 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import { Inbox, Loader2, Check, RotateCcw } from 'lucide-react'
-import PageWrapper from '../components/PageWrapper'
+import PageWrapper, { PageHeader } from '../components/PageWrapper'
 import { apiUrl } from '../api'
+import { useLocale } from '../i18n'
 
 const CATEGORY_STYLE = {
   bug:           'bg-rose-50 text-rose-700 dark:bg-rose-950/40 dark:text-rose-300 border-rose-200/60 dark:border-rose-900/40',
@@ -19,6 +20,7 @@ const CATEGORY_STYLE = {
 }
 
 export default function Workbench() {
+  const { t } = useLocale()
   const [rows,    setRows]    = useState([])
   const [filter,  setFilter]  = useState('open')
   const [loading, setLoading] = useState(true)
@@ -65,27 +67,21 @@ export default function Workbench() {
 
   if (error === 'not-found') {
     return (
-      <PageWrapper>
-        <p className="py-24 text-center text-sm text-ink-400 dark:text-parchment-400/60">There's nothing at this address.</p>
+      <PageWrapper type="list">
+        <p className="py-24 text-center text-sm text-ink-400 dark:text-parchment-400/60">{t('wb.notFound')}</p>
       </PageWrapper>
     )
   }
 
   return (
-    <PageWrapper>
+    <PageWrapper type="list">
       <div className="mb-5 flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2">
-          <Inbox size={20} className="text-church-700 dark:text-brass-300" />
-          <div>
-            <h1 className="text-2xl font-display font-bold text-ink-900 dark:text-parchment-50">Workbench</h1>
-            <p className="text-sm text-ink-500 dark:text-parchment-300/70">Inner Circle feedback, all parishes. Reply within 48 hours.</p>
-          </div>
-        </div>
+        <PageHeader title={t('wb.title')} subtitle={t('wb.subtitle')} leading={<Inbox size={20} />} />
         <select value={filter} onChange={e => setFilter(e.target.value)}
           className="px-3 py-2 text-sm rounded-lg border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-50 dark:bg-ink-800 text-ink-900 dark:text-parchment-50">
-          <option value="open">Open</option>
-          <option value="replied">Replied</option>
-          <option value="">All</option>
+          <option value="open">{t('wb.open')}</option>
+          <option value="replied">{t('wb.replied')}</option>
+          <option value="">{t('wb.all')}</option>
         </select>
       </div>
 
@@ -102,12 +98,12 @@ export default function Workbench() {
           <table className="w-full text-sm">
             <thead>
               <tr className="text-left text-[11px] uppercase tracking-wide text-ink-400 dark:text-parchment-400/60 border-b border-parchment-300/60 dark:border-brass-900/30">
-                <th className="px-4 py-2.5">Received</th>
-                <th className="px-4 py-2.5">Parish</th>
-                <th className="px-4 py-2.5">From</th>
-                <th className="px-4 py-2.5">Category</th>
-                <th className="px-4 py-2.5 w-full">Message</th>
-                <th className="px-4 py-2.5">Status</th>
+                <th className="px-4 py-2.5">{t('wb.received')}</th>
+                <th className="px-4 py-2.5">{t('wb.parish')}</th>
+                <th className="px-4 py-2.5">{t('wb.from')}</th>
+                <th className="px-4 py-2.5">{t('wb.category')}</th>
+                <th className="px-4 py-2.5 w-full">{t('wb.message')}</th>
+                <th className="px-4 py-2.5">{t('wb.status')}</th>
               </tr>
             </thead>
             <tbody>

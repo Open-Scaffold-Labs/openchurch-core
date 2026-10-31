@@ -53,7 +53,7 @@ function properFor(sunday) {
 // The designation for a SUNDAY (or major holy day). Returns
 // { designation, proper } — proper is null outside the season after
 // Pentecost.
-function sundayDesignation(d) {
+function sundayDesignation(d, { forWeek = false } = {}) {
   const y = d.getUTCFullYear()
   const easter = computeEaster(y)
   const pentecost = addDays(easter, 49)
@@ -116,6 +116,11 @@ function sundayDesignation(d) {
     const name = proper === 29
       ? 'Christ the King (Reign of Christ)'
       : `${ORDINALS[weeks] ?? `${weeks}th`} Sunday after Pentecost`
+    // SP-098: All Saints' Day (BCP Principal Feast) displaces a numbered
+    // Sunday after Pentecost only; weekdays keep the Sunday's own count.
+    if (!forWeek && proper !== 29 && d.getUTCMonth() === 10 && d.getUTCDate() === 1) {
+      return { designation: 'All Saints’ Day', proper: null }
+    }
     return { designation: name, proper }
   }
 
@@ -136,7 +141,7 @@ export function resolveLectionary(dateStr) {
     return { cycle, year_label: `Year ${cycle}`, designation: own.designation, proper: own.proper, is_sunday: d.getUTCDay() === 0 }
   }
   const prevSunday = addDays(d, -d.getUTCDay())
-  const wk = sundayDesignation(prevSunday)
+  const wk = sundayDesignation(prevSunday, { forWeek: true })
   // "Week of the Third Sunday of Advent" reads right; "Week of the
   // Easter Day" does not — a few weeks have proper names of their own.
   let weekName = wk.designation ? `Week of the ${wk.designation}` : null
@@ -185,7 +190,35 @@ const ROMAN_ORDINALS = [
   'Thirty-first', 'Thirty-second', 'Thirty-third', 'Thirty-fourth',
 ]
 
-function romanSundayDesignation(d) {
+// SP-098, bounded Sunday displacement. Fixed-date celebrations of the
+// General Roman Calendar that outrank a numbered Sunday in Ordinary Time
+// (Universal Norms on the Liturgical Year, no. 59: rank 3 General
+// Calendar solemnities and All Souls, rank 5 Feasts of the Lord, above
+// rank 6 Sundays in Ordinary Time). Applied ONLY when the day already
+// resolved to "Nth Sunday in Ordinary Time": it never displaces a movable
+// celebration (Trinity, Corpus Christi, Christ the King, ...), a Sunday
+// of Advent/Lent/Easter, or a weekday. Transfers of impeded solemnities
+// are deliberately not modelled here (deferred).
+// Nov 1, 2026 is the Solemnity of All Saints (USCCB, Lectionary 667).
+const ROMAN_FIXED_OVER_OT_SUNDAY = [
+  [1, 2,  'The Presentation of the Lord'],
+  [5, 24, 'The Nativity of Saint John the Baptist'],
+  [5, 29, 'Saints Peter and Paul, Apostles'],
+  [7, 6,  'The Transfiguration of the Lord'],
+  [7, 15, 'The Assumption of the Blessed Virgin Mary'],
+  [8, 14, 'The Exaltation of the Holy Cross'],
+  [10, 1, 'All Saints'],
+  [10, 2, 'The Commemoration of All the Faithful Departed (All Souls)'],
+  [10, 9, 'The Dedication of the Lateran Basilica'],
+]
+
+function overOrdinarySunday(d, numbered, forWeek) {
+  if (forWeek) return numbered
+  const hit = ROMAN_FIXED_OVER_OT_SUNDAY.find(([m, day]) => d.getUTCMonth() === m && d.getUTCDate() === day)
+  return hit ? hit[2] : numbered
+}
+
+function romanSundayDesignation(d, { forWeek = false } = {}) {
   const y = d.getUTCFullYear()
   const easter = computeEaster(y)
   const pentecost = addDays(easter, 49)
@@ -237,7 +270,7 @@ function romanSundayDesignation(d) {
     const back = Math.round((christTheKing.getTime() - d.getTime()) / (7 * DAY))
     const n = 34 - back
     if (n === 34) return 'Our Lord Jesus Christ, King of the Universe'
-    if (n >= 1 && n <= 33) return `${ROMAN_ORDINALS[n]} Sunday in Ordinary Time`
+    if (n >= 1 && n <= 33) return overOrdinarySunday(d, `${ROMAN_ORDINALS[n]} Sunday in Ordinary Time`, forWeek)
   }
 
   // Ordinary Time, first block — Baptism of the Lord, then 2, 3, ...
@@ -246,7 +279,7 @@ function romanSundayDesignation(d) {
     const baptism = addDays(jan6, 7 - (jan6.getUTCDay() || 7))
     if (sameDay(d, baptism)) return 'The Baptism of the Lord'
     const n = Math.round((d.getTime() - baptism.getTime()) / (7 * DAY)) + 1
-    if (n >= 2 && n <= 9) return `${ROMAN_ORDINALS[n]} Sunday in Ordinary Time`
+    if (n >= 2 && n <= 9) return overOrdinarySunday(d, `${ROMAN_ORDINALS[n]} Sunday in Ordinary Time`, forWeek)
   }
 
   return null
@@ -264,7 +297,7 @@ export function resolveRomanLectionary(dateStr) {
     return { cycle, year_label: `Year ${cycle}`, designation: own, proper: null, is_sunday: d.getUTCDay() === 0 }
   }
   const prevSunday = addDays(d, -d.getUTCDay())
-  const wk = romanSundayDesignation(prevSunday)
+  const wk = romanSundayDesignation(prevSunday, { forWeek: true })
   return {
     cycle,
     year_label: `Year ${cycle}`,

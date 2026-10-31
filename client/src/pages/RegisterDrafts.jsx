@@ -9,12 +9,13 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { ArrowLeft, Check, ClipboardPaste, Loader2, Trash2, Upload } from 'lucide-react'
-import PageWrapper from '../components/PageWrapper'
+import PageWrapper, { PageHeader } from '../components/PageWrapper'
 import EmptyState from '../components/EmptyState'
 import { useToast } from '../components/ToastProvider'
 import { useLocale } from '../i18n'
 import { apiUrl } from '../api'
 import { loadList } from '../utils/format'
+import { markJustEntered } from '../utils/justEntered'
 
 const TYPES = ['baptism', 'reconciliation', 'first_communion', 'confirmation', 'marriage', 'holy_orders', 'anointing', 'burial']
 
@@ -129,7 +130,7 @@ export default function RegisterDrafts() {
 
   async function stageCsv() {
     const parsed = parseCsv(csv)
-    if (!parsed.length) { setError('Paste a CSV with a header row and at least one data row.'); return }
+    if (!parsed.length) { setError(t('reg.paste_a_csv_with_a')); return }
     setStaging(true); setError('')
     try {
       const r = await fetch(apiUrl('/api/sacraments/drafts'), {
@@ -208,6 +209,9 @@ export default function RegisterDrafts() {
       if (!r.ok) return say(body.error || t('drafts.commitRefused', { status: r.status }))
 
       setDrafts(ds => ds.filter(x => x.id !== d.id))
+      // The register settles the new entry like fresh ink the first time it
+      // shows it (utils/justEntered.js). The words below come first.
+      markJustEntered(body.record?.id)
       // The amen — the most sacred write in the product should not
       // pass in silence.
       toast.success(t('drafts.committed'))
@@ -232,12 +236,12 @@ export default function RegisterDrafts() {
   const labelCls = 'block text-[11px] font-medium text-ink-500 dark:text-parchment-300/70 mb-0.5'
 
   return (
-    <PageWrapper>
+    <PageWrapper type="record">
       <div className="mb-6">
         <Link to="/register" className="inline-flex items-center gap-1.5 text-sm text-church-700 dark:text-brass-300 hover:underline">
           <ArrowLeft size={15} /> {t('drafts.back')}
         </Link>
-        <h1 className="mt-2 text-2xl font-display font-bold text-ink-900 dark:text-parchment-50">{t('drafts.title')}</h1>
+        <PageHeader title={t('drafts.title')} />
         <p className="text-sm text-ink-500 dark:text-parchment-300/70">
           {t('drafts.sub')}
         </p>

@@ -1,6 +1,11 @@
 // The Sunday Packet (SPK.1) — "the Thursday Button."
 //
 //   GET /api/packet?date=YYYY-MM-DD   (default: next Sunday, org timezone)
+//   GET /api/packet?plan_id=N         (that plan's date; plan = that plan)
+//
+// SP-188: a date can hold more than one plan (Vigil + Sunday Mass).
+// `plans` lists every plan for the date, oldest first; `plan` is the
+// plan asked for by id, else the first. Nothing is silently dropped.
 //
 // One call assembles everything a parish secretary spends Thursday
 // afternoon copying between four systems:
@@ -45,10 +50,29 @@ async function defaultPacketDate(orgId) {
 
 router.get('/', async (req, res) => {
   const orgId = req.organizationId
+  let planId = null
+  if (req.query.plan_id !== undefined) {
+    planId = /^[1-9]\d{0,9}$/.test(String(req.query.plan_id)) ? Number(req.query.plan_id) : NaN
+    if (!Number.isSafeInteger(planId) || planId > 2147483647) {
+      return res.status(400).json({ error: 'Invalid plan_id' })
+    }
+  }
   try {
-    const date = ISO_DATE.test(req.query.date ?? '')
-      ? req.query.date
-      : await defaultPacketDate(orgId)
+    let date
+    if (planId !== null) {
+      // Tenant-scoped: another parish's id reads as not found.
+      const { rows } = await pool.query(
+        `SELECT to_char(date, 'YYYY-MM-DD') AS date FROM ochr_service_plans
+          WHERE id = $1 AND organization_id = $2`,
+        [planId, orgId]
+      )
+      if (!rows.length) return res.status(404).json({ error: 'Not found' })
+      date = rows[0].date
+    } else {
+      date = ISO_DATE.test(req.query.date ?? '')
+        ? req.query.date
+        : await defaultPacketDate(orgId)
+    }
     if (!date) return res.status(400).json({ error: 'Could not resolve a packet date' })
 
     const [org, tradition, liturgical, plan, serving, intentions, bulletin] = await Promise.all([
@@ -62,7 +86,7 @@ router.get('/', async (req, res) => {
 
       resolveLiturgicalContext(date, orgId),
 
-      // Order of worship for the day (one plan per date in practice).
+      // Order of worship: every plan for the day (SP-188), oldest first.
       pool.query(
         `SELECT p.id, p.title, p.notes,
                 COALESCE(json_agg(json_build_object(
@@ -76,8 +100,7 @@ router.get('/', async (req, res) => {
                   ON c.id = e.assigned_client_id AND c.organization_id = p.organization_id
           WHERE p.organization_id = $1 AND p.date = $2::date
           GROUP BY p.id
-          ORDER BY p.id
-          LIMIT 1`,
+          ORDER BY p.id`,
         [orgId, date]
       ),
 
@@ -111,7 +134,7 @@ router.get('/', async (req, res) => {
         `SELECT to_char(mass_date, 'YYYY-MM-DD') AS mass_date, mass_title,
                 to_char(mass_time, 'HH24:MI') AS mass_time,
                 formatted_intention, requested_by, requester_name, stipend, status, note,
-                fulfilment_label
+                calendar_event_id, fulfilment_label
            FROM ochr_sacristy_weekly_manifest
           WHERE organization_id = $1
             AND week_date BETWEEN $2::date AND $2::date + 6
@@ -122,7 +145,7 @@ router.get('/', async (req, res) => {
       // The bulletin for that Sunday: exact date first, else the most
       // recent one inside the preceding week.
       pool.query(
-        `SELECT to_char(date, 'YYYY-MM-DD') AS date, title, announcements, pastor_note
+        `SELECT to_char(date, 'YYYY-MM-DD') AS date, title, announcements, pastor_note, published
            FROM ochr_bulletins
           WHERE organization_id = $1
             AND date BETWEEN $2::date - 6 AND $2::date
@@ -132,6 +155,8 @@ router.get('/', async (req, res) => {
       ),
     ])
 
+    const plans = plan.rows
+    const chosen = planId !== null ? plans.find(p => String(p.id) === String(planId)) : plans[0]
     res.set('Cache-Control', 'private, max-age=60')
     res.json({
       date,
@@ -139,7 +164,9 @@ router.get('/', async (req, res) => {
       liturgical,
       lectionary: lectionaryFor(tradition, date),
       tradition,
-      plan: plan.rows[0] ?? null,
+      plan: chosen ?? null,
+      plans,
+      plan_id: planId === null ? null : (chosen?.id ?? null),
       serving: serving.rows,
       intentions: intentions.rows,
       bulletin: bulletin.rows[0] ?? null,

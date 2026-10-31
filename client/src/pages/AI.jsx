@@ -1,11 +1,13 @@
 import { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   Feather, Send, Copy, Check, Loader2, Trash2, History,
   BookOpen, MessageCircle, Sun, Megaphone,
 } from 'lucide-react'
-import PageWrapper, { itemVariants } from '../components/PageWrapper'
+import PageWrapper, { PageHeader, itemVariants } from '../components/PageWrapper'
 import { apiUrl } from '../api'
+import { nativeAiFetchInit } from '../native/nativeAiCeiling'
 import { useAuth } from '../context/AuthContext'
 import { useLocale } from '../i18n'
 import { aiRefusalMessage } from '../utils/aiRefusal'
@@ -77,6 +79,11 @@ export default function AI() {
   // Bumped after each successful generate so the AiQuotaMeter
   // re-fetches and ticks up.
   const [quotaKey, setQuotaKey] = useState(0)
+  // SP-109 / D-01: parish AI runs only on the parish's own key. Ask the
+  // server (same BYOK rule for every parish capability) before showing a
+  // form and a meter that look usable. 'unknown' is a failed read, never
+  // read as "no key".
+  const [aiState, setAiState] = useState('loading') // loading | yes | nokey | off | unknown
   const { canWrite } = useAuth()
   const toast = useToast()
   const ask = useConfirm()
@@ -86,7 +93,7 @@ export default function AI() {
 
   async function loadHistory() {
     try {
-      const res = await fetch(apiUrl('/api/ai/generations?limit=20'))
+      const res = await fetch(apiUrl('/api/ai/generations?limit=20'), nativeAiFetchInit())
       if (res.status === 403) { setHistoryState('adminOnly'); return }
       if (!res.ok) { setHistoryState('failed'); return }
       const data = await res.json()
@@ -99,6 +106,22 @@ export default function AI() {
   }
 
   useEffect(() => { loadHistory() }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    // R367-2: the endpoint is private, max-age=60; a key just saved in Org
+    // details must show here, so the setup decision bypasses that cache.
+    fetch(apiUrl('/api/assistant/status'), nativeAiFetchInit({ cache: 'no-store' }))
+      .then(async res => {
+        if (!res.ok) throw new Error('status')
+        const d = await res.json()
+        if (!d || typeof d.available !== 'boolean') throw new Error('shape')
+        return d.available ? 'yes' : d.code === 'ai_key_required' ? 'nokey' : 'off'
+      })
+      .catch(() => 'unknown')
+      .then(next => { if (!cancelled) setAiState(next) })
+    return () => { cancelled = true }
+  }, [])
 
   // Resolve the liturgical day for the chosen preach date (sermon only).
   // Server response is private-cached 1h, so this is cheap.
@@ -116,13 +139,13 @@ export default function AI() {
   }, [type, preachDate])
 
   async function generate() {
-    if (!prompt.trim() || loading) return
+    if (!prompt.trim() || loading || aiState === 'nokey' || aiState === 'off') return
     setLoading(true)
     setError('')
     setOutput('')
     setMeta(null)
     try {
-      const res = await fetch(apiUrl('/api/ai/generate'), {
+      const res = await fetch(apiUrl('/api/ai/generate'), nativeAiFetchInit({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -130,7 +153,7 @@ export default function AI() {
           prompt,
           ...(type === 'sermon' && /^\d{4}-\d{2}-\d{2}$/.test(preachDate) ? { preach_date: preachDate } : {}),
         }),
-      })
+      }))
       const data = await res.json().catch(() => ({}))
       if (res.status === 429 && data.code === 'quota_exceeded') {
         // Surface the structured quota message via toast so the
@@ -192,19 +215,31 @@ export default function AI() {
   }
 
   return (
-    <PageWrapper>
+    <PageWrapper type="list">
       <motion.div variants={itemVariants} className="flex items-start justify-between gap-4 flex-wrap mb-6">
-        <div>
-          <h1 className="font-display text-3xl font-semibold text-ink-900 dark:text-parchment-50 tracking-tight">{t('aist.title')}</h1>
-          <p className="text-sm text-ink-500 dark:text-parchment-300/70 mt-1">
-            {t('aist.sub')}
-          </p>
-        </div>
+        <PageHeader title={t('aist.title')} subtitle={t('aist.sub')} />
         {/* Quota meter — admins/staff only, since viewers can't generate.
             Self-hides while loading or on fetch error so the layout
             doesn't shift around. */}
-        {canWrite && <AiQuotaMeter refreshKey={quotaKey} />}
+        {canWrite && aiState === 'yes' && <AiQuotaMeter refreshKey={quotaKey} />}
       </motion.div>
+
+      {canWrite && aiState === 'nokey' && (
+        <motion.div variants={itemVariants} role="status" data-testid="aist-nokey" className="mb-6 px-4 py-3 rounded-xl bg-brass-50 dark:bg-brass-900/20 border border-brass-200/70 dark:border-brass-800/40 text-sm text-ink-700 dark:text-parchment-200">
+          {t('aist.noKey')}{' '}
+          <Link to="/settings" className="font-semibold underline">{t('aist.noKeyLink')}</Link>
+        </motion.div>
+      )}
+      {canWrite && aiState === 'off' && (
+        <motion.div variants={itemVariants} role="status" data-testid="aist-off" className="mb-6 px-4 py-3 rounded-xl bg-brass-50 dark:bg-brass-900/20 border border-brass-200/70 dark:border-brass-800/40 text-sm text-ink-700 dark:text-parchment-200">
+          {t('aist.off')}
+        </motion.div>
+      )}
+      {canWrite && aiState === 'unknown' && (
+        <motion.div variants={itemVariants} role="status" data-testid="aist-unknown" className="mb-6 px-4 py-3 rounded-xl bg-amber-50/70 dark:bg-amber-900/15 border border-amber-300/70 dark:border-amber-700/40 text-sm text-ink-700 dark:text-parchment-200">
+          {t('aist.statusUnknown')}
+        </motion.div>
+      )}
 
       {/* Read-only notice for viewers — they can browse history but
           cannot generate. Server enforces; this just explains what's
@@ -225,7 +260,7 @@ export default function AI() {
             <button
               key={ty.key}
               onClick={() => setType(ty.key)}
-              className={`relative overflow-hidden flex items-center gap-3 px-4 py-3 rounded-xl border transition-all text-left ${
+              className={`relative overflow-hidden flex items-center gap-2 sm:gap-3 px-3 sm:px-4 py-3 rounded-xl border transition-all text-left ${
                 active
                   ? 'border-church-500 dark:border-white/30 bg-parchment-50 dark:bg-ink-900 shadow-md'
                   : 'border-parchment-300/60 dark:border-brass-900/30 bg-parchment-50/70 dark:bg-ink-900/60 hover:bg-parchment-50 dark:hover:bg-ink-900 hover:border-parchment-300 dark:hover:border-brass-900/60'
@@ -235,8 +270,8 @@ export default function AI() {
                 <Icon size={16} />
               </div>
               <div className="min-w-0">
-                <p className="text-sm font-semibold text-ink-900 dark:text-parchment-50 truncate">{t(`aist.type.${ty.key}`)}</p>
-                <p className="text-[10px] text-ink-500 dark:text-parchment-300/70">
+                <p data-testid="ai-type-title" className="text-[13px] sm:text-sm font-semibold leading-tight text-ink-900 dark:text-parchment-50 [overflow-wrap:normal] [word-break:normal] hyphens-auto">{t(`aist.type.${ty.key}`)}</p>
+                <p className="text-[11px] text-ink-500 dark:text-parchment-300/70">
                   {active ? t('aist.selected') : t('aist.pick')}
                 </p>
               </div>
@@ -262,7 +297,7 @@ export default function AI() {
               <h2 className="text-sm font-semibold text-ink-800 dark:text-parchment-100">
                 {t(`aist.type.${current.key}`)}
               </h2>
-              <span className="ml-auto text-[10px] text-ink-500 dark:text-parchment-300/70">
+              <span className="ml-auto text-[11px] text-ink-500 dark:text-parchment-300/70">
                 {t('aist.kbd')}
               </span>
             </div>
@@ -325,7 +360,7 @@ export default function AI() {
                 </span>
                 <button
                   onClick={generate}
-                  disabled={!prompt.trim() || loading}
+                  disabled={!prompt.trim() || loading || aiState === 'nokey' || aiState === 'off'}
                   className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-church-900 dark:bg-white text-parchment-50 dark:text-church-900 text-sm font-semibold shadow hover:opacity-90 transition-opacity disabled:opacity-40"
                 >
                   {loading ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />}
@@ -352,7 +387,7 @@ export default function AI() {
                 <div className="px-5 py-3 border-b border-parchment-300/60 dark:border-brass-900/30 flex items-center gap-2">
                   <h3 className="text-sm font-semibold text-ink-800 dark:text-parchment-100">{t('aist.output')}</h3>
                   {meta?.provider && (
-                    <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-parchment-200 dark:bg-ink-800 text-ink-500 dark:text-parchment-300/70">
+                    <span className="text-[11px] font-medium px-2 py-0.5 rounded-full bg-parchment-200 dark:bg-ink-800 text-ink-500 dark:text-parchment-300/70">
                       {meta.provider}{meta.model ? ` · ${meta.model}` : ''}
                     </span>
                   )}
@@ -381,7 +416,7 @@ export default function AI() {
             <div className="px-5 py-3 border-b border-parchment-300/60 dark:border-brass-900/30 flex items-center gap-2">
               <History size={14} className="text-church-700 dark:text-brass-300" />
               <h3 className="text-sm font-semibold text-ink-800 dark:text-parchment-100">{t('aist.history')}</h3>
-              <span className="ml-auto text-[10px] text-ink-500 dark:text-parchment-300/70">
+              <span className="ml-auto text-[11px] text-ink-500 dark:text-parchment-300/70">
                 {history.length}
               </span>
             </div>
@@ -420,7 +455,7 @@ export default function AI() {
                             <span className="text-xs font-semibold text-ink-800 dark:text-parchment-100 truncate">
                               {t(`aist.type.${e.type}`)}
                             </span>
-                            <span className="text-[10px] text-ink-500 dark:text-parchment-300/70 shrink-0">
+                            <span className="text-[11px] text-ink-500 dark:text-parchment-300/70 shrink-0">
                               {timeAgo(e.created_at, t)}
                             </span>
                           </div>

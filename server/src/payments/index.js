@@ -20,7 +20,171 @@ import pool from '../db.js'
 import { normalizeDonorEmail } from '../finance/donorIdentity.js'
 import { monitor } from '../monitoring/index.js'
 import { notify } from '../notifications/transport.js'
-import { stripeRequest } from '../utils/stripeApi.js'
+import { stripeRequest, STRIPE_CONNECT_MODE_A0 } from '../utils/stripeApi.js'
+import { COVER_FEE_DEFAULT_CHECKED } from '../billing/plans.js'
+
+export { STRIPE_CONNECT_MODE_A0, COVER_FEE_DEFAULT_CHECKED }
+
+export const BANNED_STRIPE_CONNECT_MODES = Object.freeze([
+  'A_OSL_ABSORBS_CONNECT_FEES',
+  'CUSTOM_CONNECT_OSL_ABSORBS_PAYOUT_FEES',
+])
+
+export function resolveStripeConnectAccountId(parishOrAccountId) {
+  if (typeof parishOrAccountId === 'string' && parishOrAccountId.trim().startsWith('acct_')) {
+    return parishOrAccountId.trim()
+  }
+  if (parishOrAccountId && typeof parishOrAccountId === 'object') {
+    const candidate =
+      parishOrAccountId.stripeConnectAccountId ||
+      parishOrAccountId.stripe_connect_account_id ||
+      parishOrAccountId.stripeAccountId ||
+      parishOrAccountId.stripe_account_id ||
+      null
+    if (typeof candidate === 'string' && candidate.trim().startsWith('acct_')) {
+      return candidate.trim()
+    }
+  }
+  // No deployment-wide STRIPE_CONNECT_ACCOUNT_ID fallback: one global
+  // account would pool several parishes' gifts together. Callers must pass
+  // the parish's own account; the public give route refuses without one.
+  return null
+}
+
+
+// Test-only escape hatch for buildStripeConnectA0DirectChargeConfig.
+// Production and any non-test process must refuse a missing Connect account
+// rather than falling open onto the platform account.
+export function allowPlatformDonationFallback(env = process.env) {
+  if (String(env.NODE_ENV || '').trim() !== 'test') return false
+  const v = String(env.OC_ALLOW_PLATFORM_DONATION_FALLBACK ?? '').trim().toLowerCase()
+  return ['1', 'true', 'yes', 'on'].includes(v)
+}
+
+export function computeDonorCoverFeeGrossUpCents(
+  baseAmountCents,
+  { coverFee = COVER_FEE_DEFAULT_CHECKED, rateBps = 220, fixedCents = 30 } = {}
+) {
+  const cleanBase = Math.round(Number(baseAmountCents) || 0)
+  if (cleanBase <= 0) {
+    return {
+      baseAmountCents: 0,
+      feeAmountCents: 0,
+      totalAmountCents: 0,
+      coverFeeApplied: false,
+      coverFeeDefaultChecked: COVER_FEE_DEFAULT_CHECKED,
+    }
+  }
+  const shouldCover = Boolean(coverFee === true)
+  if (!shouldCover) {
+    return {
+      baseAmountCents: cleanBase,
+      feeAmountCents: 0,
+      totalAmountCents: cleanBase,
+      coverFeeApplied: false,
+      coverFeeDefaultChecked: COVER_FEE_DEFAULT_CHECKED,
+    }
+  }
+  const rateFraction = Number(rateBps) / 10000
+  const grossedUp = Math.ceil((cleanBase + Number(fixedCents)) / (1 - rateFraction))
+  return {
+    baseAmountCents: cleanBase,
+    feeAmountCents: Math.max(0, grossedUp - cleanBase),
+    totalAmountCents: grossedUp,
+    coverFeeApplied: true,
+    coverFeeDefaultChecked: COVER_FEE_DEFAULT_CHECKED,
+  }
+}
+
+export function buildStripeConnectA0DirectChargeConfig({
+  organizationId,
+  stripeConnectAccountId,
+  amount,
+  fundId,
+  fundName,
+  donorName,
+  donorEmail,
+  message,
+  coverFee = COVER_FEE_DEFAULT_CHECKED,
+  connectMode = STRIPE_CONNECT_MODE_A0,
+  successUrl,
+  cancelUrl,
+} = {}) {
+  if (BANNED_STRIPE_CONNECT_MODES.includes(connectMode)) {
+    throw new Error(
+      `Banned Stripe Connect mode "${connectMode}": OSL mandates Mode A0 ("Stripe handles pricing" + Direct Charges, application_fee_amount: 0) so OSL pays $0 in Connect monthly active account or payout fees.`
+    )
+  }
+
+  const baseCents = Math.round(Number(amount) * 100)
+  if (!Number.isFinite(baseCents) || baseCents <= 0) {
+    throw new Error('Invalid gift amount')
+  }
+
+  const feeBreakdown = computeDonorCoverFeeGrossUpCents(baseCents, { coverFee })
+  const connectedAccount = resolveStripeConnectAccountId(stripeConnectAccountId)
+
+  // TARS post-hoc on 3d5a1838 (P1): never silently charge the platform
+  // account when a parish Connect account is missing. Isolated tests may
+  // opt in with NODE_ENV=test AND OC_ALLOW_PLATFORM_DONATION_FALLBACK=1.
+  if (!connectedAccount && !allowPlatformDonationFallback()) {
+    throw new Error(
+      'Stripe Connect account required: refusing platform-account donation fallback outside an isolated test environment'
+    )
+  }
+
+  const sessionParams = {
+    mode: 'payment',
+    line_items: [
+      {
+        quantity: 1,
+        price_data: {
+          currency: 'usd',
+          unit_amount: feeBreakdown.totalAmountCents,
+          product_data: { name: `Offering — ${fundName || 'General'}` },
+        },
+      },
+    ],
+    payment_intent_data: {
+      application_fee_amount: 0,
+    },
+    success_url: successUrl,
+    cancel_url: cancelUrl,
+    ...(donorEmail ? { customer_email: donorEmail } : {}),
+    metadata: {
+      kind: 'donation',
+      connect_mode: STRIPE_CONNECT_MODE_A0,
+      connect_pricing_owner: 'stripe_handles_pricing',
+      application_fee_amount: '0',
+      cover_fee_default_checked: 'false',
+      cover_fee_applied: String(feeBreakdown.coverFeeApplied),
+      base_amount_cents: String(feeBreakdown.baseAmountCents),
+      fee_amount_cents: String(feeBreakdown.feeAmountCents),
+      organization_id: String(organizationId),
+      fund_id: String(fundId ?? ''),
+      fund: String(fundName || 'General').slice(0, 200),
+      donor_name: String(donorName || 'Anonymous').slice(0, 200),
+      ...(connectedAccount ? { stripe_connect_account_id: connectedAccount } : {}),
+      ...(donorEmail ? { donor_email: String(donorEmail).slice(0, 200) } : {}),
+      ...(message ? { message: String(message).slice(0, 400) } : {}),
+    },
+  }
+
+  return {
+    connect_mode: STRIPE_CONNECT_MODE_A0,
+    connect_pricing_owner: 'stripe_handles_pricing',
+    stripeAccount: connectedAccount,
+    requestOptions: connectedAccount ? { stripeAccount: connectedAccount } : undefined,
+    fallback_mode: connectedAccount ? null : (allowPlatformDonationFallback() ? 'demo_or_test_platform_account' : null),
+    application_fee_amount: 0,
+    osl_monthly_active_account_fee_cents: 0,
+    osl_payout_fee_bps: 0,
+    osl_payout_fee_fixed_cents: 0,
+    coverFeeDefaultChecked: COVER_FEE_DEFAULT_CHECKED,
+    ...feeBreakdown,
+    sessionParams,
+  }
+}
 
 // Provider selection, checked at call time. Explicit PAYMENTS_PROVIDER wins;
 // otherwise a giving secret flips giving to live. No secret, no env → stub.
@@ -364,37 +528,52 @@ export function paymentsProvider() {
 // donation row is written by the webhook when the session completes —
 // never before money actually moved.
 export async function createDonationCheckout({
-  organizationId, amount, fundId, fundName, donorName, donorEmail, message,
-  successUrl, cancelUrl,
+  organizationId,
+  stripeConnectAccountId,
+  amount,
+  fundId,
+  fundName,
+  donorName,
+  donorEmail,
+  message,
+  coverFee = COVER_FEE_DEFAULT_CHECKED,
+  successUrl,
+  cancelUrl,
 }) {
-  const cents = Math.round(Number(amount) * 100)
-  if (!Number.isFinite(cents) || cents <= 0) throw new Error('Invalid gift amount')
+  const directCharge = buildStripeConnectA0DirectChargeConfig({
+    organizationId,
+    stripeConnectAccountId,
+    amount,
+    fundId,
+    fundName,
+    donorName,
+    donorEmail,
+    message,
+    coverFee,
+    successUrl,
+    cancelUrl,
+  })
 
-  const session = await stripeRequest('checkout/sessions', {
-    mode: 'payment',
-    line_items: [{
-      quantity: 1,
-      price_data: {
-        currency: 'usd',
-        unit_amount: cents,
-        product_data: { name: `Offering — ${fundName}` },
-      },
-    }],
-    success_url: successUrl,
-    cancel_url:  cancelUrl,
-    ...(donorEmail ? { customer_email: donorEmail } : {}),
-    metadata: {
-      kind: 'donation',
-      organization_id: String(organizationId),
-      fund_id:   String(fundId),
-      fund:      String(fundName).slice(0, 200),
-      donor_name: String(donorName).slice(0, 200),
-      ...(donorEmail ? { donor_email: String(donorEmail).slice(0, 200) } : {}),
-      ...(message ? { message: String(message).slice(0, 400) } : {}),
-    },
-  }, stripeSecret())
+  const session = await stripeRequest(
+    'checkout/sessions',
+    directCharge.sessionParams,
+    stripeSecret(),
+    directCharge.stripeAccount ? { stripeAccount: directCharge.stripeAccount } : {}
+  )
 
-  return { url: session.url, sessionId: session.id }
+  return {
+    url: session.url,
+    sessionId: session.id,
+    connectMode: directCharge.connect_mode,
+    stripeAccount: directCharge.stripeAccount,
+    fallbackMode: directCharge.fallback_mode,
+    applicationFeeAmount: directCharge.application_fee_amount,
+    coverFeeDefaultChecked: directCharge.coverFeeDefaultChecked,
+    coverFeeApplied: directCharge.coverFeeApplied,
+    baseAmountCents: directCharge.baseAmountCents,
+    feeAmountCents: directCharge.feeAmountCents,
+    totalAmountCents: directCharge.totalAmountCents,
+  }
 }
 
 // Webhook completion → the ochr_donations row + receipt. Idempotent on

@@ -362,9 +362,9 @@ describe('D2 — a charged gift cannot be deleted; refund is the only way back',
 // D3 — a fund with gifts is deactivated, never deleted
 // ─────────────────────────────────────────────────────────────────────────
 describe('D3 — deleting a fund with gifts is refused; deactivate instead', () => {
-  let par, restrictedId, giftId
+  let par, restrictedId, giftId, day
   const base = async () => {
-    const r = await request(server).get('/api/finance/summary?start=2019-01-01&end=2019-12-31').set(auth(par.token))
+    const r = await request(server).get(`/api/finance/summary?start=${day}&end=${day}`).set(auth(par.token))
     return Number(r.body.totals.assessable_base)
   }
 
@@ -374,12 +374,19 @@ describe('D3 — deleting a fund with gifts is refused; deactivate instead', () 
     const f = await request(server).post('/api/funds').set(auth(par.token))
       .send({ name: `Second Collection ${RUN_ID}` })
     restrictedId = f.body.id
-    // Pass-through: not the parish's revenue, not assessable.
-    const map = await request(server).put('/api/finance/mappings').set(auth(par.token))
-      .send({ mappings: [{ source_type: 'fund', source_key: String(restrictedId), account_code: '4510' }] })
-    expect(map.status).toBe(200)
+    // Pass-through liability, not the parish's revenue and not assessable.
+    // A parish cannot lower the base through the route; the diocese row is
+    // the setup. 4510 stays on the chart for history.
+    const { rows: [clock] } = await pool.query(
+      `SELECT to_char(cutover_on, 'YYYY-MM-DD') AS day FROM ochr_books_cutover`)
+    day = clock.day
+    await pool.query(
+      `INSERT INTO ochr_coa_mappings
+         (organization_id, source_type, source_key, account_code, effective_from, set_by)
+       SELECT $1, 'fund', $2, '2320', cutover_on, 'diocese' FROM ochr_books_cutover`,
+      [par.orgId, String(restrictedId)])
     const g = await request(server).post('/api/donations').set(auth(par.token))
-      .send({ donor_name: 'Restricted Donor', amount: 5000, date: '2019-06-15', fund_id: restrictedId })
+      .send({ donor_name: 'Restricted Donor', amount: 5000, date: day, fund_id: restrictedId })
     expect(g.status).toBe(201)
     giftId = g.body.id
     expect(await base()).toBe(0)

@@ -95,6 +95,21 @@ export function orgTodayIso(instant, timeZone) {
   return `${y}-${m}-${d}`
 }
 
+// SP-181: wall-clock time (HH:MM, 24h) in the parish zone. Used only to
+// decide whether today's Mass has already begun; never written anywhere.
+export function orgNowHHMM(instant, timeZone) {
+  const date = instant instanceof Date ? instant : new Date(instant)
+  if (Number.isNaN(date.getTime())) return null
+  const zone = usableTimeZone(timeZone)
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: zone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  }).formatToParts(date)
+  const h = parts.find((p) => p.type === 'hour')?.value
+  const m = parts.find((p) => p.type === 'minute')?.value
+  if (!h || !m) return null
+  return `${h}:${m}`
+}
+
 // Saturday that opens the Sat–Fri sheet containing this calendar date.
 export function sheetWeekStart(iso) {
   const sinceSaturday = (isoWeekday(iso) + 1) % 7
@@ -109,6 +124,31 @@ export function vigilWeekStart(todayIso) {
   const dow = isoWeekday(todayIso)
   const untilSunday = dow === 0 ? 0 : 7 - dow
   return addIsoDays(todayIso, untilSunday - 1)
+}
+
+// Saturday vigil and Sunday of the weekly sheet's week. Today, if today
+// is Sunday; otherwise the coming Sunday. The sheet opens on that
+// Saturday (vigilWeekStart) and runs through Friday — this span is only
+// the vigil and the Sunday it serves.
+export function thisSundaySpan(todayIso) {
+  const saturday = vigilWeekStart(todayIso)
+  if (!saturday) return null
+  const sunday = addIsoDays(saturday, 1)
+  if (!sunday) return null
+  return { saturday, sunday }
+}
+
+// A weekend the book may show or page: a real Saturday and the next
+// civil day. Impossible, reversed, and non-adjacent days are not a
+// window. Date.UTC would roll 2026-02-30 forward; canonicalIsoDate
+// rejects that before it can become a query.
+export function thisSundayPair(saturdayRaw, sundayRaw) {
+  const saturday = canonicalIsoDate(saturdayRaw)
+  const sunday = canonicalIsoDate(sundayRaw)
+  if (!saturday || !sunday) return null
+  if (isoWeekday(saturday) !== 6) return null
+  if (addIsoDays(saturday, 1) !== sunday) return null
+  return { saturday, sunday }
 }
 
 export function sheetWeekEnd(startIso) {

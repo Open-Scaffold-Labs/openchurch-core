@@ -196,6 +196,21 @@ export default function Signup() {
             {t('login.signIn')}
           </Link>
         </p>
+        <p className="mt-3 text-center text-sm text-ink-500 dark:text-parchment-300/70">
+          <Link
+            to="/contact"
+            className="tap-reach inline-block font-medium text-ink-500 hover:text-church-800 dark:text-parchment-300/70 dark:hover:text-brass-200 transition-colors"
+          >
+            {t('signup.contact')}
+          </Link>
+          {' · '}
+          <Link
+            to="/privacy"
+            className="tap-reach inline-block font-medium text-ink-500 hover:text-church-800 dark:text-parchment-300/70 dark:hover:text-brass-200 transition-colors"
+          >
+            {t('privacyPage.link')}
+          </Link>
+        </p>
 
         {/* Quiet language switch — a Spanish-speaking secretary should
             be able to enter in her own language before she ever signs in. */}

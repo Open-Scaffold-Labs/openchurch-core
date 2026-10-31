@@ -128,6 +128,13 @@ describe('help key validation (server decides; client text never reaches the mod
     expect(params[4]).toBeNull() // answer
     expect(JSON.stringify(params)).not.toContain(MODULE_HELP.register.overview.slice(0, 30))
   })
+  it('the system prompt names Getting settled and the parish-key rule, not the removed Get Started checklist', async () => {
+    await ask({ question: 'Synthetic?', page_route: '/support' })
+    const d = cap.dispatched.at(-1)
+    expect(d.system).not.toMatch(/Get Started/)
+    expect(d.system).toContain('Getting settled (/getting-settled)')
+    expect(d.system).toContain('OpenChurch supplies no key')
+  })
 })
 
 describe('the guide stays inside the gate input bound', () => {

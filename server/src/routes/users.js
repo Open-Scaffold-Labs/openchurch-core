@@ -24,7 +24,7 @@ import {
   reactivateLogin,
   withLoginTransaction,
   lockLoginForAdminCount,
-  countOtherActiveAdmins,
+  countOtherUsableAdmins,
   INVITE_DOES_NOT_REACTIVATE,
 } from '../auth/loginDeactivation.js'
 import {
@@ -347,8 +347,9 @@ router.patch('/:id/role', async (req, res) => {
       // Demoting an admin: only allowed if at least one other active
       // admin remains. Covers both "admin demotes self" and "admin
       // demotes the other admin in a 2-admin org." The count is the
-      // locked snapshot, not a second query.
-      if (target.role === 'admin' && role !== 'admin' && countOtherActiveAdmins(locked, target.id) === 0) {
+      // locked snapshot, not a second query, and an admin invite nobody
+      // accepted is not counted (CAROLINA-423-R2).
+      if (target.role === 'admin' && role !== 'admin' && countOtherUsableAdmins(locked, target.id) === 0) {
         return { status: 400, body: { error: 'Cannot demote the only active admin. Promote another user first.' } }
       }
 

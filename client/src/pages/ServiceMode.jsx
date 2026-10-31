@@ -10,9 +10,18 @@ import { useLocale } from '../i18n'
 // blinks. Arrow keys / taps advance; Esc leaves. A read surface: the
 // plan is edited in the Worship planner, never here.
 
+function formatServiceDate(iso, dateLocale) {
+  if (!iso || !/^\d{4}-\d{2}-\d{2}/.test(String(iso))) return ''
+  const [y, m, d] = String(iso).slice(0, 10).split('-').map(Number)
+  if (!y || !m || !d) return ''
+  return new Date(y, m - 1, d).toLocaleDateString(dateLocale, {
+    weekday: 'long', month: 'long', day: 'numeric', year: 'numeric',
+  })
+}
+
 export default function ServiceMode() {
   const { planId } = useParams()
-  const { t } = useLocale()
+  const { t, dateLocale } = useLocale()
   const [plan, setPlan] = useState(null)
   const [error, setError] = useState('')
   const [idx, setIdx] = useState(0)
@@ -67,7 +76,7 @@ export default function ServiceMode() {
       <div className="flex items-center justify-between px-8 py-5 border-b border-parchment-300/60 dark:border-brass-900/30">
         <div>
           <p className="font-display text-xl font-bold text-church-800 dark:text-parchment-50">{plan.title}</p>
-          <p className="text-xs text-ink-500 dark:text-parchment-300/70">{plan.date}</p>
+          <p data-testid="svc-date" className="text-xs text-ink-500 dark:text-parchment-300/70">{formatServiceDate(plan.date, dateLocale)}</p>
         </div>
         <div className="flex items-center gap-6">
           <p className="font-display text-2xl text-brass-700 dark:text-brass-300">
@@ -120,7 +129,7 @@ export default function ServiceMode() {
         <div className="flex-1 min-w-0 flex items-center justify-end gap-6">
           {upcoming.map(u => (
             <p key={u.id} className="text-sm text-ink-500 dark:text-parchment-300/60 truncate">
-              <span className="text-[10px] uppercase tracking-wider mr-1.5">{u.kind}</span>{u.title}
+              <span className="text-[11px] uppercase tracking-wider mr-1.5">{u.kind}</span>{u.title}
             </p>
           ))}
         </div>

@@ -40,8 +40,9 @@ const mount = () => render(
 )
 
 const pull = async () => {
-  const button = await screen.findByRole('button', { name: /pull readings from service plan/i })
-  fireEvent.change(screen.getByLabelText(/bulletin date/i), { target: { value: DATE } })
+  // The editor chrome is translated now (App Review 2026-10-26), so match either locale.
+  const button = await screen.findByRole('button', { name: /pull readings from service plan|traer las lecturas del plan de servicio/i })
+  fireEvent.change(screen.getByLabelText(/bulletin date|fecha del boletín/i), { target: { value: DATE } })
   await act(async () => { fireEvent.click(button) })
 }
 
@@ -126,5 +127,63 @@ describe('a refused pull is not an empty date', () => {
     await pull()
     expect(await screen.findByRole('alert')).toHaveTextContent(ES_UNREAD)
     expect(screen.queryByText(ES_NONE)).not.toBeInTheDocument()
+  })
+})
+
+describe('SP-308 multi-plan day prefers a plan that has readings', () => {
+  // Saint VERIFIED: API lists Nov 1 as [56, 55] (id DESC). Plan 56 is
+  // hymns-only; plan 55 has readings. Old plans.find took 56 → false
+  // "no readings yet" toast (SP-301). Ascending candidates + skip empty.
+  const DATE_MULTI = '2026-11-01'
+  const pullMulti = async () => {
+    const button = await screen.findByRole('button', { name: /pull readings from service plan|traer las lecturas del plan de servicio/i })
+    fireEvent.change(screen.getByLabelText(/bulletin date|fecha del boletín/i), { target: { value: DATE_MULTI } })
+    await act(async () => { fireEvent.click(button) })
+  }
+
+  it('skips a newer hymns-only plan and pulls readings from the older plan', async () => {
+    const fetched = []
+    routes({
+      '/api/service-plans/56': () => {
+        fetched.push(56)
+        return ok({ elements: [{ kind: 'hymn', title: 'Entrance', reference: '#100' }] })
+      },
+      '/api/service-plans/55': () => {
+        fetched.push(55)
+        return ok({ elements: [
+          { kind: 'reading', title: 'First Reading', reference: 'Rev 7:2-4, 9-14' },
+          { kind: 'psalm', title: 'Responsorial Psalm', reference: 'Ps 24:1bc-2, 3-4ab, 5-6' },
+        ] })
+      },
+      // List order matches production: id DESC for the same date.
+      '/api/service-plans': () => ok({ plans: [
+        { id: 56, date: DATE_MULTI },
+        { id: 55, date: DATE_MULTI },
+      ] }),
+    })
+    mount()
+    await pullMulti()
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText(/first reading/i)).toHaveValue(
+        'First Reading — Rev 7:2-4, 9-14\nResponsorial Psalm — Ps 24:1bc-2, 3-4ab, 5-6',
+      )
+    })
+    expect(screen.queryByText(NO_READINGS)).not.toBeInTheDocument()
+    // Deterministic order: try lower id first; never need 56 once 55 wins.
+    expect(fetched).toEqual([55])
+  })
+
+  it('still says no readings when every same-date plan is hymns-only', async () => {
+    routes({
+      '/api/service-plans/56': () => ok({ elements: [{ kind: 'hymn', title: 'Entrance' }] }),
+      '/api/service-plans/55': () => ok({ elements: [{ kind: 'hymn', title: 'Recessional' }] }),
+      '/api/service-plans': () => ok({ plans: [
+        { id: 56, date: DATE_MULTI },
+        { id: 55, date: DATE_MULTI },
+      ] }),
+    })
+    mount()
+    await pullMulti()
+    expect(await screen.findByRole('status')).toHaveTextContent(NO_READINGS)
   })
 })

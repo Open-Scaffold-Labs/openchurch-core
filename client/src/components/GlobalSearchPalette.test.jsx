@@ -8,7 +8,7 @@ import { MemoryRouter, useLocation } from 'react-router-dom'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { LocaleProvider } from '../i18n'
 import { STRINGS } from '../i18n/strings'
-import GlobalSearchPalette, { pathForSearchItem } from './GlobalSearchPalette'
+import GlobalSearchPalette, { pathForSearchItem, pageCommandsForQuery } from './GlobalSearchPalette'
 
 vi.mock('../context/AuthContext', () => ({
   useAuth: () => ({ user: null, loading: false }),
@@ -78,6 +78,14 @@ describe('pathForSearchItem', () => {
     expect(pathForSearchItem({ type: 'event', id: 9, title: 'Mass' })).toBe('/events')
     expect(pathForSearchItem({ type: 'task', id: 3, title: 'Call' })).toBe('/tasks')
     expect(pathForSearchItem({ type: 'staff', id: 2, name: 'Sacristan' })).toBe('/payroll')
+  })
+
+  it('SP-185: a Mass intention hit opens the book filtered to that intention', () => {
+    expect(pathForSearchItem({
+      type: 'mass_intention', id: 9702,
+      title: '† Saint test - for the repose of the soul of Joseph Testwalker',
+    })).toBe('/mass-intentions?q=' + encodeURIComponent('† Saint test - for the repose of the soul of Joseph Testwalker'))
+    expect(pathForSearchItem({ type: 'mass_intention', title: 'No id' })).toBe('/mass-intentions')
   })
 })
 
@@ -562,5 +570,38 @@ describe('picking a search hit', () => {
     await waitFor(() => {
       expect(screen.getByTestId('loc').textContent).not.toBe('/clients')
     })
+  })
+})
+
+
+describe('pageCommandsForQuery (SP-295)', () => {
+  it('admin finds Weekly Bulletin by bulletin keywords', () => {
+    const hits = pageCommandsForQuery('Weekly Bulletin', 'admin')
+    expect(hits.some(h => h.to === '/bulletin')).toBe(true)
+  })
+  it('admin finds bulletin in Spanish', () => {
+    const hits = pageCommandsForQuery('boletín', 'admin')
+    expect(hits.some(h => h.to === '/bulletin')).toBe(true)
+  })
+  it('staff does not get the admin-only Bulletin page', () => {
+    const hits = pageCommandsForQuery('bulletin', 'staff')
+    expect(hits.some(h => h.to === '/bulletin')).toBe(false)
+  })
+  it('short queries stay empty', () => {
+    expect(pageCommandsForQuery('bu', 'admin')).toEqual([])
+  })
+})
+
+describe('SP-318 Enter opens the only result', () => {
+  it('Enter on a single parish hit navigates and closes', async () => {
+    const { onClose } = mount([MEMBER])
+    const input = screen.getByLabelText('Search query')
+    fireEvent.change(input, { target: { value: 'John' } })
+    await screen.findByRole('button', { name: /John Parishioner/i }, { timeout: 4000 })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    await waitFor(() => {
+      expect(screen.getByTestId('loc').textContent).toBe('/clients/20013')
+    })
+    expect(onClose).toHaveBeenCalled()
   })
 })

@@ -4,20 +4,19 @@ import pool from '../db.js'
 import { monitor } from '../monitoring/index.js'
 import { extractSessionToken } from '../auth/sessionCookie.js'
 import { resolvePlatformIdentity } from './superAdmin.js'
+import { requireSigningSecret, usableSecret } from '../auth/signingSecrets.js'
 
 // Recognized roles. Keep in sync with the CHECK constraint in
 // migrations/003-roles-check.js.
 export const ROLES = ['admin', 'staff', 'viewer']
 
-// JWT signing secret. Required in production — a missing secret there
-// throws at module load (fail closed) rather than silently signing every
-// token with a public, guessable fallback. In dev/test we keep the fallback
-// but LOG a warning so it's obvious in the terminal.
-if (process.env.NODE_ENV === 'production' && !process.env.JWT_SECRET) {
-  throw new Error('JWT_SECRET must be set in production')
-}
-const SECRET = process.env.JWT_SECRET || 'dev-only-change-me-please'
-if (!process.env.JWT_SECRET) {
+// JWT signing secret. Required on any production-like runtime
+// (NODE_ENV=production OR VERCEL_ENV production/preview) — a missing,
+// blank, or known-dev secret there throws at module load (fail closed)
+// rather than silently signing every token with a public, guessable
+// fallback. In dev/test we keep the fallback but LOG a warning.
+const SECRET = requireSigningSecret('JWT_SECRET', 'dev-only-change-me-please')
+if (!usableSecret(process.env.JWT_SECRET)) {
   console.warn('[auth] JWT_SECRET not set — using insecure dev secret')
 }
 

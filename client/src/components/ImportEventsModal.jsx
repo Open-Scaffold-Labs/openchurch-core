@@ -3,6 +3,8 @@ import { motion } from 'framer-motion'
 import { Upload, Download, X, CheckCircle2, AlertTriangle, Loader2, FileText } from 'lucide-react'
 import { apiUrl } from '../api'
 import { scrimCls } from './MobileSheet'
+import { dialogMotionNow } from '../utils/motion'
+import { useLocale } from '../i18n'
 
 // Bulk-import events from a CSV file. Strict schema:
 // title, service_division, date, time, location, liturgical_season,
@@ -36,6 +38,7 @@ function downloadTemplate() {
 }
 
 export default function ImportEventsModal({ onClose, onImported }) {
+  const { t } = useLocale()
   const [file,    setFile]    = useState(null)
   const [csvText, setCsvText] = useState('')
   const [loading, setLoading] = useState(false)
@@ -47,13 +50,13 @@ export default function ImportEventsModal({ onClose, onImported }) {
     setError('')
     if (!f) return
     const isCsv = /\.csv$/i.test(f.name) || f.type === 'text/csv' || f.type === 'application/vnd.ms-excel'
-    if (!isCsv) { setError('Please select a .csv file.'); return }
+    if (!isCsv) { setError(t('imp.evt.please_select_a_csv_file')); return }
     try {
       const text = await f.text()
       setFile(f)
       setCsvText(text)
     } catch {
-      setError('Could not read that file.')
+      setError(t('imp.evt.could_not_read_that_file'))
     }
   }
 
@@ -91,10 +94,7 @@ export default function ImportEventsModal({ onClose, onImported }) {
       onClick={onClose}
     >
       <motion.div
-        initial={{ opacity: 0, scale: 0.96, y: 12 }}
-        animate={{ opacity: 1, scale: 1, y: 0 }}
-        exit={{ opacity: 0, scale: 0.96, y: 12 }}
-        transition={{ duration: 0.22, ease: [0.25, 0.1, 0.25, 1] }}
+        {...dialogMotionNow()}
         onClick={e => e.stopPropagation()}
         className="w-full max-w-lg bg-parchment-50 dark:bg-ink-900 rounded-2xl border border-parchment-300/60 dark:border-brass-900/30 shadow-warm-md overflow-hidden"
       >
@@ -106,10 +106,10 @@ export default function ImportEventsModal({ onClose, onImported }) {
             </div>
             <div>
               <h2 className="font-display text-lg font-semibold text-ink-900 dark:text-parchment-50">
-                Import events from CSV
+                {t('imp.evt.import_events_from_csv')}
               </h2>
               <p className="text-xs text-ink-500 dark:text-parchment-300/70 mt-0.5">
-                Strict schema — download the template if you're starting from scratch.
+                {t('imp.evt.strict_schema_download_the_template')}
               </p>
             </div>
           </div>
@@ -129,7 +129,7 @@ export default function ImportEventsModal({ onClose, onImported }) {
                     Imported {result.imported} event{result.imported === 1 ? '' : 's'}.
                   </p>
                   <p className="text-xs text-ink-500 dark:text-parchment-300/70 mt-0.5">
-                    Members aren't assigned via CSV — open each event to add them.
+                    {t('imp.evt.members_aren_t_assigned_via')}
                   </p>
                 </div>
               </div>
@@ -155,14 +155,14 @@ export default function ImportEventsModal({ onClose, onImported }) {
           ) : (
             <>
               <div className="text-sm text-ink-600 dark:text-parchment-300/80 leading-relaxed">
-                Columns (in any order): <span className="font-mono text-xs">title, service_division, date, time, location, liturgical_season, liturgical_color, feast_name</span>. Only <span className="font-mono text-xs">title</span> is required. Date is <span className="font-mono text-xs">YYYY-MM-DD</span>; time is <span className="font-mono text-xs">HH:MM</span> (24-hour).
+                Columns (in any order): <span className="font-mono text-xs">{t('imp.evt.title_service_division_date_time')}</span>. Only <span className="font-mono text-xs">title</span> {t('imp.evt.is_required_date_is')} <span className="font-mono text-xs">{t('imp.evt.yyyy_mm_dd')}</span>; time is <span className="font-mono text-xs">HH:MM</span> (24-hour).
               </div>
               <button
                 type="button"
                 onClick={downloadTemplate}
                 className="inline-flex items-center gap-2 text-xs font-semibold text-church-800 hover:text-church-900 dark:text-brass-300 dark:hover:text-brass-200 transition-colors"
               >
-                <Download size={13} /> Download template CSV
+                <Download size={13} /> {t('imp.evt.download_template_csv')}
               </button>
 
               <label
@@ -194,17 +194,17 @@ export default function ImportEventsModal({ onClose, onImported }) {
                       {previewCount} data row{previewCount === 1 ? '' : 's'} detected
                     </p>
                     <p className="text-xs text-church-700 hover:text-church-900 dark:text-brass-300 dark:hover:text-brass-200 underline">
-                      Choose a different file
+                      {t('imp.evt.choose_a_different_file')}
                     </p>
                   </>
                 ) : (
                   <>
                     <Upload size={22} className="text-ink-400 dark:text-parchment-400/60" />
                     <p className="text-sm font-semibold text-ink-700 dark:text-parchment-100">
-                      Drop a CSV here, or click to pick
+                      {t('imp.evt.drop_a_csv_here_or')}
                     </p>
                     <p className="text-xs text-ink-500 dark:text-parchment-300/70">
-                      UTF-8 CSV up to 10 MB
+                      {t('imp.evt.utf_8_csv_up_to')}
                     </p>
                   </>
                 )}
@@ -227,7 +227,7 @@ export default function ImportEventsModal({ onClose, onImported }) {
               onClick={onClose}
               className="px-5 py-2 rounded-lg bg-church-900 dark:bg-church-700 text-parchment-50 text-sm font-semibold shadow-warm hover:bg-church-800 dark:hover:bg-church-600 transition-colors"
             >
-              Done
+              {t('imp.evt.done')}
             </button>
           ) : (
             <>
@@ -236,7 +236,7 @@ export default function ImportEventsModal({ onClose, onImported }) {
                 onClick={onClose}
                 className="px-4 py-2 rounded-lg text-sm font-semibold text-ink-500 hover:text-ink-800 dark:text-parchment-300/70 dark:hover:text-parchment-100 transition-colors"
               >
-                Cancel
+                {t('imp.evt.cancel')}
               </button>
               <button
                 type="button"
@@ -245,7 +245,7 @@ export default function ImportEventsModal({ onClose, onImported }) {
                 className="inline-flex items-center gap-2 px-5 py-2 rounded-lg bg-church-900 dark:bg-church-700 text-parchment-50 text-sm font-semibold shadow-warm hover:bg-church-800 dark:hover:bg-church-600 transition-colors disabled:opacity-50"
               >
                 {loading && <Loader2 size={14} className="animate-spin" />}
-                {loading ? 'Importing…' : 'Import'}
+                {loading ? t('imp.evt.importing') : t('imp.evt.import')}
               </button>
             </>
           )}

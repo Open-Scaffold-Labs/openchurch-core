@@ -3,9 +3,13 @@
 // Up to two initials from a name, uppercased. Handles missing names and
 // extra whitespace safely so avatar fallbacks never crash.
 export function initials(name = '') {
-  return (name || '')
-    .split(' ')
-    .map(n => n[0])
+  // A leading bracketed tag ("[Sample] Aaliyah Jackson") is a label, not
+  // part of the name, and punctuation is never an initial: the avatar of
+  // every sample member read "[A" on a new parish's first visit.
+  return String(name || '')
+    .replace(/^\s*\[[^\]]*\]\s*/, '')
+    .split(/\s+/)
+    .map(n => (n.match(/\p{L}/u) || [])[0])
     .filter(Boolean)
     .slice(0, 2)
     .join('')

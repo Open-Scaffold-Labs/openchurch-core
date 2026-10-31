@@ -80,3 +80,31 @@ export function offeredParishTimeZones(names) {
   }
   return Array.from(new Set(out))
 }
+
+// Friendly, localized label for a zone in the Org details dropdown
+// (App Review R2 finding 10: raw IANA ids such as "America/Los_Angeles"
+// read as code to a parish admin). The option VALUE stays the IANA
+// name — only the visible text changes. Intl.DisplayNames has no
+// timeZone type, so the generic long name comes from DateTimeFormat
+// ("Pacific Time" / "hora del Pacífico"), followed by the city so two
+// zones that share a generic name stay distinguishable. Any runtime
+// failure falls back to the raw id, which is still a correct answer.
+export function parishTimeZoneLabel(zone, locale = 'en-US') {
+  if (typeof zone !== 'string' || !zone) return ''
+  // Etc/GMT+5 is the inverse-sign POSIX name; its city part would read as
+  // the opposite offset next to "GMT-05:00", so Etc zones show the name alone.
+  const city = zone === 'UTC' || zone.startsWith('Etc/') ? '' : zone.split('/').slice(-1)[0].replace(/_/g, ' ')
+  let name = ''
+  // UTC's generic name is just "GMT"; its long name says what it is.
+  const styles = zone === 'UTC' ? ['long', 'longGeneric'] : ['longGeneric', 'long']
+  for (const style of styles) {
+    try {
+      const parts = new Intl.DateTimeFormat(locale, { timeZone: zone, timeZoneName: style }).formatToParts(new Date())
+      name = parts.find(p => p.type === 'timeZoneName')?.value || ''
+      if (name) break
+    } catch { /* try the next style, then the raw id */ }
+  }
+  if (!name) return zone
+  if (!city || name.includes(city)) return name
+  return `${name} — ${city}`
+}

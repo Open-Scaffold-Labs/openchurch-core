@@ -4,6 +4,8 @@ import { motion } from 'framer-motion'
 import { Heart, Loader2, AlertTriangle, Check, ArrowLeft, RefreshCw } from 'lucide-react'
 import { apiUrl } from '../api'
 import { useLocale } from '../i18n'
+import { classifyAwayNavigation, validateCheckoutUrl } from '../native/awayNavigation'
+import { giftOpenedOutsideNote, giftPageDidNotOpenNote, giftReopenLabel, giftStartOverLabel } from '../native/planPurchase'
 
 // Public give page (Online giving / GIV.2). Unauthenticated —
 // a parishioner gives to one of the church's funds. The charge
@@ -22,6 +24,7 @@ import { useLocale } from '../i18n'
 // the giving contract.
 
 const QUICK_AMOUNTS = [25, 50, 100, 250]
+export const COVER_FEE_DEFAULT_CHECKED = false
 const FREQUENCIES = ['once', 'monthly', 'weekly']
 
 function fmtMoney(n) {
@@ -36,7 +39,7 @@ function frequencyLabel(frequency, t) {
 }
 
 export default function PublicGive() {
-  const { t, setPublicLocale } = useLocale()
+  const { t, setPublicLocale, locale } = useLocale()
   const { slug } = useParams()
   const [church, setChurch] = useState(null)
   const [funds, setFunds]   = useState([])
@@ -54,9 +57,16 @@ export default function PublicGive() {
   const [email, setEmail]     = useState('')
   const [message, setMessage] = useState('')
   const [frequency, setFrequency] = useState('once') // once | monthly | weekly
+  const [coverFee, setCoverFee]   = useState(COVER_FEE_DEFAULT_CHECKED)
 
-  const [status, setStatus] = useState('idle') // idle | submitting | done
+  // external = checkout opened outside the app and is unresolved; the
+  // same gift cannot be sent again until the user starts over.
+  const [status, setStatus] = useState('idle') // idle | submitting | external | done
   const [error, setError]   = useState('')
+  const [externalNote, setExternalNote] = useState('')
+  // The validated checkout address, kept so the same checkout can be
+  // reopened without creating a new session.
+  const [checkoutUrl, setCheckoutUrl] = useState('')
   const [receipt, setReceipt] = useState(null)
 
   // Deliberately NOT useLoad/LoadState here. This page's states are mostly
@@ -95,12 +105,29 @@ export default function PublicGive() {
   const reload = () => load()
 
   const amountNum = Number(amount)
-  const canSubmit = fundId && Number.isFinite(amountNum) && amountNum > 0 && name.trim() && status !== 'submitting'
+  const canSubmit = fundId && Number.isFinite(amountNum) && amountNum > 0 && name.trim() && status === 'idle'
+
+  async function openCheckout(target) {
+    let opened = false
+    try {
+      const { openSystemBrowser } = await import('../native/systemBrowser.js')
+      opened = (await openSystemBrowser(target)) === true
+    } catch {
+      opened = false
+    }
+    if (opened) {
+      setError('')
+      setExternalNote(giftOpenedOutsideNote(locale))
+    } else {
+      setExternalNote('')
+      setError(giftPageDidNotOpenNote(locale))
+    }
+  }
 
   async function onSubmit(e) {
     e.preventDefault()
     if (!canSubmit) return
-    setStatus('submitting'); setError('')
+    setStatus('submitting'); setError(''); setExternalNote('')
     try {
       const res = await fetch(apiUrl(`/api/public/${slug}/give`), {
         method:  'POST',
@@ -112,14 +139,49 @@ export default function PublicGive() {
           donor_email: email.trim() || undefined,
           message:     message.trim() || undefined,
           frequency:   frequency === 'once' ? undefined : frequency,
+          ...(coverFee ? { cover_fee: true } : {}),
         }),
       })
       const d = await res.json().catch(() => ({}))
       if (!res.ok) throw new Error(d.error || t('give.submitFail', { status: res.status }))
       // Live payments: the server hands back a hosted-checkout URL and
-      // the browser finishes the gift on the processor's page.
-      if (d.checkout_url) { window.location.assign(d.checkout_url); return }
-      setReceipt(d.receipt)
+      // the browser finishes the gift on the processor's page. Inside
+      // the iOS shell that page opens outside the parish WebView.
+      // A present checkout field (even null or '') is a checkout
+      // response and must pass the validator; only a genuine receipt
+      // (the 201 contract: amount + reference) means the gift landed.
+      if (d && Object.prototype.hasOwnProperty.call(d, 'checkout_url')) {
+        // Once the server has created a checkout, this gift stays
+        // unresolved on every path. Only "Start a new gift" resets it.
+        const target = validateCheckoutUrl(d.checkout_url)
+        if (!target) {
+          setCheckoutUrl('')
+          setError(giftPageDidNotOpenNote(locale))
+          setStatus('external')
+          return
+        }
+        setCheckoutUrl(target)
+        if (import.meta.env.VITE_CAPACITOR === '1'
+          && classifyAwayNavigation(target, window.location.href).action === 'system') {
+          setStatus('external')
+          await openCheckout(target)
+          return
+        }
+        window.location.assign(target)
+        return
+      }
+      const r = d?.receipt
+      const usableReceipt = r && typeof r === 'object'
+        && typeof r.amount === 'number' && Number.isFinite(r.amount) && r.amount > 0
+        && typeof r.reference === 'string' && r.reference.trim() !== ''
+      if (!usableReceipt) {
+        // No checkout and no receipt: never claim the gift was received.
+        setCheckoutUrl('')
+        setError(giftPageDidNotOpenNote(locale))
+        setStatus('external')
+        return
+      }
+      setReceipt(r)
       setStatus('done')
     } catch (err) {
       setError(err.message)
@@ -226,7 +288,7 @@ export default function PublicGive() {
             </span>
             <h2 className="font-display text-2xl font-semibold text-ink-900 dark:text-parchment-50">{t('give.thanks')}</h2>
             <p className="mt-2 text-sm text-ink-600 dark:text-parchment-300/80">
-              {t('give.receivedBefore')}<span className="font-semibold">{fmtMoney(receipt?.amount ?? amountNum)}</span>
+              {t('give.receivedBefore')}<span className="font-semibold">{fmtMoney(receipt?.amount)}</span>
               {receipt?.fund ? <>{t('give.receivedTo')}<span className="font-semibold">{receipt.fund}</span></> : null}{t('give.receivedAfter')}
               {receipt?.recurring && <>{t('give.repeatsBefore')}<span className="font-semibold">{frequencyLabel(receipt.recurring, t)}</span>{t('give.repeatsAfter')}</>}
             </p>
@@ -391,6 +453,40 @@ export default function PublicGive() {
               />
             </div>
 
+            <div className="pt-1">
+              <label htmlFor="give-cover-fee" className="flex items-center gap-2.5 text-xs text-ink-600 dark:text-parchment-300/80 cursor-pointer">
+                <input
+                  id="give-cover-fee"
+                  type="checkbox"
+                  checked={coverFee}
+                  onChange={e => setCoverFee(e.target.checked)}
+                  className="rounded border-parchment-300/70 dark:border-brass-900/40 text-church-800 focus:ring-church-500"
+                />
+                <span>{t('give.coverFee')}</span>
+              </label>
+            </div>
+
+            {externalNote && (
+              <p role="status" className="text-sm leading-relaxed text-ink-600 dark:text-parchment-300/80">{externalNote}</p>
+            )}
+            {status === 'external' && checkoutUrl && (
+              <button
+                type="button"
+                onClick={() => { openCheckout(checkoutUrl) }}
+                className="w-full px-5 py-2.5 rounded-xl border border-ink-200 dark:border-white/10 text-sm font-medium text-ink-700 dark:text-parchment-200"
+              >
+                {giftReopenLabel(locale)}
+              </button>
+            )}
+            {status === 'external' && (
+              <button
+                type="button"
+                onClick={() => { setExternalNote(''); setError(''); setCheckoutUrl(''); setStatus('idle') }}
+                className="w-full px-5 py-2.5 rounded-xl border border-ink-200 dark:border-white/10 text-sm font-medium text-ink-700 dark:text-parchment-200"
+              >
+                {giftStartOverLabel(locale)}
+              </button>
+            )}
             {error && <p role="alert" className="text-xs text-rose-700 dark:text-rose-300">{error}</p>}
 
             <button

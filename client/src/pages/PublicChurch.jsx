@@ -4,6 +4,7 @@ import { motion } from 'framer-motion'
 import { Clock, MapPin, Loader2, AlertTriangle, Calendar, ArrowRight, Users, Send, Check, Heart } from 'lucide-react'
 import { apiUrl } from '../api'
 import { useLocale } from '../i18n'
+import PublicSiteBlocks from './PublicSiteBlocks.jsx'
 
 // Public church homepage (Anchor 5 / A5.2). Unauthenticated — anyone
 // with the URL sees the church's published homepage. Like the public
@@ -90,7 +91,11 @@ function ConnectCard({ slug }) {
   const inputCls = 'w-full px-3 py-2.5 text-sm rounded-lg border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-50 dark:bg-ink-800 text-ink-900 dark:text-parchment-50 placeholder-ink-400 dark:placeholder-parchment-400/50 focus:outline-none focus:ring-2 focus:ring-church-500'
 
   return (
-    <section className="bg-parchment-100 dark:bg-ink-900/80 rounded-2xl border border-parchment-300/60 dark:border-brass-900/30 shadow-warm p-6 mb-6">
+    <section
+      id="connect"
+      tabIndex={-1}
+      className="bg-parchment-100 dark:bg-ink-900/80 rounded-2xl border border-parchment-300/60 dark:border-brass-900/30 shadow-warm p-6 mb-6 outline-none"
+    >
       <div className="flex items-center gap-2 mb-3">
         <Users size={15} className="text-brass-600 dark:text-brass-300" />
         <h2 className="text-sm font-semibold uppercase tracking-wider text-ink-700 dark:text-parchment-200">
@@ -123,10 +128,10 @@ function ConnectCard({ slug }) {
             )}
             {groups.length > 0 && (
               <div>
-                <label className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">
+                <label htmlFor="connect-interest" className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">
                   {t('contact.interest')}
                 </label>
-                <select value={form.group_id} onChange={field('group_id')} className={inputCls}>
+                <select id="connect-interest" value={form.group_id} onChange={field('group_id')} className={inputCls}>
                   <option value="">{t('contact.unsure')}</option>
                   {groups.map(g => (
                     <option key={g.id} value={g.id}>{g.name}</option>
@@ -134,24 +139,48 @@ function ConnectCard({ slug }) {
                 </select>
               </div>
             )}
-            <input
-              type="text"
-              value={form.name}
-              onChange={field('name')}
-              placeholder={t('contact.namePh')} aria-label={t('contact.namePh')}
-              className={inputCls}
-            />
-            <div className="grid sm:grid-cols-2 gap-3">
-              <input type="email" value={form.email} onChange={field('email')} placeholder={t('contact.emailPh')} aria-label={t('contact.emailPh')} className={inputCls} />
-              <input type="tel" value={form.phone} onChange={field('phone')} placeholder={t('contact.phonePh')} aria-label={t('contact.phonePh')} className={inputCls} />
+            {/* B-463-2: visible labels linked with htmlFor/id (calm, same as interest). */}
+            <div>
+              <label htmlFor="connect-name" className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">
+                {t('contact.name')}
+              </label>
+              <input
+                id="connect-name"
+                type="text"
+                value={form.name}
+                onChange={field('name')}
+                placeholder={t('contact.namePh')}
+                required
+                className={inputCls}
+              />
             </div>
-            <textarea
-              value={form.message}
-              onChange={field('message')}
-              rows={3}
-              placeholder={t('contact.messagePh')} aria-label={t('contact.messagePh')}
-              className={`${inputCls} resize-none`}
-            />
+            <div className="grid sm:grid-cols-2 gap-3">
+              <div>
+                <label htmlFor="connect-email" className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">
+                  {t('contact.email')}
+                </label>
+                <input id="connect-email" type="email" value={form.email} onChange={field('email')} placeholder={t('contact.emailPh')} className={inputCls} />
+              </div>
+              <div>
+                <label htmlFor="connect-phone" className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">
+                  {t('contact.phone')}
+                </label>
+                <input id="connect-phone" type="tel" value={form.phone} onChange={field('phone')} placeholder={t('contact.phonePh')} className={inputCls} />
+              </div>
+            </div>
+            <div>
+              <label htmlFor="connect-message" className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">
+                {t('contact.message')}
+              </label>
+              <textarea
+                id="connect-message"
+                value={form.message}
+                onChange={field('message')}
+                rows={3}
+                placeholder={t('contact.messagePh')}
+                className={`${inputCls} resize-none`}
+              />
+            </div>
             {error && <p className="text-xs text-rose-700 dark:text-rose-300">{error}</p>}
             <button
               type="submit"
@@ -196,6 +225,16 @@ export default function PublicChurch() {
   // endpoint's own giving_enabled flag is used where it is present rather
   // than inferring configuration from the number of funds.
   const [giving, setGiving] = useState('unknown')   // 'yes' | 'no' | 'unknown'
+  const [highContrast, setHighContrast] = useState(() => {
+    try { return localStorage.getItem('oc-public-high-contrast') === '1' } catch { return false }
+  })
+  const toggleHighContrast = () => {
+    setHighContrast((v) => {
+      const next = !v
+      try { localStorage.setItem('oc-public-high-contrast', next ? '1' : '0') } catch { /* private mode */ }
+      return next
+    })
+  }
 
   useEffect(() => {
     if (!slug) return
@@ -243,10 +282,10 @@ export default function PublicChurch() {
   // Restore the neutral default on unmount so navigating away doesn't
   // leave a stale church name in the tab.
   useEffect(() => {
-    const name = data?.church?.name
+    const name = data?.branding?.display_name || data?.church?.name
     if (name) document.title = name
     return () => { document.title = 'OpenChurch' }
-  }, [data?.church?.name])
+  }, [data?.branding?.display_name, data?.church?.name])
 
   if (loading) {
     return (
@@ -312,6 +351,16 @@ export default function PublicChurch() {
     )
   }
   const page = rawPage ?? {}
+  // Branding is resolved server-side (defaults = Parchment & Brass). A
+  // missing block still renders with the OpenChurch accent so an older
+  // API never blanks the page.
+  const branding = data.branding ?? {
+    display_name: church.name,
+    logo_url: null,
+    accent_hex: '#5A1E23',
+    using_defaults: true,
+  }
+  const displayName = branding.display_name || church.name
   const services = splitLines(page.service_times)
   const aboutParas = splitLines(page.about)
   const mapsUrl = page.address
@@ -319,27 +368,59 @@ export default function PublicChurch() {
     : null
 
   return (
-    <div className="min-h-screen bg-parchment-50 dark:bg-ink-950 px-4 py-12">
+    <div
+      className="min-h-screen bg-parchment-50 dark:bg-ink-950 px-4 py-12"
+      style={{ ['--parish-accent']: branding.accent_hex }}
+    >
+      {/* Beacon B-460-3 — skip link to main (same pattern as App shell). */}
+      <a
+        href="#main-content"
+        className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-[60] focus:px-4 focus:py-2 focus:rounded-lg focus:bg-church-900 focus:text-parchment-50 focus:text-sm focus:font-semibold focus:shadow-warm"
+      >
+        {t('shell.skipToContent')}
+      </a>
       <motion.div
         initial={{ opacity: 0, y: 12 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.35, ease: [0.25, 0.1, 0.25, 1] }}
         className="w-full max-w-2xl mx-auto"
       >
-        {/* Brand mark — same quiet 'powered by' cue as the events page. */}
-        <div className="flex items-center justify-center gap-3 mb-8">
-          <div className="w-10 h-10 rounded-xl bg-church-900 dark:bg-brass-200 flex items-center justify-center shadow-warm">
-            <svg width="16" height="20" viewBox="0 0 14 18" fill="currentColor" className="text-brass-200 dark:text-church-900">
-              <rect x="5.5" y="0" width="3" height="18" rx="1" />
-              <rect x="0" y="4" width="14" height="3" rx="1" />
-            </svg>
-          </div>
-        </div>
+        {/* Brand mark — parish logo when set; otherwise the quiet OpenChurch cue. */}
+        <header className="flex items-center justify-center gap-3 mb-8">
+          {branding.logo_url ? (
+            <img
+              src={branding.logo_url}
+              alt=""
+              className="h-14 w-14 rounded-xl object-contain shadow-warm bg-parchment-100 dark:bg-ink-900"
+            />
+          ) : (
+            <div
+              className="w-10 h-10 rounded-xl flex items-center justify-center shadow-warm"
+              style={{ backgroundColor: 'var(--parish-accent, #5A1E23)' }}
+            >
+              <svg width="16" height="20" viewBox="0 0 14 18" fill="currentColor" className="text-brass-200">
+                <rect x="5.5" y="0" width="3" height="18" rx="1" />
+                <rect x="0" y="4" width="14" height="3" rx="1" />
+              </svg>
+            </div>
+          )}
+        </header>
 
+        <main id="main-content" tabIndex={-1} className="outline-none">
+        {/* OC-WEB-1: published site blocks when present; else legacy 4-box. */}
+        {data.site?.doc?.pages?.some((p) => p.blocks?.length) ? (
+          <PublicSiteBlocks
+            site={data.site}
+            slug={slug}
+            highContrast={highContrast}
+            onToggleHighContrast={toggleHighContrast}
+          />
+        ) : (
+          <>
         {/* ── Hero ── */}
         <header className="text-center mb-10">
           <h1 className="font-display text-4xl md:text-5xl font-semibold text-ink-900 dark:text-parchment-50 tracking-tight">
-            {church.name}
+            {displayName}
           </h1>
           {page.tagline && (
             <p className="mt-4 text-lg md:text-xl text-ink-600 dark:text-parchment-200 font-display italic">
@@ -405,6 +486,8 @@ export default function PublicChurch() {
             )}
           </section>
         )}
+          </>
+        )}
 
         {/* ── Get connected (CC.2) ── */}
         <ConnectCard slug={slug} />
@@ -413,7 +496,8 @@ export default function PublicChurch() {
         <div className="flex flex-wrap items-center justify-center gap-3 mt-8">
           <Link
             to={`/p/${slug}/events`}
-            className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-church-900 dark:bg-church-700 text-parchment-50 text-sm font-semibold shadow-warm hover:bg-church-800 dark:hover:bg-church-600 transition-colors"
+            className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-parchment-50 text-sm font-semibold shadow-warm transition-colors"
+            style={{ backgroundColor: 'var(--parish-accent, #5A1E23)' }}
           >
             <Calendar size={15} /> {t('church.events')}
           </Link>
@@ -427,10 +511,12 @@ export default function PublicChurch() {
           )}
         </div>
 
+        </main>
+
         {/* Footer attribution — quiet */}
-        <p className="mt-12 text-center text-[11px] text-ink-500 dark:text-parchment-300/70">
-          {t('church.powered')}
-        </p>
+        <footer className="mt-12 text-center text-[11px] text-ink-500 dark:text-parchment-300/70">
+          <p>{t('church.powered')}</p>
+        </footer>
       </motion.div>
     </div>
   )

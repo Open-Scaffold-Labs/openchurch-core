@@ -2,6 +2,7 @@
 // parish. Red on removal of the picker or of requested_by_client_id from the
 // save payload; EN/ES copy present and distinct.
 import { ToastProvider } from '../components/ToastProvider'
+import { ConfirmProvider } from '../components/ConfirmProvider'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
@@ -31,7 +32,7 @@ function stub() {
     return ok([])
   }))
 }
-const book = () => render(<MemoryRouter initialEntries={['/mass-intentions']}><LocaleProvider><Routes><Route path="/mass-intentions" element={<ToastProvider><MassIntentions /></ToastProvider>} /></Routes></LocaleProvider></MemoryRouter>)
+const book = () => render(<MemoryRouter initialEntries={['/mass-intentions']}><LocaleProvider><Routes><Route path="/mass-intentions" element={<ToastProvider><ConfirmProvider><MassIntentions /></ConfirmProvider></ToastProvider>} /></Routes></LocaleProvider></MemoryRouter>)
 const saveBody = () => { const c = calls.find(c => c.init.method === 'POST' || c.init.method === 'PATCH'); return c && JSON.parse(c.init.body) }
 
 beforeEach(() => { vi.unstubAllGlobals(); localStorage.removeItem('ochr_locale'); stub() })

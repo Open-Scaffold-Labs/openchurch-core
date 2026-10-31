@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react'
 import { Bell, Loader2 } from 'lucide-react'
 import { apiUrl } from '../api'
 import { useToast } from './ToastProvider'
+import { useLocale } from '../i18n'
+import { STRINGS } from '../i18n/strings'
 
 // Notification preferences toggle list. Self-serve — reads/writes
 // /api/notification-prefs which scopes to the auth'd user.
@@ -10,24 +12,34 @@ import { useToast } from './ToastProvider'
 // PATCH happens in the background, and on failure the toggle reverts.
 // Avoids the "click → spinner → tick" delay on every interaction.
 
+// The server sends each template's English label and description
+// (server/src/notifications/templates.js). Known types are shown from
+// notif.type.<type>.* in the parish language; a type the client has no
+// key for yet falls back to the server's sentence rather than a raw key.
+function notifTypeText(t, p, field) {
+  const key = `notif.type.${p.notification_type}.${field}`
+  return STRINGS.en[key] ? t(key) : (field === 'label' ? p.label : p.description)
+}
+
 export default function NotificationPrefs() {
   const [prefs, setPrefs]     = useState(null)
   const [loading, setLoading] = useState(true)
   const [savingType, setSavingType] = useState(null)
   const toast = useToast()
+  const { t } = useLocale()
 
   useEffect(() => {
     let cancelled = false
     fetch(apiUrl('/api/notification-prefs'))
       .then(async r => {
-        if (!r.ok) throw new Error('Failed to load preferences')
+        if (!r.ok) throw new Error(t('notif.loadFailed'))
         return r.json()
       })
       .then(data => { if (!cancelled) setPrefs(data.prefs ?? []) })
       .catch(err => { if (!cancelled) toast.error(err.message) })
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
-  }, [toast])
+  }, [toast, t])
 
   async function toggle(notification_type, nextEnabled) {
     // Optimistic flip — user sees the change immediately.
@@ -43,14 +55,14 @@ export default function NotificationPrefs() {
       })
       if (!res.ok) {
         const data = await res.json().catch(() => ({}))
-        throw new Error(data.error || `Save failed (${res.status})`)
+        throw new Error(data.error || t('notif.saveFailed', { status: res.status }))
       }
     } catch (err) {
       // Revert the optimistic flip — keep the visual model honest.
       setPrefs(p => p.map(x =>
         x.notification_type === notification_type ? { ...x, enabled: !nextEnabled } : x
       ))
-      toast.error(err.message || 'Could not update preference')
+      toast.error(err.message || t('notif.updateFailed'))
     } finally {
       setSavingType(null)
     }
@@ -68,22 +80,26 @@ export default function NotificationPrefs() {
   return (
     <div className="bg-parchment-50 dark:bg-ink-900/90 rounded-2xl border border-parchment-300/50 dark:border-brass-900/30 shadow-sm overflow-hidden">
       <div className="px-5 py-4 border-b border-parchment-300/50 dark:border-brass-900/25 flex items-center gap-2">
-        <Bell size={15} className="text-brass-600 dark:text-brass-300" />
-        <h2 className="font-semibold text-ink-900 dark:text-parchment-50">Notification preferences</h2>
+        <Bell size={15} aria-hidden="true" className="text-brass-600 dark:text-brass-300" />
+        <h2 className="font-semibold text-ink-900 dark:text-parchment-50">{t('notif.title')}</h2>
       </div>
       <ul className="divide-y divide-parchment-200/50 dark:divide-brass-900/20">
         {prefs.map(p => {
           const isSaving = savingType === p.notification_type
+          const label = notifTypeText(t, p, 'label')
+          const description = notifTypeText(t, p, 'desc')
           return (
             <li key={p.notification_type} className="px-5 py-4 flex items-start justify-between gap-4">
               <div className="min-w-0">
-                <p className="text-sm font-medium text-ink-900 dark:text-parchment-50">{p.label}</p>
-                <p className="text-xs text-ink-500 dark:text-parchment-300/70 mt-0.5">{p.description}</p>
+                <p className="text-sm font-medium text-ink-900 dark:text-parchment-50">{label}</p>
+                <p className="text-xs text-ink-500 dark:text-parchment-300/70 mt-0.5">{description}</p>
               </div>
               <button
                 role="switch"
                 aria-checked={p.enabled}
-                aria-label={`${p.enabled ? 'Disable' : 'Enable'} ${p.label}`}
+                // A switch is named by what it controls; on/off is aria-checked.
+                // "Enable X" on a checked switch read as the opposite state.
+                aria-label={label}
                 disabled={isSaving}
                 onClick={() => toggle(p.notification_type, !p.enabled)}
                 className={`relative shrink-0 w-11 h-6 rounded-full transition-colors disabled:opacity-50 ${
@@ -103,7 +119,7 @@ export default function NotificationPrefs() {
         })}
       </ul>
       <div className="px-5 py-3 border-t border-parchment-300/50 dark:border-brass-900/25 bg-parchment-100/40 dark:bg-ink-800/20 text-xs text-ink-500 dark:text-parchment-300/70">
-        Email delivery is being set up — for now, notifications are recorded but not sent.
+        {t('notif.emailPending')}
       </div>
     </div>
   )

@@ -19,7 +19,7 @@ import pool from '../src/db.js'
 import {
   PREVIOUSLY_RECORDED_FULFILMENT,
   STAMP_CONFLICT_CODE,
-  STAMPED_HISTORY_CODE,
+  FULFILLED_OFFERING_LOCKED_CODE,
 } from '../src/routes/massIntentions.js'
 import { RUN_ID, bindServer, closeServer, migrateOnce } from './support/harness.js'
 import { createOrg } from './support/provision.js'
@@ -53,7 +53,7 @@ function makeMass(body) {
     title: body.title,
     date: body.date,
     start_time: body.start_time || '09:00',
-    end_time: body.end_time || '10:00',
+    end_time: body.end_time || '23:00', // SP-106: end must be after any fixture start
     type: 'service',
   })
 }
@@ -94,7 +94,7 @@ function triple(row) {
 }
 
 describe('recorded fulfilment cannot be re-linked or quietly re-fulfilled', () => {
-  it('reopen then re-link to another Mass is 409 stamped_history and the stamp is byte-identical', async () => {
+  it('reopen then re-link to another Mass is 409 F6 fulfilled_offering_locked on assign and PATCH (R405-1) and the stamp is byte-identical', async () => {
     const massA = await makeMass({ title: `Mass A ${RUN_ID}`, date: '2034-04-02', start_time: '08:00' })
     const massB = await makeMass({ title: `Mass B ${RUN_ID}`, date: '2034-04-09', start_time: '11:00' })
     expect(massA.status).toBe(201)
@@ -104,9 +104,9 @@ describe('recorded fulfilment cannot be re-linked or quietly re-fulfilled', () =
     expect(before.fulfilled_mass_date).toBe('2034-04-02')
     expect(before.fulfilled_mass_title).toBe(`Mass A ${RUN_ID}`)
 
-    const reopened = await request(server).patch(`/api/mass-intentions/${id}`)
+    const reopened = await request(server).post(`/api/mass-intentions/${id}/correct`)
       .set(auth(tokenA))
-      .send({ status: 'open' })
+      .send({ reason: 'Recorded in error', changes: { status: 'open' } })
     expect(reopened.status).toBe(200)
     expect(reopened.body.status).toBe('scheduled')
 
@@ -114,13 +114,13 @@ describe('recorded fulfilment cannot be re-linked or quietly re-fulfilled', () =
       .set(auth(tokenA))
       .send({ calendar_event_id: massB.body.id, expected_calendar_event_id: massA.body.id })
     expect(assigned.status).toBe(409)
-    expect(assigned.body.code).toBe(STAMPED_HISTORY_CODE)
+    expect(assigned.body.code).toBe(FULFILLED_OFFERING_LOCKED_CODE)
 
     const patched = await request(server).patch(`/api/mass-intentions/${id}`)
       .set(auth(tokenA))
       .send({ calendar_event_id: massB.body.id })
     expect(patched.status).toBe(409)
-    expect(patched.body.code).toBe(STAMPED_HISTORY_CODE)
+    expect(patched.body.code).toBe(FULFILLED_OFFERING_LOCKED_CODE)
 
     const after = await stampBytes(id)
     expect(triple(after)).toEqual(triple(before))
@@ -135,15 +135,15 @@ describe('recorded fulfilment cannot be re-linked or quietly re-fulfilled', () =
     expect(triple(await stampBytes(id))).toEqual(triple(before))
   })
 
-  it('PATCH calendar_event_id on a fulfilled row is 409 stamped_history and the stamp is byte-identical', async () => {
+  it('PATCH calendar_event_id on a fulfilled row is 409 F6 fulfilled_offering_locked (R405-1) and the stamp is byte-identical', async () => {
     const massA = await makeMass({ title: `Held A ${RUN_ID}`, date: '2034-05-06', start_time: '09:15' })
     const massB = await makeMass({ title: `Held B ${RUN_ID}`, date: '2034-05-13', start_time: '09:15' })
     const id = await offerThenFulfill(`† Stay fulfilled ${RUN_ID}`, massA.body)
     const before = await stampBytes(id)
 
-    const noted = await request(server).patch(`/api/mass-intentions/${id}`)
+    const noted = await request(server).post(`/api/mass-intentions/${id}/correct`)
       .set(auth(tokenA))
-      .send({ note: 'still this Mass', calendar_event_id: massA.body.id })
+      .send({ reason: 'Recorded in error', changes: { note: 'still this Mass', calendar_event_id: massA.body.id } })
     expect(noted.status).toBe(200)
     expect(noted.body.calendar_event_id).toBe(massA.body.id)
     expect(triple(await stampBytes(id))).toEqual(triple(before))
@@ -152,7 +152,7 @@ describe('recorded fulfilment cannot be re-linked or quietly re-fulfilled', () =
       .set(auth(tokenA))
       .send({ calendar_event_id: massB.body.id })
     expect(moved.status).toBe(409)
-    expect(moved.body.code).toBe(STAMPED_HISTORY_CODE)
+    expect(moved.body.code).toBe(FULFILLED_OFFERING_LOCKED_CODE)
 
     const after = await stampBytes(id)
     expect(triple(after)).toEqual(triple(before))
@@ -181,9 +181,9 @@ describe('recorded fulfilment cannot be re-linked or quietly re-fulfilled', () =
       })
     expect(moved.status).toBe(200)
 
-    const reopened = await request(server).patch(`/api/mass-intentions/${id}`)
+    const reopened = await request(server).post(`/api/mass-intentions/${id}/correct`)
       .set(auth(tokenA))
-      .send({ status: 'open' })
+      .send({ reason: 'Recorded in error', changes: { status: 'open' } })
     expect(reopened.status).toBe(200)
     expect(reopened.body.status).toBe('scheduled')
     expect(reopened.body.mass_date).toBe('2034-06-10')
@@ -209,14 +209,15 @@ describe('recorded fulfilment cannot be re-linked or quietly re-fulfilled', () =
     const id = await offerThenFulfill(`† Same day ${RUN_ID}`, mass.body)
     const before = await stampBytes(id)
 
-    const demote = await request(server).patch(`/api/mass-intentions/${id}`)
+    const demote = await request(server).post(`/api/mass-intentions/${id}/correct`)
       .set(auth(tokenA))
-      .send({ status: 'open' })
+      .send({ reason: 'Recorded in error', changes: { status: 'open' } })
     expect(demote.status).toBe(200)
 
-    const again = await request(server).patch(`/api/mass-intentions/${id}`)
+    // R339-1: the row stays history after reopen, so re-fulfil is a reasoned correction.
+    const again = await request(server).post(`/api/mass-intentions/${id}/correct`)
       .set(auth(tokenA))
-      .send({ status: 'fulfilled' })
+      .send({ reason: 'Fulfilled after all', changes: { status: 'fulfilled' } })
     expect(again.status).toBe(200)
     expect(again.body.status).toBe('fulfilled')
     expect(again.body.mass_date).toBe('2034-07-07')
@@ -234,9 +235,9 @@ describe('recorded fulfilment cannot be re-linked or quietly re-fulfilled', () =
     expect(whileFulfilled.body.status).toBe('fulfilled')
     expect(whileFulfilled.body.fulfilment_label).toBeNull()
 
-    const reopened = await request(server).patch(`/api/mass-intentions/${id}`)
+    const reopened = await request(server).post(`/api/mass-intentions/${id}/correct`)
       .set(auth(tokenA))
-      .send({ status: 'open' })
+      .send({ reason: 'Recorded in error', changes: { status: 'open' } })
     expect(reopened.status).toBe(200)
     expect(reopened.body.status).not.toBe('fulfilled')
     expect(reopened.body.fulfilment_label).toBe(PREVIOUSLY_RECORDED_FULFILMENT)
@@ -275,14 +276,14 @@ describe('recorded fulfilment cannot be re-linked or quietly re-fulfilled', () =
     expect(rows[0].fulfilment_label).toBe(PREVIOUSLY_RECORDED_FULFILMENT)
   })
 
-  it('reopen then unassign is 409 stamped_history and the link stays on that Mass', async () => {
+  it('reopen then unassign is 409 F6 fulfilled_offering_locked and the link stays on that Mass', async () => {
     const mass = await makeMass({ title: `Own Mass ${RUN_ID}`, date: '2034-09-09', start_time: '09:00' })
     const id = await offerThenFulfill(`† Unlink ${RUN_ID}`, mass.body)
     const before = await stampBytes(id)
 
-    const reopened = await request(server).patch(`/api/mass-intentions/${id}`)
+    const reopened = await request(server).post(`/api/mass-intentions/${id}/correct`)
       .set(auth(tokenA))
-      .send({ status: 'open' })
+      .send({ reason: 'Recorded in error', changes: { status: 'open' } })
     expect(reopened.status).toBe(200)
     expect(reopened.body.status).toBe('scheduled')
 
@@ -290,7 +291,7 @@ describe('recorded fulfilment cannot be re-linked or quietly re-fulfilled', () =
       .set(auth(tokenA))
       .send({ expected_calendar_event_id: mass.body.id })
     expect(released.status).toBe(409)
-    expect(released.body.code).toBe(STAMPED_HISTORY_CODE)
+    expect(released.body.code).toBe(FULFILLED_OFFERING_LOCKED_CODE)
 
     const after = await stampBytes(id)
     expect(triple(after)).toEqual(triple(before))
@@ -308,9 +309,9 @@ describe('recorded fulfilment cannot be re-linked or quietly re-fulfilled', () =
   it('an already unlinked stamped intention is not offered in awaiting', async () => {
     const mass = await makeMass({ title: `Deleted Mass ${RUN_ID}`, date: '2034-10-10', start_time: '10:00' })
     const id = await offerThenFulfill(`† Orphan ${RUN_ID}`, mass.body)
-    const reopened = await request(server).patch(`/api/mass-intentions/${id}`)
+    const reopened = await request(server).post(`/api/mass-intentions/${id}/correct`)
       .set(auth(tokenA))
-      .send({ status: 'open' })
+      .send({ reason: 'Recorded in error', changes: { status: 'open' } })
     expect(reopened.status).toBe(200)
 
     // The Mass FK is ON DELETE SET NULL. This is that row, without deleting

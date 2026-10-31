@@ -44,7 +44,7 @@ const HARD_EN = [
   'Weekly Bulletin',
   'Prayer & Mass Intentions',
   'From the Pastor',
-  'Powered by OpenChurch',
+  'Powered by ScaffoldLabs',
 ]
 
 const BULLETIN_KEYS = [
@@ -128,8 +128,10 @@ describe('PublicBulletin chrome is translated', () => {
     expect(screen.queryByRole('heading', { name: STRINGS.en['bulletin.intentions'] })).toBeNull()
     expect(screen.getByRole('heading', { name: STRINGS.es['bulletin.pastor'] })).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: STRINGS.en['bulletin.pastor'] })).toBeNull()
+    // Brand credit matches church.powered (ES: Con tecnología de ScaffoldLabs).
     expect(screen.getByText(STRINGS.es['bulletin.powered'])).toBeInTheDocument()
-    expect(screen.queryByText(STRINGS.en['bulletin.powered'])).toBeNull()
+    expect(STRINGS.es['bulletin.powered']).toBe(STRINGS.es['church.powered'])
+    expect(STRINGS.es['bulletin.powered']).not.toBe(STRINGS.en['bulletin.powered'])
     // Parish-supplied content is still the API text — not inventively translated.
     expect(screen.getByText('Isaiah 55:1-9')).toBeInTheDocument()
     expect(screen.getByText('Choir practice Tuesday')).toBeInTheDocument()
@@ -179,11 +181,14 @@ describe('PublicBulletin chrome is translated', () => {
 
   it('i18n strings and the component wiring cannot reintroduce hard-EN chrome', () => {
     const jsx = stripComments(BULLETIN_SRC)
+    const SAME_IN_BOTH = new Set(['bulletin.powered'])
     for (const key of BULLETIN_KEYS) {
       expect(BULLETIN_SRC, key).toMatch(new RegExp(`t\\('${key.replace('.', '\\.')}'`))
       expect(STRINGS.en[key], key).toBeTruthy()
       expect(STRINGS.es[key], key).toBeTruthy()
-      expect(STRINGS.es[key], key).not.toBe(STRINGS.en[key])
+      if (!SAME_IN_BOTH.has(key)) {
+        expect(STRINGS.es[key], key).not.toBe(STRINGS.en[key])
+      }
     }
     expect(BULLETIN_SRC).toMatch(/useLocale\(/)
     expect(BULLETIN_SRC).toMatch(/setPublicLocale/)
@@ -204,7 +209,7 @@ describe('PublicBulletin chrome is translated', () => {
     expect(STRINGS.en['bulletin.announcements']).toBe('Announcements')
     expect(STRINGS.en['bulletin.intentions']).toBe('Prayer & Mass Intentions')
     expect(STRINGS.en['bulletin.pastor']).toBe('From the Pastor')
-    expect(STRINGS.en['bulletin.powered']).toBe('Powered by OpenChurch')
+    expect(STRINGS.en['bulletin.powered']).toBe('Powered by ScaffoldLabs')
     expect(STRINGS.en['bulletin.notFoundBody']).toMatch(/hasn't published a bulletin/i)
     expect(STRINGS.es['bulletin.notFound']).toMatch(/bolet[ií]n/i)
     expect(STRINGS.es['bulletin.title']).toMatch(/bolet[ií]n/i)
@@ -212,6 +217,7 @@ describe('PublicBulletin chrome is translated', () => {
     expect(STRINGS.es['bulletin.announcements']).toMatch(/aviso/i)
     expect(STRINGS.es['bulletin.intentions']).toMatch(/intencion/i)
     expect(STRINGS.es['bulletin.pastor']).toMatch(/p[aá]rroco/i)
-    expect(STRINGS.es['bulletin.powered']).toMatch(/openchurch/i)
+    expect(STRINGS.es['bulletin.powered']).toBe('Con tecnología de ScaffoldLabs')
+    expect(STRINGS.es['bulletin.powered']).toBe(STRINGS.es['church.powered'])
   })
 })

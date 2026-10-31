@@ -6,6 +6,7 @@ import { requireIntParam } from '../utils/params.js'
 import { apiBase } from '../utils/publicUrl.js'
 import { memberByEmail } from '../directory/memberIdentity.js'
 import { monitor } from '../monitoring/index.js'
+import { calendarFeedLimiter } from '../middleware/rateLimit.js'
 
 // Two sub-routers:
 // - publicRouter : the ICS subscription URL. Authenticated by the opaque
@@ -105,7 +106,7 @@ export function generateICS(client, tasks, events, scheduleEvents) {
 // The token is the capability — anyone holding it gets that member's feed.
 // Every query here is scoped to the client's organization so we never
 // leak cross-tenant events even if tokens collide (shouldn't, but belt-and-suspenders).
-publicRouter.get('/:token.ics', async (req, res) => {
+publicRouter.get('/:token.ics', calendarFeedLimiter, async (req, res) => {
   try {
     const { token } = req.params
     const { rows: clientRows } = await pool.query(

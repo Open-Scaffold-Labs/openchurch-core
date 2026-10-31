@@ -3,6 +3,7 @@ import { motion } from 'framer-motion'
 import { AlertTriangle, LifeBuoy } from 'lucide-react'
 import { sheetOverlayCls, sheetPanelCls } from './MobileSheet'
 import { useLocale } from '../i18n'
+import { useDialogMotion } from '../hooks/useDialogMotion'
 
 // App-wide confirmation dialog. Replaces native confirm() everywhere.
 //
@@ -80,6 +81,8 @@ const FOCUSABLE =
   'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
 
 export function ConfirmProvider({ children }) {
+  // Phone: rises from the bottom as a sheet; wider: lifts gently (V1.5).
+  const panelMotion = useDialogMotion()
   const { t } = useLocale()
   const [request, setRequest] = useState(null)
   const [value, setValue] = useState('')
@@ -218,9 +221,9 @@ export function ConfirmProvider({ children }) {
           >
             <motion.div
               ref={panelRef}
-              initial={{ opacity: 0, y: 12 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.18, ease: 'easeOut' }}
+              initial={panelMotion.initial}
+              animate={panelMotion.animate}
+              transition={panelMotion.transition}
               role="alertdialog"
               aria-modal="true"
               aria-labelledby="confirm-title"
@@ -283,7 +286,7 @@ export function ConfirmProvider({ children }) {
                   <button
                     ref={cancelRef}
                     onClick={cancel}
-                    className="px-4 py-2.5 rounded-xl text-sm font-semibold text-ink-700 dark:text-parchment-200 border border-parchment-300/70 dark:border-brass-900/40 hover:bg-parchment-200/60 dark:hover:bg-ink-800 transition-colors"
+                    className="px-3 py-2.5 text-sm font-medium text-ink-500 dark:text-parchment-300/70 hover:text-ink-800 dark:hover:text-parchment-50 transition-colors"
                   >
                     {request.cancelLabel}
                   </button>

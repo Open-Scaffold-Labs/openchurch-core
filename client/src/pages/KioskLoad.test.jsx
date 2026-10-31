@@ -16,6 +16,7 @@ import { render, screen, waitFor, fireEvent, act } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { LocaleProvider } from '../i18n'
+import { STRINGS } from '../i18n/strings'
 import Kiosk from './Kiosk'
 
 vi.mock('../context/AuthContext', () => ({
@@ -53,10 +54,12 @@ const mount = () => render(
   </MemoryRouter>
 )
 
-const ROTATED   = /link may have been rotated/i
-const OUR_SIDE  = /couldn'?t reach the kiosk just now/i
-const NO_MATCH  = /no members match/i
-const SEARCH_BAD= /couldn'?t search the roster/i
+const en = STRINGS.en
+const ROTATED   = en['kiosk.notFound']
+const OUR_SIDE  = en['kiosk.reachFail']
+const NO_MATCH  = en['kiosk.noMatch']
+const SEARCH_BAD= en['kiosk.searchFail']
+const ASK_STAFF = en['kiosk.askStaff']
 
 const search = async (q = 'Mar') => {
   const box = await screen.findByRole('textbox')
@@ -76,7 +79,7 @@ describe('reading the kiosk', () => {
   it('a 404 really is a rotated link, and still says so', async () => {
     routes({ '/api/kiosk/tok123': () => err(404) }); mount()
     expect(await screen.findByText(ROTATED)).toBeInTheDocument()
-    expect(screen.getByText(/fresh kiosk link/i)).toBeInTheDocument()
+    expect(screen.getByText(ASK_STAFF)).toBeInTheDocument()
   })
 
   for (const status of [500, 503]) {
@@ -86,7 +89,7 @@ describe('reading the kiosk', () => {
       expect(screen.queryByText(ROTATED)).not.toBeInTheDocument()
       // The advice must match the diagnosis: a retry, not a fresh link.
       expect(screen.getByRole('button', { name: /try again/i })).toBeInTheDocument()
-      expect(screen.queryByText(/fresh kiosk link/i)).not.toBeInTheDocument()
+      expect(screen.queryByText(ASK_STAFF)).not.toBeInTheDocument()
     })
   }
 })

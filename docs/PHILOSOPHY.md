@@ -81,8 +81,9 @@ letterhead, the certificate, the printed manifest — and we render them beautif
 screens without pretending screens are paper.
 
 **The software should feel like a well-kept book** — it waits until it is needed, opens to
-the right page, and never shouts. Nothing blinks, counts, or competes for attention. One
-primary action per surface. Motion is rare, brief, and never celebratory.
+the right page, and never shouts. Nothing blinks or competes for attention; a total may count
+once, briefly, to a value the user just changed. One primary action per surface. Motion is
+brief, purposeful, and never celebratory.
 
 **Warmth is not decoration; it is load-bearing** (P6). A parish secretary meets this
 software on her worst Tuesday. Every empty state, loading moment, and error is written and
@@ -232,20 +233,29 @@ terminal.
 
 ## 12. Motion Philosophy
 
-Motion in OpenChurch is **the turning of a page, not the spinning of a wheel**. Its only
-legitimate jobs are continuity (this panel came from that list) and acknowledgment (your
-entry was received). Entrances are 300–500ms on a calm curve; exits are quicker; nothing
-pulses, bounces, springs, hovers-and-grows, or celebrates. Confetti is a firing offense
-dressed as a feature.
+Motion in OpenChurch is **the turning of a page, not the spinning of a wheel**. Its legitimate
+jobs are continuity (this panel came from that list), acknowledgment (your entry was received),
+and orientation (you are here; this just changed). Every motion is short and eases out:
+feedback on a control runs 150–300ms, panels and dialogs 240–400ms, and exits are quicker
+than entrances. Nothing pulses, bounces, springs, hovers-and-grows, or celebrates. Confetti is
+a firing offense dressed as a feature.
 
 Why so strict? Because motion is the most trend-dated element of any interface — the
 bounces of one decade are the cringe of the next — and because animation spends the user's
 attention, which we hold in trust (P5). A parish secretary's attention belongs to her
 parish. Stillness is the default; motion is the exception that must justify itself.
 
-The deepest rule: **the most sacred moments get the least motion.** Committing to the
-register is acknowledged with words — "Entered in the register." — not fireworks. Ceremony
-is stillness plus language (P2).
+The deepest rule: **the most sacred moments get the quietest motion.** Committing to the
+register is acknowledged first with words — "Entered in the register." — and the new entry
+may settle onto the page like fresh ink, once, in under a second. Motion may support the
+words; it never replaces them. Ceremony is stillness plus language (P2).
+
+Every motion yields to the operating system's reduce-motion setting: the change still
+happens, at once.
+
+*Amended 2026-10-25 by the founder (José Rivera) to admit the approved motion studies:
+acknowledgment on the register, a single brief count on a changed total, and a quiet
+progress ring while a save is in flight. The 300–500ms entrance band became the ranges above.*
 
 ## 13. Accessibility Philosophy
 

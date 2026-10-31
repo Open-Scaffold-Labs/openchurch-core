@@ -85,7 +85,7 @@ export default function ParishDetail() {
 
   return (
     <div className="max-w-4xl">
-      <Link to="/care" className="inline-flex items-center gap-1 text-[12.5px] text-ink-500 hover:text-church-700 mb-4">
+      <Link to="/care" className="inline-flex items-center gap-1 text-xs text-ink-500 hover:text-church-700 mb-4">
         <ChevronLeft size={14} /> Parish Care
       </Link>
 
@@ -97,7 +97,7 @@ export default function ParishDetail() {
           <FileText size={14} /> Care brief
         </Link>
       </div>
-      <div className="flex flex-wrap items-center gap-2.5 text-[12.5px] text-ink-500 mb-3">
+      <div className="flex flex-wrap items-center gap-2.5 text-xs text-ink-500 mb-3">
         {parish.region && <span>{parish.region}</span>}
         {parish.tradition && parish.tradition !== 'general' && <span className="capitalize">{parish.tradition}</span>}
         <span>Sharing: {parish.grant_level}</span>
@@ -129,8 +129,8 @@ export default function ParishDetail() {
             {work.submissions.filter(s => s.status === 'submitted').map(s => (
               <Link key={`r${s.id}`} to={`/review/${s.id}`} className="block rounded-lg border border-parchment-300/70 bg-parchment-50 p-3 hover:bg-parchment-100 transition-colors">
                 <p className="text-[10.5px] font-semibold uppercase tracking-widest text-brass-600 mb-1">Prepared for review</p>
-                <p className="text-[13.5px] text-ink-800 leading-snug">{s.period_start} to {s.period_end}</p>
-                <p className="text-[11.5px] text-ink-500 mt-1 leading-snug">Read it together →</p>
+                <p className="text-sm text-ink-800 leading-snug">{s.period_start} to {s.period_end}</p>
+                <p className="text-[11px] text-ink-500 mt-1 leading-snug">Read it together →</p>
               </Link>
             ))}
             {work.followups.map(f => (
@@ -193,8 +193,8 @@ export default function ParishDetail() {
                     {t.occurred_on} · {KIND_LABEL[t.kind] ?? t.kind}
                     {t.visibility === 'shared' && <span className="ml-1.5 normal-case tracking-normal text-brass-600">shared with the parish</span>}
                   </p>
-                  <p className="text-[13.5px] text-ink-800 leading-snug mt-0.5">{t.summary}</p>
-                  {t.detail && <p className="text-[12.5px] text-ink-500 leading-snug mt-1">{t.detail}</p>}
+                  <p className="text-sm text-ink-800 leading-snug mt-0.5">{t.summary}</p>
+                  {t.detail && <p className="text-xs text-ink-500 leading-snug mt-1">{t.detail}</p>}
                   {t.actor_name && <p className="text-[11px] text-ink-400 mt-1">{t.actor_name}</p>}
                 </li>
               ))}
@@ -210,8 +210,8 @@ function Card({ label, body, foot }) {
   return (
     <div className="rounded-lg border border-parchment-300/70 bg-parchment-50 p-3">
       <p className="text-[10.5px] font-semibold uppercase tracking-widest text-brass-600 mb-1">{label}</p>
-      <p className="text-[13.5px] text-ink-800 leading-snug capitalize-first">{body}</p>
-      {foot && <p className="text-[11.5px] text-ink-500 mt-1 leading-snug">{foot}</p>}
+      <p className="text-sm text-ink-800 leading-snug capitalize-first">{body}</p>
+      {foot && <p className="text-[11px] text-ink-500 mt-1 leading-snug">{foot}</p>}
     </div>
   )
 }

@@ -81,7 +81,7 @@ export default function ReportReview() {
 
   return (
     <div className="max-w-3xl">
-      <Link to={`/care/${s.parish_org_id}`} className="inline-flex items-center gap-1 text-[12.5px] text-ink-500 hover:text-church-700 mb-4">
+      <Link to={`/care/${s.parish_org_id}`} className="inline-flex items-center gap-1 text-xs text-ink-500 hover:text-church-700 mb-4">
         <ChevronLeft size={14} /> {s.parish_name}
       </Link>
 
@@ -108,7 +108,7 @@ export default function ReportReview() {
               className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-church-600 text-parchment-50 text-sm font-semibold hover:bg-church-700 disabled:opacity-60">
               <Check size={14} /> We read this together
             </button>
-            <p className="text-[11.5px] text-ink-500 mt-2 leading-relaxed">
+            <p className="text-[11px] text-ink-500 mt-2 leading-relaxed">
               This records a conversation. It does not accept the report for assessment,
               and the parish is told only that its report was read.
             </p>
@@ -128,9 +128,9 @@ export default function ReportReview() {
           <ul className="space-y-3 mb-5">
             {data.notes.map(n => (
               <li key={n.id} className="rounded-lg border border-parchment-300/70 bg-parchment-50 p-3.5">
-                <p className="text-[13.5px] text-ink-800 leading-snug">{n.body}</p>
+                <p className="text-sm text-ink-800 leading-snug">{n.body}</p>
                 {n.agreed_next_step && (
-                  <p className="text-[12.5px] text-ink-600 mt-1.5">Agreed: {n.agreed_next_step}</p>
+                  <p className="text-xs text-ink-600 mt-1.5">Agreed: {n.agreed_next_step}</p>
                 )}
                 <p className="text-[11px] text-ink-400 mt-1.5">
                   {String(n.created_at).slice(0, 10)}
@@ -158,7 +158,7 @@ export default function ReportReview() {
           <label htmlFor="agreed" className="sr-only">What was agreed</label>
           <input id="agreed" className={input} value={nextStep} onChange={e => setNextStep(e.target.value)}
             placeholder="What was agreed, if anything" />
-          <label className="flex items-center gap-2 text-[12.5px] text-ink-600">
+          <label className="flex items-center gap-2 text-xs text-ink-600">
             <input type="checkbox" checked={shared} onChange={e => setShared(e.target.checked)} />
             Share this note with the parish
           </label>
@@ -188,8 +188,8 @@ export default function ReportReview() {
           <ul className="space-y-2">
             {data.followups.map(f => (
               <li key={f.id} className="rounded-lg border border-parchment-300/70 bg-parchment-50 p-3.5">
-                <p className="text-[13.5px] text-ink-800 leading-snug">{f.next_action}</p>
-                <p className="text-[11.5px] text-ink-500 mt-1">
+                <p className="text-sm text-ink-800 leading-snug">{f.next_action}</p>
+                <p className="text-[11px] text-ink-500 mt-1">
                   {[f.context, f.owner_name ? `with ${f.owner_name}` : 'unassigned',
                     f.due_on && `noted for ${f.due_on}`,
                     f.state !== 'open' && (f.state === 'done' ? 'done' : 'let go'),

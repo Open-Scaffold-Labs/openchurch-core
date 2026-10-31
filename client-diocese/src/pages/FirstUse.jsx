@@ -53,7 +53,7 @@ export default function FirstUse() {
       </button>
 
       <p className="font-serif text-lg font-bold text-church-700 mb-1">What is here</p>
-      <p className="text-[12.5px] text-ink-500 mb-4 max-w-2xl leading-relaxed">
+      <p className="text-xs text-ink-500 mb-4 max-w-2xl leading-relaxed">
         Five screens, in the order they are usually used. Nothing needs setting up first.
       </p>
 
@@ -70,7 +70,7 @@ export default function FirstUse() {
       </ol>
 
       <button type="button" onClick={dismiss}
-        className="mt-4 text-[12.5px] text-church-700 hover:underline">
+        className="mt-4 text-xs text-church-700 hover:underline">
         Got it — don’t show this again
       </button>
     </aside>

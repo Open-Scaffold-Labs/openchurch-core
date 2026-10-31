@@ -13,6 +13,13 @@
 //     still restore: the stored bytes gunzip to a valid export.
 //
 // Demo data only: one synthetic parish with a distinctive member.
+//
+// The digest lists every non-held organization and exports each one. On
+// the suite database that is every parish the other files left behind, and
+// one pass of it outgrows the 15s test timeout. A timed-out digest is not
+// cancelled, so it is still reading BACKUP_* and global.fetch when the
+// next test installs its own. This file therefore has a database of its
+// own. The assertions are the same ones.
 
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
 import request from 'supertest'
@@ -22,12 +29,15 @@ import { join } from 'node:path'
 import { gunzipSync } from 'node:zlib'
 import 'dotenv/config'
 
-import pool from '../src/db.js'
-import { RUN_ID, bindServer, closeServer, migrateOnce } from './support/harness.js'
-import { createOrg } from './support/provision.js'
-import {
-  runWeeklyBackupDigest, composeBackupHeartbeat, backupKeyFor,
-} from '../src/services/backupDigest.js'
+import { createScratchDatabase, dropScratchDatabase } from './support/scratchDb.js'
+
+const baseUrl = process.env.DATABASE_URL
+const RUN_ID = `${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
+
+let pool
+let bindServer, closeServer, migrateOnce, createOrg
+let runWeeklyBackupDigest, composeBackupHeartbeat, backupKeyFor
+let scratch
 
 const ENV = ['RESEND_API_KEY', 'SUPER_ADMIN_EMAIL', 'EMAIL_FROM', 'BACKUP_STORAGE', 'BACKUP_DIR',
   'BACKUP_S3_ENDPOINT', 'BACKUP_S3_BUCKET', 'BACKUP_S3_REGION', 'BACKUP_S3_KEY_ID', 'BACKUP_S3_SECRET']
@@ -59,6 +69,12 @@ function captureResend() {
 
 beforeAll(async () => {
   saved = Object.fromEntries(ENV.map(k => [k, process.env[k]]))
+  scratch = await createScratchDatabase(baseUrl, 'bkp')
+  process.env.DATABASE_URL = scratch.url
+  ;({ default: pool } = await import('../src/db.js'))
+  ;({ bindServer, closeServer, migrateOnce } = await import('./support/harness.js'))
+  ;({ createOrg } = await import('./support/provision.js'))
+  ;({ runWeeklyBackupDigest, composeBackupHeartbeat, backupKeyFor } = await import('../src/services/backupDigest.js'))
   await migrateOnce()
   server = await bindServer()
   const res = await createOrg(server, parish, '10.214.1.1')
@@ -69,13 +85,16 @@ beforeAll(async () => {
     .set('Authorization', `Bearer ${res.body.token}`)
     .send({ name: member.name, email: member.email })
   expect(c.status).toBe(201)
-}, 60_000)
+}, 120_000)
 
 afterAll(async () => {
   global.fetch = realFetch
-  for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v }
-  await pool.query('DELETE FROM ochr_organizations WHERE id = $1', [orgId]).catch(() => {})
-  await closeServer(server)
+  if (saved) for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v }
+  if (pool && orgId) await pool.query('DELETE FROM ochr_organizations WHERE id = $1', [orgId]).catch(() => {})
+  if (closeServer) await closeServer(server)
+  await pool?.end()
+  process.env.DATABASE_URL = baseUrl
+  await dropScratchDatabase(scratch?.admin, scratch?.name)
 })
 
 function clearEnv() { for (const k of ENV) delete process.env[k] }

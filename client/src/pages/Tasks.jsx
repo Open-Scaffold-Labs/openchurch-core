@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { AlertCircle, AlertTriangle, Calendar, CheckCircle2, CheckSquare, ChevronDown, ChevronUp, Circle, Clock, Link2, Plus, RotateCcw, Trash2, User, X } from 'lucide-react'
-import PageWrapper from '../components/PageWrapper'
+import { AlertCircle, AlertTriangle, Calendar, CheckCircle2, CheckSquare, ChevronDown, ChevronUp, Circle, Clock, Link2, Plus, Printer, RotateCcw, Trash2, User, X } from 'lucide-react'
+import PageWrapper, { PageHeader } from '../components/PageWrapper'
 import EmptyState from '../components/EmptyState'
 import { TasksIllustration } from '../components/illustrations'
 import { SkeletonRowList } from '../components/Skeleton'
@@ -15,12 +15,23 @@ import { celebrateFirstAction } from '../utils/firstActionToast'
 import { useConfirm } from '../components/ConfirmProvider'
 import { formatStoredDate } from '../utils/dates'
 import { useLocale } from '../i18n'
+import useDialogFocus from '../components/useDialogFocus'
+import { dueLabelFor } from '../utils/taskDue'
+import { unfoldMotion, dialogMotionNow } from '../utils/motion'
 
 // ── Constants ────────────────────────────────────────────────
 const CATEGORIES = ['OPENING', 'CLOSING', 'DAILY_OPS', 'CLEANING', 'SERVICE_PREP', 'MAINTENANCE', 'COMMUNICATIONS']
 const PRIORITIES  = ['LOW', 'MEDIUM', 'HIGH']
 const STATUSES    = ['PENDING', 'IN_PROGRESS', 'COMPLETED']
 const RECURRING   = ['DAILY', 'WEEKLY', 'SUNDAY_ONLY']
+
+function catLabel(t, key) { return t('task.cat.' + key) }
+function priLabel(t, key) { return t('task.pri.' + key) }
+function stLabel(t, key) { return t('task.st.' + key) }
+function recLabel(t, key) {
+  if (key === 'SUNDAY_ONLY') return t('task.rec.SUNDAY')
+  return t('task.rec.' + key)
+}
 
 // Parchment & Brass: categories are named, not color-coded. One brass
 // dot marks a group heading; chips are quiet parchment. A parish task
@@ -51,18 +62,21 @@ const RECURRING_META = {
   SUNDAY_ONLY: 'Sunday Only',
 }
 
-const STATUS_NEXT = { PENDING: 'IN_PROGRESS', IN_PROGRESS: 'COMPLETED', COMPLETED: 'PENDING' }
+/* SP-280: one tap marks done. Pending and In Progress both complete;
+   a completed task reopens to Pending (with toast). */
+const STATUS_NEXT = { PENDING: 'COMPLETED', IN_PROGRESS: 'COMPLETED', COMPLETED: 'PENDING' }
 
 const EMPTY_FORM = {
   title: '', description: '', category: 'DAILY_OPS', priority: 'MEDIUM',
-  status: 'PENDING', recurring_freq: 'DAILY', checklist: [], due_date: '', assigned_member_id: null,
+  status: 'PENDING', recurring_freq: '',  // SP-154: one-off unless chosen
+  checklist: [], due_date: '', assigned_member_id: null,
 }
 
 // ── Stat pill ────────────────────────────────────────────────
 function StatPill({ label, value, accent }) {
   return (
     <div className={`flex flex-col items-center justify-center rounded-2xl px-6 py-4 border shadow-sm ${accent}`}>
-      <span className="font-display text-2xl font-semibold">{value ?? '—'}</span>
+      <span className="font-display text-2xl font-semibold tabular-nums" style={{ fontVariantNumeric: 'lining-nums tabular-nums' }}>{value ?? '—'}</span>
       <span className="text-xs font-medium mt-0.5 opacity-[0.88]">{label}</span>
     </div>
   )
@@ -80,12 +94,18 @@ function normalizeChecklist(items) {
 // read-only card. Server enforces the underlying permission; this
 // is just UX hygiene.
 function TaskCard({ task, onStatusChange, onDelete, onEdit, canWrite }) {
+  const { t } = useLocale()
   const [open, setOpen] = useState(false)
   const [checklist, setChecklist] = useState(() => normalizeChecklist(task.checklist))
   const toast = useToast()
-  const cat  = CATEGORY_META[task.category]  ?? { label: task.category, light: 'bg-parchment-200 text-ink-600' }
+  const cat  = CATEGORY_META[task.category]  ?? { light: 'bg-parchment-200 text-ink-600' }
+  const catName = CATEGORY_META[task.category] ? catLabel(t, task.category) : task.category
   const pri  = PRIORITY_META[task.priority]  ?? PRIORITY_META.MEDIUM
   const done = task.status === 'COMPLETED'
+  // SP-153: the card never showed due_date. Completed tasks keep the
+  // date but drop the overdue alarm AND the obligation wording (R380-1).
+  const dueRaw = dueLabelFor(task.due_date)
+  const due = dueRaw && done ? { ...dueRaw, cls: 'text-ink-500 dark:text-parchment-300/70', overdue: false } : dueRaw
   const inProg = task.status === 'IN_PROGRESS'
 
   async function toggleItem(i) {
@@ -108,11 +128,11 @@ function TaskCard({ task, onStatusChange, onDelete, onEdit, canWrite }) {
       if (!res.ok) {
         setChecklist(prev)
         const d = await res.json().catch(() => ({}))
-        toast.error(d.error || `Couldn't save checklist (${res.status})`)
+        toast.error(d.error || t('task.checklistSaveFailed', { status: res.status }))
       }
     } catch (err) {
       setChecklist(prev)
-      toast.error("That didn't save — nothing was lost. Please try again.")
+      toast.error(t('task.saveFailed'))
     }
   }
 
@@ -132,7 +152,7 @@ function TaskCard({ task, onStatusChange, onDelete, onEdit, canWrite }) {
         {canWrite ? (
           <button
             onClick={() => onStatusChange(task.id, STATUS_NEXT[task.status])}
-            aria-label={`Mark "${task.title}" as ${STATUS_NEXT[task.status].toLowerCase().replace('_', ' ')}`}
+            aria-label={t('task.markAs', { title: task.title, status: stLabel(t, STATUS_NEXT[task.status]) })}
             /* `.tap`, not `.tap-reach`. Measured on a 390px viewport 27 Aug:
                row 1 reached 79x79 and every row after it collapsed to the
                32x32 visual box. tap-reach centres a 48px pseudo-element on
@@ -165,18 +185,28 @@ function TaskCard({ task, onStatusChange, onDelete, onEdit, canWrite }) {
         {/* Title + badges */}
         <div className="flex-1 min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <span className={`text-sm font-semibold truncate ${done ? 'line-through text-ink-500 dark:text-parchment-300/70' : 'text-ink-900 dark:text-parchment-50'}`}>
+            {/* SP-279: wrap the full title on phone — truncate hid which task was which. */}
+            <span className={`text-sm font-semibold break-words ${done ? 'line-through text-ink-500 dark:text-parchment-300/70' : 'text-ink-900 dark:text-parchment-50'}`}>
               {task.title}
             </span>
-            <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${cat.light}`}>{cat.label}</span>
+            <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${cat.light}`}>{catName}</span>
             {task.recurring_freq && (
-              <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-parchment-200 dark:bg-ink-800 text-ink-500 dark:text-parchment-300/70">
+              <span className="text-[11px] font-medium px-2 py-0.5 rounded-full bg-parchment-200 dark:bg-ink-800 text-ink-500 dark:text-parchment-300/70">
                 {RECURRING_META[task.recurring_freq]}
               </span>
             )}
           </div>
           {task.description && (
-            <p className="text-xs text-ink-500 dark:text-parchment-300/70 mt-0.5 truncate">{task.description}</p>
+            <p className="text-xs text-ink-500 dark:text-parchment-300/70 mt-0.5 break-words line-clamp-2">{task.description}</p>
+          )}
+          {due && (
+            <p data-testid="task-due" data-overdue={due.overdue ? 'true' : 'false'}
+              className={`flex items-center gap-1 text-xs mt-0.5 font-medium ${due.cls}`}>
+              <Calendar size={11} className="shrink-0" aria-hidden="true" />
+              <span>{done
+                ? `Due ${formatStoredDate(task.due_date, { month: 'short', day: 'numeric' })}`
+                : `${formatStoredDate(task.due_date, { month: 'short', day: 'numeric' })} · ${due.text}`}</span>
+            </p>
           )}
           {task.assigned_member_name && (
             <p className="flex items-center gap-1 text-xs text-church-700 dark:text-brass-300 mt-0.5 font-medium"><User size={11} className="shrink-0 text-ink-400 dark:text-parchment-400/60" /> {task.assigned_member_name}</p>
@@ -185,19 +215,27 @@ function TaskCard({ task, onStatusChange, onDelete, onEdit, canWrite }) {
 
         {/* Priority + expand */}
         <div className="flex items-center gap-2 shrink-0">
-          <AlertTriangle size={13} className={pri.cls} />
+          {/* SP-284: colour is not the only cue — name the priority in the row. */}
+          <span
+            className={`inline-flex items-center gap-1 text-[11px] font-semibold ${pri.cls}`}
+            title={priLabel(t, task.priority || 'MEDIUM')}
+            aria-label={priLabel(t, task.priority || 'MEDIUM')}
+          >
+            <AlertTriangle size={13} aria-hidden="true" />
+            <span>{priLabel(t, task.priority || 'MEDIUM')}</span>
+          </span>
           {task.checklist?.length > 0 && (
             <button onClick={() => setOpen(o => !o)} aria-expanded={open}
-              aria-label={`${open ? 'Hide' : 'Show'} checklist for "${task.title}"`}
-              className="p-1.5 -m-1.5 text-ink-500 dark:text-parchment-300/70 hover:text-ink-700 dark:hover:text-parchment-50 transition-colors">
+              aria-label={t(open ? 'task.hideChecklist' : 'task.showChecklist', { title: task.title })}
+              className="tap inline-flex items-center justify-center min-h-[44px] min-w-[44px] -m-1.5 p-1.5 text-ink-500 dark:text-parchment-300/70 hover:text-ink-700 dark:hover:text-parchment-50 transition-colors">
               {open ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
             </button>
           )}
           {canWrite && (
             <>
               {/* Same reasoning as Mark above: 45x24 hittable from row 2 down. */}
-              <button onClick={() => onEdit(task)} className="tap inline-flex items-center justify-center text-ink-500 dark:text-parchment-300/70 hover:text-ink-700 dark:hover:text-parchment-50 transition-colors text-xs font-medium px-3 py-1 rounded">
-                Edit
+              <button onClick={() => onEdit(task)} className="tap print:hidden inline-flex items-center justify-center text-ink-500 dark:text-parchment-300/70 hover:text-ink-700 dark:hover:text-parchment-50 transition-colors text-xs font-medium px-3 py-1 rounded">
+                {t('task.editShort')}
               </button>
               {/* `.tap`, not `.tap-reach`. Hit-tested on a 390px viewport on
                   27 Aug: tap-reach's ::after reach is position-dependent —
@@ -208,8 +246,8 @@ function TaskCard({ task, onStatusChange, onDelete, onEdit, canWrite }) {
                   a reach that a sibling can take away. The CSS comment on
                   .tap-reach already warned that "a neighbour paints into
                   the top of the reach"; this row is where that happens. */}
-              <button onClick={() => onDelete(task.id)} aria-label={`Delete task "${task.title}"`}
-                className="tap inline-flex items-center justify-center p-1.5 text-ink-300 hover:text-rose-400 transition-colors">
+              <button onClick={() => onDelete(task.id)} aria-label={t('task.deleteAria', { title: task.title })}
+                className="tap print:hidden inline-flex items-center justify-center p-1.5 text-ink-300 hover:text-rose-400 transition-colors">
                 <Trash2 size={14} />
               </button>
             </>
@@ -221,10 +259,7 @@ function TaskCard({ task, onStatusChange, onDelete, onEdit, canWrite }) {
       <AnimatePresence>
         {open && checklist.length > 0 && (
           <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: 'auto', opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.2 }}
+            {...unfoldMotion}
             className="overflow-hidden"
           >
             <div className="px-4 pb-3.5 pt-0 border-t border-parchment-300/50 dark:border-brass-900/25">
@@ -255,7 +290,7 @@ function TaskCard({ task, onStatusChange, onDelete, onEdit, canWrite }) {
   )
 }
 
-// ── Linked Events (auto-synced by shared member) ─────────────
+// ── Linked Events (auto-synced by shared member) ─────────────────────
 // Mirrors LinkedTasks in Events.jsx: shows events whose assigned members
 // include this task's assigned_member_id. Re-fetches whenever the assignee
 // changes in the open modal.
@@ -284,12 +319,12 @@ export function LinkedEvents({ taskId, assignedMemberId }) {
   if (!assignedMemberId) {
     return (
       <p className="text-xs text-ink-500 dark:text-parchment-300/70">
-        Assign this task to a member to see linked events.
+        {t('task.assign_this_task_to_a')}
       </p>
     )
   }
   if (events === null) {
-    return <p className="text-xs text-ink-500 dark:text-parchment-300/70">Loading linked events…</p>
+    return <p className="text-xs text-ink-500 dark:text-parchment-300/70">{t('task.loadingEvents')}</p>
   }
   if (eventsFailed) {
     return (
@@ -301,7 +336,7 @@ export function LinkedEvents({ taskId, assignedMemberId }) {
   if (events.length === 0) {
     return (
       <p className="text-xs text-ink-500 dark:text-parchment-300/70">
-        This task's assignee isn't on any events yet.
+        {t('task.this_task_s_assignee_isn')}
       </p>
     )
   }
@@ -318,7 +353,7 @@ export function LinkedEvents({ taskId, assignedMemberId }) {
               <p className="text-xs font-medium truncate text-ink-800 dark:text-parchment-100">
                 {e.title}
               </p>
-              <p className="text-[10px] text-ink-500 dark:text-parchment-300/70 truncate">
+              <p className="text-[11px] text-ink-500 dark:text-parchment-300/70 truncate">
                 {e.service_division || 'Event'}
                 {when ? ` · ${when}` : ''}
                 {e.time ? ` · ${e.time}` : ''}
@@ -368,44 +403,51 @@ function TaskModal({ task, onClose, onSave }) {
 
   const removeItem = i => setForm(f => ({ ...f, checklist: f.checklist.filter((_, idx) => idx !== i) }))
 
+  // SP-155: Esc closes, focus is trapped and returns to the opener —
+  // the same pattern SP-107 gave the Schedule event modal.
+  const panelRef = useRef(null)
+  useDialogFocus(panelRef, onClose)
+
   return (
     <div className={sheetOverlayCls}>
-      <motion.div
-        initial={{ opacity: 0, scale: 0.96 }}
-        animate={{ opacity: 1, scale: 1 }}
-        exit={{ opacity: 0, scale: 0.96 }}
+      <motion.div {...dialogMotionNow()}
         className={sheetPanelCls}
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label={task ? t('task.edit') : t('task.new')}
       >
         <MobileSheetGrip />
         <div className="flex items-center justify-between px-6 py-4 border-b border-parchment-300/50 dark:border-brass-900/25">
-          <h2 className="font-bold text-ink-900 dark:text-parchment-50">{task ? 'Edit Task' : 'New Task'}</h2>
-          <button onClick={onClose} aria-label="Close" className="-m-2 p-2 text-ink-400 hover:text-ink-700 dark:hover:text-parchment-50 transition-colors">
+          <h2 className="font-display text-2xl font-semibold text-ink-900 dark:text-parchment-50 leading-snug">{task ? t('task.edit') : t('task.new')}</h2>
+          <button onClick={onClose} aria-label={t('task.close')} className="-m-2 p-2 text-ink-400 hover:text-ink-700 dark:hover:text-parchment-50 transition-colors">
             <X size={18} />
           </button>
         </div>
 
-        <div className="p-6 space-y-4 max-h-[70vh] overflow-y-auto">
+        {/* SP-281: flex-1 body scrolls; footer stays above the keyboard/viewport. */}
+        <div className="flex-1 min-h-0 overflow-y-auto p-6 space-y-4 pb-8">
           <div>
-            <label className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1.5">Title *</label>
-            <input value={form.title} onChange={field('title')} placeholder="Task title" aria-label="Task title"
+            <label className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1.5">{t('task.titleLabel')}</label>
+            <input value={form.title} onChange={field('title')} placeholder={t('task.titlePh')} aria-label={t('task.titlePh')}
               className="w-full px-3 py-2 text-sm rounded-lg border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-100 dark:bg-ink-800 text-ink-900 dark:text-parchment-50 focus:outline-none focus:ring-2 focus:ring-church-500" />
           </div>
 
           <div>
-            <label className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1.5">Description</label>
-            <textarea value={form.description} onChange={field('description')} rows={2} placeholder="Optional details" aria-label="Optional details"
+            <label className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1.5">{t('task.desc')}</label>
+            <textarea value={form.description} onChange={field('description')} rows={2} placeholder={t('task.descPh')} aria-label={t('task.descPh')}
               className="w-full px-3 py-2 text-sm rounded-lg border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-100 dark:bg-ink-800 text-ink-900 dark:text-parchment-50 focus:outline-none focus:ring-2 focus:ring-church-500 resize-none" />
           </div>
 
           <div>
-            <label className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1.5">Due Date</label>
-            <input type="date" value={form.due_date ?? ''} onChange={field('due_date')}
+            <label htmlFor="task-due" className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1.5">{t('task.due')}</label>
+            <input id="task-due" type="date" value={form.due_date ?? ''} onChange={field('due_date')}
               className="w-full px-3 py-2 text-sm rounded-lg border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-100 dark:bg-ink-800 text-ink-900 dark:text-parchment-50 focus:outline-none focus:ring-2 focus:ring-church-500" />
           </div>
 
           {/* Assign to member */}
           <div>
-            <label className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1.5">Assign To</label>
+            <label className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1.5">{t('task.assign')}</label>
             {membersFailed && (
               <p role="status" className="mb-2 text-xs text-amber-700 dark:text-amber-400">
                 {t('mem.listFailed')}
@@ -413,7 +455,7 @@ function TaskModal({ task, onClose, onSave }) {
             )}
             {selectedMember ? (
               <div className="flex items-center gap-3 px-3 py-2.5 rounded-lg bg-parchment-100 dark:bg-ink-800 border border-parchment-300/70 dark:border-brass-900/40">
-                <div className="w-7 h-7 rounded-full bg-church-900 dark:bg-church-700 flex items-center justify-center text-parchment-50 text-[10px] font-bold shrink-0">
+                <div className="w-7 h-7 rounded-full bg-church-900 dark:bg-church-700 flex items-center justify-center text-parchment-50 text-[11px] font-bold shrink-0">
                   {initials(selectedMember.name)}
                 </div>
                 <div className="flex-1 min-w-0">
@@ -431,7 +473,7 @@ function TaskModal({ task, onClose, onSave }) {
             ) : (
               <div className="space-y-2">
                 <input
-                  placeholder="Search members…" aria-label="Search members…"
+                  placeholder={t('task.searchMembers')} aria-label={t('task.searchMembers')}
                   value={memberSearch}
                   onChange={e => setMemberSearch(e.target.value)}
                   className="w-full px-3 py-2 text-sm rounded-lg border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-100 dark:bg-ink-800 text-ink-900 dark:text-parchment-50 focus:outline-none focus:ring-2 focus:ring-church-500"
@@ -439,7 +481,7 @@ function TaskModal({ task, onClose, onSave }) {
                 {memberSearch && (
                   <ul className="max-h-40 overflow-y-auto rounded-lg border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-50 dark:bg-ink-900 divide-y divide-parchment-200/60 dark:divide-brass-900/25">
                     {filteredMembers.length === 0 && (
-                      <li className="px-3 py-2 text-xs text-ink-500 dark:text-parchment-300/70">No members found</li>
+                      <li className="px-3 py-2 text-xs text-ink-500 dark:text-parchment-300/70">{t('task.noMembers')}</li>
                     )}
                     {filteredMembers.map(m => (
                       <li key={m.id}>
@@ -448,7 +490,7 @@ function TaskModal({ task, onClose, onSave }) {
                           onClick={() => { setForm(f => ({ ...f, assigned_member_id: m.id })); setMemberSearch('') }}
                           className="flex items-center gap-3 w-full px-3 py-2 text-left hover:bg-parchment-100 dark:hover:bg-ink-800/60 transition-colors"
                         >
-                          <div className="w-6 h-6 rounded-full bg-church-900 dark:bg-church-700 flex items-center justify-center text-parchment-50 text-[9px] font-bold shrink-0">
+                          <div className="w-6 h-6 rounded-full bg-church-900 dark:bg-church-700 flex items-center justify-center text-parchment-50 text-[11px] font-bold shrink-0">
                             {initials(m.name)}
                           </div>
                           <div className="min-w-0">
@@ -466,43 +508,43 @@ function TaskModal({ task, onClose, onSave }) {
 
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1.5">Category</label>
-              <select value={form.category} onChange={field('category')}
+              <label htmlFor="task-category" className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1.5">{t('task.category')}</label>
+              <select id="task-category" value={form.category} onChange={field('category')}
                 className="w-full px-3 py-2 text-sm rounded-lg border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-100 dark:bg-ink-800 text-ink-900 dark:text-parchment-50 focus:outline-none focus:ring-2 focus:ring-church-500">
-                {CATEGORIES.map(c => <option key={c} value={c}>{CATEGORY_META[c]?.label ?? c}</option>)}
+                {CATEGORIES.map(c => <option key={c} value={c}>{catLabel(t, c)}</option>)}
               </select>
             </div>
             <div>
-              <label className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1.5">Priority</label>
-              <select value={form.priority} onChange={field('priority')}
+              <label htmlFor="task-priority" className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1.5">{t('task.priority')}</label>
+              <select id="task-priority" value={form.priority} onChange={field('priority')}
                 className="w-full px-3 py-2 text-sm rounded-lg border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-100 dark:bg-ink-800 text-ink-900 dark:text-parchment-50 focus:outline-none focus:ring-2 focus:ring-church-500">
-                {PRIORITIES.map(p => <option key={p} value={p}>{p}</option>)}
+                {PRIORITIES.map(p => <option key={p} value={p}>{priLabel(t, p)}</option>)}
               </select>
             </div>
             <div>
-              <label className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1.5">Status</label>
-              <select value={form.status} onChange={field('status')}
+              <label htmlFor="task-status" className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1.5">{t('task.status')}</label>
+              <select id="task-status" value={form.status} onChange={field('status')}
                 className="w-full px-3 py-2 text-sm rounded-lg border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-100 dark:bg-ink-800 text-ink-900 dark:text-parchment-50 focus:outline-none focus:ring-2 focus:ring-church-500">
-                {STATUSES.map(s => <option key={s} value={s}>{s.replace('_', ' ')}</option>)}
+                {STATUSES.map(st => <option key={st} value={st}>{stLabel(t, st)}</option>)}
               </select>
             </div>
             <div>
-              <label className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1.5">Recurring</label>
-              <select value={form.recurring_freq ?? ''} onChange={field('recurring_freq')}
+              <label htmlFor="task-recurring" className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1.5">{t('task.recurring')}</label>
+              <select id="task-recurring" value={form.recurring_freq ?? ''} onChange={field('recurring_freq')}
                 className="w-full px-3 py-2 text-sm rounded-lg border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-100 dark:bg-ink-800 text-ink-900 dark:text-parchment-50 focus:outline-none focus:ring-2 focus:ring-church-500">
-                <option value="">None</option>
-                {RECURRING.map(r => <option key={r} value={r}>{RECURRING_META[r]}</option>)}
+                <option value="">{t('task.none')}</option>
+                {RECURRING.map(r => <option key={r} value={r}>{recLabel(t, r)}</option>)}
               </select>
             </div>
           </div>
 
           {/* Checklist builder */}
           <div>
-            <label className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1.5">Checklist</label>
+            <label className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1.5">{t('task.checklist')}</label>
             <div className="flex gap-2 mb-2">
               <input value={checklistInput} onChange={e => setChecklistInput(e.target.value)}
                 onKeyDown={e => e.key === 'Enter' && (e.preventDefault(), addItem())}
-                placeholder="Add item, press Enter"
+                placeholder={t('task.checklistPh')}
                 className="flex-1 px-3 py-2 text-sm rounded-lg border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-100 dark:bg-ink-800 text-ink-900 dark:text-parchment-50 focus:outline-none focus:ring-2 focus:ring-church-500" />
               <button onClick={addItem} className="px-3 py-2 rounded-lg bg-church-900 dark:bg-church-700 text-parchment-50 text-sm font-medium hover:opacity-90 transition-opacity">
                 Add
@@ -513,7 +555,7 @@ function TaskModal({ task, onClose, onSave }) {
                 {form.checklist.map((item, i) => (
                   <li key={i} className="flex items-center justify-between text-xs text-ink-600 dark:text-parchment-200 bg-parchment-100 dark:bg-ink-800/60 px-3 py-1.5 rounded-lg">
                     <span>{item.label}</span>
-                    <button onClick={() => removeItem(i)} aria-label="Remove checklist item" className="text-ink-300 hover:text-rose-400 transition-colors ml-2"><X size={12} /></button>
+                    <button onClick={() => removeItem(i)} aria-label={t('task.removeItem')} className="text-ink-300 hover:text-rose-400 transition-colors ml-2"><X size={12} /></button>
                   </li>
                 ))}
               </ul>
@@ -525,23 +567,23 @@ function TaskModal({ task, onClose, onSave }) {
             <div className="pt-2 border-t border-parchment-300/50 dark:border-brass-900/25">
               <div className="flex items-center gap-1.5 mb-2">
                 <Link2 size={13} className="text-church-700 dark:text-brass-300" />
-                <h3 className="text-xs font-semibold text-ink-700 dark:text-parchment-200">Linked Events</h3>
+                <h3 className="text-xs font-semibold text-ink-700 dark:text-parchment-200">{t('task.linkedEvents')}</h3>
               </div>
               <LinkedEvents taskId={task.id} assignedMemberId={form.assigned_member_id} />
               <p className="mt-1.5 text-[11px] text-ink-500 dark:text-parchment-300/70">
-                Events whose assigned members include this task's assignee.
+                {t('task.events_whose_assigned_members_include')}
               </p>
             </div>
           )}
         </div>
 
-        <div className="flex justify-end gap-3 px-6 py-4 border-t border-parchment-300/50 dark:border-brass-900/25">
+        <div className="shrink-0 flex justify-end gap-3 px-6 py-4 border-t border-parchment-300/50 dark:border-brass-900/25 print:hidden">
           <button onClick={onClose} className="px-4 py-2 text-sm font-medium text-ink-500 hover:text-ink-800 dark:text-parchment-300/70 dark:hover:text-parchment-50 transition-colors">
-            Cancel
+            {t('task.cancel')}
           </button>
           <button onClick={() => onSave(form)} disabled={!form.title.trim()}
             className="px-5 py-2 text-sm font-semibold rounded-lg bg-church-900 dark:bg-white text-parchment-50 dark:text-church-900 hover:opacity-90 transition-opacity disabled:opacity-40">
-            {task ? 'Save Changes' : 'Create Task'}
+            {task ? t('task.save') : t('task.create')}
           </button>
         </div>
       </motion.div>
@@ -625,14 +667,17 @@ export default function Tasks() {
     const { ok, error } = await mutate(apiUrl(`/api/tasks/${id}/status`),
       { method: 'PATCH', body: { status } })
     if (!ok) { toast.error(error); return }
+    // SP-280: confirm the one-tap complete / reopen so it is not silent.
+    if (status === 'COMPLETED') toast.success(t('task.markedComplete'))
+    else if (status === 'PENDING') toast.success(t('task.reopened'))
     load()
   }
 
   const handleDelete = async (id) => {
     if (!(await ask({
-      title: 'Delete this task?',
-      body: 'This cannot be undone.',
-      confirmLabel: 'Delete task',
+      title: t('task.deleteTitle'),
+      body: t('task.deleteBody'),
+      confirmLabel: t('task.deleteConfirm'),
     }))) return
     const { ok, error } = await mutate(apiUrl(`/api/tasks/${id}`), { method: 'DELETE' })
     if (!ok) { toast.error(error); return }
@@ -647,10 +692,10 @@ export default function Tasks() {
       res = await fetch(url, {
         method: isEdit ? 'PATCH' : 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(form),
+        body: JSON.stringify({ ...form, recurring_freq: form.recurring_freq || null }),
       })
     } catch (err) {
-      toast.error("That didn't save — nothing was lost. Please try again.")
+      toast.error(t('task.saveFailed'))
       return
     }
     if (!res.ok) {
@@ -660,7 +705,10 @@ export default function Tasks() {
     }
     setModal(null)
     load()
-    if (!isEdit) celebrateFirstAction('task', toast, stats?.total)
+    if (!isEdit) {
+      // SP-282: every create confirms; first-action delight still wins when it fires.
+      if (!celebrateFirstAction('task', toast, stats?.total)) toast.success(t('task.created'))
+    }
   }
 
   // Group tasks
@@ -675,36 +723,39 @@ export default function Tasks() {
   const progress = stats ? Math.round((parseInt(stats.completed) / Math.max(parseInt(stats.total), 1)) * 100) : 0
 
   return (
-    <PageWrapper>
+    <PageWrapper type="list">
       <div className="space-y-8">
 
         {/* Header */}
         <div className="flex items-start justify-between gap-4 flex-wrap">
-          <div>
-            <h1 className="font-display text-3xl font-semibold text-ink-900 dark:text-parchment-50 tracking-tight">Daily Tasks</h1>
-            <p className="text-sm text-ink-500 dark:text-parchment-300/70 mt-1">Track and complete church operations.</p>
-          </div>
-          {canWrite && (
-            <button onClick={() => setModal('new')}
-              className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-church-900 dark:bg-white text-parchment-50 dark:text-church-900 text-sm font-semibold shadow hover:opacity-90 transition-opacity shrink-0">
-              <Plus size={15} /> New Task
+          <PageHeader title={t('task.title')} subtitle={t('task.subtitle')} />
+          <div className="flex items-center gap-2 shrink-0 print:hidden">
+            <button type="button" onClick={() => window.print()}
+              className="tap flex items-center gap-2 px-4 py-2.5 min-h-[44px] rounded-xl border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-50 dark:bg-ink-900 text-ink-700 dark:text-parchment-100 text-sm font-semibold hover:bg-parchment-100 dark:hover:bg-ink-800 transition-colors">
+              <Printer size={15} aria-hidden="true" /> {t('task.print')}
             </button>
-          )}
+            {canWrite && (
+              <button onClick={() => setModal('new')}
+                className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-church-900 dark:bg-white text-parchment-50 dark:text-church-900 text-sm font-semibold shadow hover:opacity-90 transition-opacity shrink-0">
+                <Plus size={15} /> {t('task.new')}
+              </button>
+            )}
+          </div>
         </div>
 
         {/* Stats */}
         {stats && (
           <div className="space-y-3">
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-              <StatPill label="Total"       value={stats.total}       accent="bg-parchment-50 dark:bg-ink-900/90 border-parchment-300/50 dark:border-brass-900/30 text-ink-900 dark:text-parchment-50" />
-              <StatPill label="Completed"   value={stats.completed}   accent="bg-parchment-50 dark:bg-ink-900/90 border-parchment-300/50 dark:border-brass-900/30 text-brass-700 dark:text-brass-300" />
-              <StatPill label="In Progress" value={stats.in_progress} accent="bg-parchment-50 dark:bg-ink-900/90 border-parchment-300/50 dark:border-brass-900/30 text-ink-700 dark:text-parchment-200" />
-              <StatPill label="High Priority Pending" value={stats.high_pending} accent="bg-parchment-50 dark:bg-ink-900/90 border-parchment-300/50 dark:border-brass-900/30 text-rose-700 dark:text-rose-300" />
+              <StatPill label={t('task.statTotal')}       value={stats.total}       accent="bg-parchment-50 dark:bg-ink-900/90 border-parchment-300/50 dark:border-brass-900/30 text-ink-900 dark:text-parchment-50" />
+              <StatPill label={t('task.statCompleted')}   value={stats.completed}   accent="bg-parchment-50 dark:bg-ink-900/90 border-parchment-300/50 dark:border-brass-900/30 text-brass-700 dark:text-brass-300" />
+              <StatPill label={t('task.statInProgress')} value={stats.in_progress} accent="bg-parchment-50 dark:bg-ink-900/90 border-parchment-300/50 dark:border-brass-900/30 text-ink-700 dark:text-parchment-200" />
+              <StatPill label={t('task.statHighPending')} value={stats.high_pending} accent="bg-parchment-50 dark:bg-ink-900/90 border-parchment-300/50 dark:border-brass-900/30 text-rose-700 dark:text-rose-300" />
             </div>
             {/* Progress bar */}
             <div className="bg-parchment-50 dark:bg-ink-900/90 rounded-2xl border border-parchment-300/50 dark:border-brass-900/30 px-5 py-4 shadow-sm">
               <div className="flex justify-between text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-2">
-                <span>Today's Progress</span>
+                <span>{t('task.overallProgress')}</span>
                 <span>{progress}%</span>
               </div>
               <div className="h-2 bg-parchment-200 dark:bg-ink-800 rounded-full overflow-hidden">
@@ -720,33 +771,33 @@ export default function Tasks() {
         )}
 
         {/* Filters */}
-        <div className="flex flex-wrap gap-3 items-center">
+        <div className="flex flex-wrap gap-3 items-center print:hidden">
           {[
-            { key: 'category', options: CATEGORIES, labels: CATEGORY_META, placeholder: 'All Categories' },
-            { key: 'status',   options: STATUSES,   labels: null,          placeholder: 'All Statuses' },
-            { key: 'priority', options: PRIORITIES, labels: null,          placeholder: 'All Priorities' },
+            { key: 'category', options: CATEGORIES, labels: CATEGORY_META, placeholder: t('task.allCategories') },
+            { key: 'status',   options: STATUSES,   labels: null,          placeholder: t('task.allStatuses') },
+            { key: 'priority', options: PRIORITIES, labels: null,          placeholder: t('task.allPriorities') },
           ].map(({ key, options, labels, placeholder }) => (
             <select key={key} value={filter[key]} aria-label={placeholder}
               onChange={e => setFilter(f => ({ ...f, [key]: e.target.value }))}
               className="px-3 py-2 text-sm rounded-lg border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-50 dark:bg-ink-800 text-ink-700 dark:text-parchment-100 focus:outline-none focus:ring-2 focus:ring-church-500">
               <option value="">{placeholder}</option>
-              {options.map(o => <option key={o} value={o}>{labels ? labels[o]?.label : o.replace('_', ' ')}</option>)}
+              {options.map(o => <option key={o} value={o}>{key === 'category' ? catLabel(t, o) : key === 'priority' ? priLabel(t, o) : key === 'status' ? stLabel(t, o) : (labels ? labels[o]?.label : o.replace('_', ' '))}</option>)}
             </select>
           ))}
           <button onClick={() => setFilter({ category: '', status: '', priority: '' })}
             className="flex items-center gap-1.5 text-xs text-ink-500 dark:text-parchment-300/70 hover:text-ink-700 dark:hover:text-parchment-50 transition-colors px-2 py-1">
-            <RotateCcw size={12} /> Reset
+            <RotateCcw size={12} /> {t('task.reset')}
           </button>
           <div className="ml-auto flex items-center gap-2">
-            <span className="text-xs text-ink-500 dark:text-parchment-300/70">Group:</span>
+            <span className="text-xs text-ink-500 dark:text-parchment-300/70">{t('task.group')}</span>
             {['category', 'none'].map(g => (
               <button key={g} onClick={() => setGroupBy(g)}
-                className={`text-xs font-medium px-3 py-1.5 rounded-lg transition-colors ${
+                className={`tap text-xs font-medium min-h-[44px] px-3 py-1.5 rounded-lg transition-colors ${
                   groupBy === g
                     ? 'bg-church-900 dark:bg-white text-parchment-50 dark:text-church-900'
                     : 'bg-parchment-200 dark:bg-ink-800 text-ink-500 dark:text-parchment-300/70 hover:text-ink-800 dark:hover:text-parchment-50'
                 }`}>
-                {g === 'category' ? 'Category' : 'All'}
+                {g === 'category' ? t('task.groupCategory') : t('task.groupAll')}
               </button>
             ))}
           </div>
@@ -784,7 +835,7 @@ export default function Tasks() {
                 {groupBy === 'category' && meta && (
                   <div className="flex items-center gap-2 mb-3">
                     <div className={`w-2.5 h-2.5 rounded-full ${meta.color}`} />
-                    <h3 className="text-sm font-bold text-ink-700 dark:text-parchment-100">{meta.label}</h3>
+                    <h3 className="text-sm font-bold text-ink-700 dark:text-parchment-100">{catLabel(t, group)}</h3>
                     <span className="text-xs text-ink-500 dark:text-parchment-300/70">({items.length})</span>
                   </div>
                 )}
@@ -796,7 +847,7 @@ export default function Tasks() {
                         task={task}
                         onStatusChange={handleStatusChange}
                         onDelete={handleDelete}
-                        onEdit={t => setModal(t)}
+                        onEdit={task => setModal(task)}
                         canWrite={canWrite}
                       />
                     ))}
@@ -815,14 +866,14 @@ export default function Tasks() {
             !filter.category && !filter.status && !filter.priority ? (
               <EmptyState
                 illustration={TasksIllustration}
-                title="No tasks yet"
-                body="Tasks are the recurring and one-off checklist items your staff runs before, during, and after service."
-                action={canWrite ? { label: 'Add your first task', onClick: () => setModal('new') } : null}
+                title={t('task.emptyTitle')}
+                body={t('task.emptyBody')}
+                action={canWrite ? { label: t('task.addFirst'), onClick: () => setModal('new') } : null}
               />
             ) : (
               <div className="text-center py-16 text-ink-500 dark:text-parchment-300/70">
                 <CheckSquare size={32} className="mx-auto mb-3 opacity-30" />
-                <p className="text-sm font-medium">No tasks found</p>
+                <p className="text-sm font-medium">{t('task.noneFound')}</p>
               </div>
             )
           )}

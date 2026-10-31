@@ -7,6 +7,7 @@
 
 import { sqlNormEmail } from '../utils/emailNorm.js'
 import pool from '../db.js'
+import { RECORD_ADDRESSED_TYPES } from '../notifications/transport.js'
 
 export const ONLY_ACTIVE_ADMIN =
   'Cannot deactivate the only active admin. Transfer administration first. Closing the organization is a separate step and is not done here.'
@@ -73,7 +74,7 @@ async function withTransaction(fn, { organizationId } = {}) {
 // deactivation, demotion, or delete is about to remove.
 export async function lockLoginForAdminCount(client, organizationId, targetId) {
   const { rows } = await client.query(
-    `SELECT id, role, email, deactivated_at, closed_at
+    `SELECT id, role, email, deactivated_at, closed_at, invited_at, invite_accepted_at
        FROM ochr_users
       WHERE organization_id = $1
         AND (id = $2 OR (role = 'admin' AND deactivated_at IS NULL AND closed_at IS NULL))
@@ -91,26 +92,45 @@ export async function lockLoginForAdminCount(client, organizationId, targetId) {
 // cancelled here is refused at the dispatch boundary (transport.js checks
 // the row is still 'processing' immediately before any transport), so a
 // closure committing after a claim stops the send (R286-3).
-export async function cancelPendingNotificationsForLogin(client, organizationId, userId, email, reason = 'login closed or deactivated') {
+//
+// C3 (CAROLINA-423 M2): with skipRecordAddressedTypes, the ADDRESS match
+// leaves record-addressed types (a donation receipt to a member or donor
+// record that shares the address) alone. Rows addressed by this login's
+// id are still cancelled whatever their type.
+export async function cancelPendingNotificationsForLogin(client, organizationId, userId, email, reason = 'login closed or deactivated', { skipRecordAddressedTypes = null } = {}) {
+  const skip = skipRecordAddressedTypes ? [...skipRecordAddressedTypes] : null
   await client.query(
     `UPDATE ochr_scheduled_notifications
         SET status = 'cancelled',
             error  = COALESCE(error, 'cancelled: ' || $4::text)
       WHERE organization_id = $1
         AND status IN ('pending', 'processing')
-        AND (user_id = $2 OR ($3::text IS NOT NULL AND ${sqlNormEmail('recipient_email')} = ${sqlNormEmail('$3::text')}))`,
-    [organizationId, userId, email ?? null, reason]
+        AND (user_id = $2 OR ($3::text IS NOT NULL AND ${sqlNormEmail('recipient_email')} = ${sqlNormEmail('$3::text')}
+                              AND ($5::text[] IS NULL OR NOT (notification_type = ANY($5::text[])))))`,
+    [organizationId, userId, email ?? null, reason, skip]
   )
 }
 
-export function countOtherActiveAdmins(rows, targetId) {
-  return rows.filter(row =>
-    row.role === 'admin' &&
+// C3 (CAROLINA-423 H1): an admin invite nobody accepted is not a usable
+// admin. Same predicate as setup.js: added some other way (invited_at
+// NULL) or invited and accepted. The pending row is still locked by
+// lockLoginForAdminCount, so an acceptance racing this count waits.
+export function isUsableAdminRow(row) {
+  return row.role === 'admin' &&
     row.deactivated_at == null &&
     row.closed_at == null &&
-    Number(row.id) !== Number(targetId)
-  ).length
+    (row.invited_at == null || row.invite_accepted_at != null)
 }
+
+export function countOtherUsableAdmins(rows, targetId) {
+  return rows.filter(row => isUsableAdminRow(row) && Number(row.id) !== Number(targetId)).length
+}
+
+// Every last-admin guard (deactivation, closure, demotion, deletion)
+// uses countOtherUsableAdmins. The old countOtherActiveAdmins counted an
+// admin invite nobody accepted, so a sole real admin could deactivate,
+// close or demote themselves and leave no admin who can sign in
+// (CAROLINA-423-R2). It is removed so no caller can fall back to it.
 
 // Locks the target and every still-active admin in the org, in id order,
 // so two concurrent reductions cannot both pass the last-admin check.
@@ -121,7 +141,7 @@ export function deactivateLogin({ organizationId, targetId }) {
     if (target.deactivated_at) {
       return { status: 200, body: { deactivated: true, already: true } }
     }
-    if (target.role === 'admin' && countOtherActiveAdmins(rows, targetId) === 0) {
+    if (target.role === 'admin' && countOtherUsableAdmins(rows, targetId) === 0) {
       return { status: 409, body: { error: ONLY_ACTIVE_ADMIN } }
     }
     const { rows: updated } = await client.query(
@@ -138,7 +158,14 @@ export function deactivateLogin({ organizationId, targetId }) {
       return { status: 200, body: { deactivated: true, already: true } }
     }
     // F-06 / ARG-PATCH-2-1: a deactivated login stops receiving queued mail.
-    await cancelPendingNotificationsForLogin(client, organizationId, targetId, target.email)
+    // Ledger #430 P3-1 / CAROLINA-430 #9: deactivation is not member removal
+    // either, so the ADDRESS match skips record-addressed types (a queued
+    // donation receipt, gift notice or serving reminder to a member or donor
+    // record that shares the address), the same filter closure and deletion
+    // use. Rows addressed to this login's id are still cancelled whatever
+    // their type, and login-addressed types matched by address still are.
+    await cancelPendingNotificationsForLogin(client, organizationId, targetId, target.email, undefined,
+      { skipRecordAddressedTypes: RECORD_ADDRESSED_TYPES })
     return { status: 200, body: { deactivated: true, already: false } }
   }, { organizationId })
 }

@@ -29,6 +29,7 @@ const SKIP_DIRS = new Set(['migrations'])
 // currently defines the view must keep the gift and subtract posted refunds.
 const LEDGER_VIEW_SOURCES = [
   'server/src/migrations/104-donation-refund-facts.js',
+  'server/src/migrations/132-effective-dated-mappings.js',
 ]
 
 const OMIT = /payment_status\s+IS\s+DISTINCT\s+FROM\s+'refunded'/i

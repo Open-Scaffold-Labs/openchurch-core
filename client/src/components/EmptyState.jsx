@@ -16,10 +16,13 @@ import { motion } from 'framer-motion'
 //            Used as a fallback when no illustration is supplied
 //            (modal-internal empty states, smaller surfaces).
 //   title  — short heading (e.g. "No members yet")
+//   headingLevel — 2 by default so EmptyState under a page h1 does not
+//                  skip a level (WCAG 1.3.1 / 2.4.6). Pass 3 only when
+//                  nested under an h2 section heading.
 //   body   — one-line explanation of what this page is for
 //   action — { label, onClick } rendered as the primary CTA button
 //   secondary — optional { label, onClick } rendered as a smaller link
-export default function EmptyState({ illustration: Illustration, icon: Icon, title, body, action, secondary }) {
+export default function EmptyState({ illustration: Illustration, icon: Icon, title, body, action, secondary, headingLevel = 2 }) {
   return (
     <motion.div
       initial={{ opacity: 0, y: 12 }}
@@ -36,9 +39,15 @@ export default function EmptyState({ illustration: Illustration, icon: Icon, tit
           <Icon size={22} />
         </div>
       )}
-      <h3 className="font-display text-xl font-semibold text-ink-900 dark:text-parchment-50">
-        {title}
-      </h3>
+      {headingLevel === 3 ? (
+        <h3 className="font-display text-xl font-semibold text-ink-900 dark:text-parchment-50">
+          {title}
+        </h3>
+      ) : (
+        <h2 className="font-display text-xl font-semibold text-ink-900 dark:text-parchment-50">
+          {title}
+        </h2>
+      )}
       {body && (
         <p className="mt-2 text-sm text-ink-500 dark:text-parchment-300/70 max-w-md mx-auto leading-relaxed">
           {body}

@@ -24,6 +24,9 @@ export const SECRET_COLUMNS = {
   ochr_users: ['password_hash', 'token_version'],
   ochr_organizations: ['kiosk_token', 'ai_api_key_enc'],
   ochr_password_reset_tokens: ['token_hash'],
+  // Hall signing capability. The hash is the lookup key; the seal can
+  // rebuild the link. Neither belongs in a parish export or a restore.
+  ochr_cat_agreements: ['token_hash', 'token_sealed'],
 }
 
 // table.column → why a secret-shaped name is not a credential.
@@ -42,8 +45,16 @@ export const ALLOWED_SECRETISH = {
   'ochr_giving_statements.donor_key': 'Giving-statement donor grouping key. The name matches key; it is not a credential',
   'ochr_giving_statements.donor_key_kind': 'Which donor grouping was used. The name matches key; it is not a credential',
   'ochr_giving_statements.issue_key': 'Org-scoped idempotency key for an issued giving statement. The name matches key; it is not a credential',
+  'ochr_donation_refunds.idempotency_key': 'Caller token for one donation void or refund marker. The name matches key; it is not a credential. The same token replays that fact and does not authorize the request',
+  'ochr_deposit_facts.idempotency_key': 'Caller token for one deposit fact (receive, apply, refund, forfeit, reversal). The name matches key; it is not a credential. The same token replays that fact and does not authorize the request',
+  'ochr_deposit_requests.idempotency_key': 'Optional caller token for one deposit refund, forfeit or reversal request. The name matches key; it is not a credential. The same token replays that request and does not authorize it',
   'ochr_import_rows.issue_key': 'Import-row issue code. The name matches key; it is not a credential',
   'ochr_setup_marks.item_key': 'Setup checklist item id. The name matches key; it is not a credential',
+  'ochr_mass_intention_mark_batches.payload_hash': 'SHA-256 of the chosen intention ids and fulfilment days, so a retry is idempotent. The name matches hash; it is not a credential and it does not contain intention wording',
+  'ochr_ledger_imports.idempotency_key': 'SHA-256 of a trial-balance file and its as-of date, so a retry posts once. The name matches key; it is not a credential and it does not authorize the request',
+  'ochr_mass_stipend_facts.idempotency_key': 'Caller token for one mass-stipend fact (recorded, adjusted, or disposition). The name matches key; it is not a credential. The same token replays that fact and does not authorize the request',
+  'ochr_cat_spaces.vertical_key': 'Product vertical marker (open-church). The name matches key; it is not a credential',
+  'ochr_cat_bookings.vertical_key': 'Product vertical marker (open-church). The name matches key; it is not a credential',
 }
 
 export function isSecretColumn(table, column) {

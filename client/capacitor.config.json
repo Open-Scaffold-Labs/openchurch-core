@@ -1,0 +1,24 @@
+{
+  "appId": "com.openscaffoldlabs.openchurch",
+  "appName": "OpenChurch",
+  "webDir": "dist",
+  "appendUserAgent": "OpenChurchNative",
+  "ios": {
+    "contentInset": "never",
+    "backgroundColor": "#FBF8F2"
+  },
+  "server": {
+    "errorPath": "offline.html"
+  },
+  "plugins": {
+    "SplashScreen": {
+      "launchAutoHide": true,
+      "launchShowDuration": 1500,
+      "backgroundColor": "#FBF8F2",
+      "showSpinner": false
+    },
+    "Keyboard": {
+      "resize": "native"
+    }
+  }
+}

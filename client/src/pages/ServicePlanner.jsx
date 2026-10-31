@@ -3,14 +3,15 @@ import { motion, AnimatePresence } from 'framer-motion'
 import {
   ListMusic, Loader2, Plus, Trash2, X, ChevronUp, ChevronDown, Pencil, Calendar as CalendarIcon, Printer, Play,
 } from 'lucide-react'
-import { Link } from 'react-router-dom'
-import PageWrapper from '../components/PageWrapper'
+import { Link, useSearchParams } from 'react-router-dom'
+import PageWrapper, { PageHeader } from '../components/PageWrapper'
 import EmptyState from '../components/EmptyState'
 import { useToast } from '../components/ToastProvider'
 import { useAuth } from '../context/AuthContext'
 import { useLocale } from '../i18n'
 import { apiUrl } from '../api'
 import { loadList } from '../utils/format'
+import { upcomingSundayISO } from '../utils/dates'
 import { LIT_COLOR_TEXT, LIT_COLOR_DOT, LIT_COLOR_DOT_NONE } from '../utils/liturgicalColors'
 import { seasonLabel } from '../i18n/liturgical'
 import { useConfirm } from '../components/ConfirmProvider'
@@ -21,10 +22,16 @@ import { useConfirm } from '../components/ConfirmProvider'
 // handles. Backed by /api/service-plans (SVC.1). Worship staff + admins
 // edit; viewers read.
 
-function pad(n) { return String(n).padStart(2, '0') }
-function toISO(d) { return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` }
-function upcomingSundayISO() {
-  const d = new Date(); d.setDate(d.getDate() + ((7 - d.getDay()) % 7)); return toISO(d)
+const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/
+
+// Packet → Worship carries the Sunday the sheet was open on. A date that
+// is not a civil day is ignored; a new plan then opens on the next Sunday
+// in the parish zone (today when today is Sunday) — SP-189 / UAT SVC-16.
+export function planDateFromSearch(value, fallback) {
+  const raw = typeof value === 'string'
+    ? new URLSearchParams(String(value).replace(/^\?/, '')).get('date')
+    : value?.get?.('date')
+  return ISO_DAY.test(raw || '') ? raw : fallback
 }
 function fmtLong(iso, dateLocale) {
   if (!iso) return ''
@@ -142,6 +149,16 @@ function ElementModal({ element, members, membersFailed = false, onClose, onSave
   const [saving, setSaving] = useState(false)
   const field = k => e => setForm(f => ({ ...f, [k]: e.target.value }))
 
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key !== 'Escape') return
+      e.preventDefault()
+      onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
   async function submit() {
     if (!form.title.trim()) return
     setSaving(true)
@@ -209,8 +226,9 @@ function ElementModal({ element, members, membersFailed = false, onClose, onSave
 export default function ServicePlanner() {
   const toast = useToast()
   const ask = useConfirm()
-  const { canWrite } = useAuth()
+  const { canWrite, user } = useAuth()
   const { t, dateLocale, tradition } = useLocale()
+  const parishTz = user?.organization?.timezone
 
   const [plans, setPlans]     = useState([])
   const [plansFailed, setPlansFailed] = useState(false)
@@ -226,7 +244,9 @@ export default function ServicePlanner() {
   const [lit, setLit]     = useState(null)
   const [litFailed, setLitFailed] = useState(false)
   const [modal, setModal] = useState(null)   // { element } | { element: null } for new
-  const [newDate, setNewDate] = useState(() => upcomingSundayISO())
+  const [searchParams] = useSearchParams()
+  const askedPlan = searchParams.get('plan')
+  const [newDate, setNewDate] = useState(() => planDateFromSearch(searchParams, upcomingSundayISO(parishTz)))
 
   useEffect(() => {
     let cancelled = false
@@ -245,8 +265,12 @@ export default function ServicePlanner() {
       // A 200 of `{}` used to become an empty assignee list. That reads as
       // a parish with nobody to assign, and the select had no failure line.
       loadList(apiUrl('/api/clients')),
-      // `{}` on a 500 left the printed order with a blank parish name.
-      fetch(apiUrl('/api/organization')).then(async r => {
+      // The printed order needs the parish's display name. The admin
+      // settings block (letterhead, EIN, signatory) is the wrong read:
+      // staff who may print are refused it, and a reload cannot fix that.
+      // SP-079: a name-only, session-scoped read. A real failure still
+      // surfaces; a 200 with no name is a failure, not a blank header.
+      fetch(apiUrl('/api/organization/display-name')).then(async r => {
         if (!r.ok) return { ok: false, name: '' }
         const body = await r.json()
         if (!body || typeof body !== 'object' || Array.isArray(body) || typeof body.name !== 'string') {
@@ -262,10 +286,13 @@ export default function ServicePlanner() {
       setMembersFailed(!roster.ok)
       setOrgName(org.name)
       setOrgFailed(!org.ok)
-      if (p.ok && p.plans.length) setSelectedId(p.plans[0].id)
+      if (p.ok && p.plans.length) {
+        const asked = askedPlan && p.plans.find(row => String(row.id) === String(askedPlan))
+        setSelectedId(asked ? asked.id : p.plans[0].id)
+      }
     }).catch(() => { if (!cancelled) setMembersFailed(true) }).finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
-  }, [])
+  }, [askedPlan])
 
   // Load the selected plan in full + its liturgical day.
   useEffect(() => {
@@ -295,6 +322,15 @@ export default function ServicePlanner() {
       .catch(() => { if (!cancelled) { setDetailFailed(true); setPlan(null) } })
     return () => { cancelled = true }
   }, [selectedId])
+
+  // SP-188: other plans already on a date (from the loaded rail list).
+  const titlesOn = (date, exceptId) => plans
+    .filter(p => p.date === date && String(p.id) !== String(exceptId))
+    .map(p => p.title).join(', ')
+  // Counted from the live list so a create, move or delete updates it.
+  const sameDateCount = p => plans.filter(o => o.date === p.date).length
+  const newDateTitles = plansFailed ? '' : titlesOn(newDate, null)
+  const siblingTitles = plan ? titlesOn(plan.date, plan.id) : ''
 
   async function createPlan() {
     try {
@@ -397,19 +433,15 @@ export default function ServicePlanner() {
   const litLabel = lit?.feast_name || (lit?.season ? seasonLabel(t, lit.season, { tradition, block: lit.ordinary_block }) : null)
 
   if (loading) {
-    return <PageWrapper><div className="flex items-center justify-center py-24"><Loader2 size={20} className="animate-spin text-church-700 dark:text-brass-300" /></div></PageWrapper>
+    return <PageWrapper type="list"><div className="flex items-center justify-center py-24"><Loader2 size={20} className="animate-spin text-church-700 dark:text-brass-300" /></div></PageWrapper>
   }
 
   return (
-    <PageWrapper className="max-w-5xl mx-auto">
+    <PageWrapper type="list" className="max-w-5xl mx-auto">
       <div className="space-y-6">
         <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} className="flex items-start justify-between gap-4 flex-wrap">
           <div>
-            <div className="flex items-center gap-2">
-              <ListMusic size={18} className="text-brass-600 dark:text-brass-300" />
-              <h1 className="font-display text-3xl font-semibold text-ink-900 dark:text-parchment-50 tracking-tight">{t('plan.title')}</h1>
-            </div>
-            <p className="text-sm text-ink-500 dark:text-parchment-300/70 mt-1">{t('plan.sub')}</p>
+            <PageHeader title={t('plan.title')} leading={<ListMusic size={18} />} subtitle={t('plan.sub')} />
             {orgFailed && (
               <p role="status" className="text-xs text-amber-800 dark:text-amber-300 mt-1">{t('plan.orgUnread')}</p>
             )}
@@ -436,6 +468,12 @@ export default function ServicePlanner() {
                   <button onClick={createPlan} className="shrink-0 flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold rounded-lg bg-church-900 dark:bg-parchment-100 text-parchment-50 dark:text-church-900 hover:opacity-90 transition-opacity"><Plus size={13} /> {t('plan.new')}</button>
                 </div>
               )}
+              {/* SP-188: a calm, non-blocking word when the date is taken. */}
+              {canWrite && newDateTitles && (
+                <p role="status" data-testid="plan-new-same-date" className="text-[11px] text-ink-600 dark:text-parchment-300/80">
+                  {t('plan.sameDateNew', { titles: newDateTitles })}
+                </p>
+              )}
               {plansFailed ? (
                 <p role="status" className="text-xs text-amber-800 dark:text-amber-300 py-1">{t('plan.unread')}</p>
               ) : plans.length === 0 ? (
@@ -447,6 +485,9 @@ export default function ServicePlanner() {
                       <button onClick={() => setSelectedId(p.id)} className={`w-full text-left px-3 py-2 rounded-lg transition-colors ${p.id === selectedId ? 'bg-church-900/10 dark:bg-parchment-100/10' : 'hover:bg-parchment-100 dark:hover:bg-ink-800/60'}`}>
                         <p className="text-sm font-semibold text-ink-900 dark:text-parchment-50 truncate">{p.title}</p>
                         <p className="text-[11px] text-ink-500 dark:text-parchment-300/70">{fmtShort(p.date, dateLocale)} · {t(p.element_count === 1 ? 'plan.item1' : 'plan.itemN', { n: p.element_count })}</p>
+                        {sameDateCount(p) > 1 && (
+                          <p data-testid="plan-row-same-date" className="text-[11px] text-brass-700 dark:text-brass-300">{t('plan.sameDateN', { n: sameDateCount(p) })}</p>
+                        )}
                       </button>
                     </li>
                   ))}
@@ -482,7 +523,7 @@ export default function ServicePlanner() {
                     {/* Sunday Packet — the printable everything-sheet for
                         this plan's date (SPK.1, "the Thursday Button"). */}
                     <Link
-                      to={`/packet?date=${plan.date}&from=planner`}
+                      to={`/packet?date=${plan.date}&plan=${plan.id}&from=planner`}
                       className="shrink-0 flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border border-parchment-300/70 dark:border-brass-900/40 text-ink-700 dark:text-parchment-200 hover:bg-parchment-100 dark:hover:bg-ink-800/60 transition-colors"
                     >
                       <Printer size={13} /> {t('plan.packet')}
@@ -513,6 +554,11 @@ export default function ServicePlanner() {
                       </span>
                     )}
                   </div>
+                  {siblingTitles && (
+                    <p role="status" data-testid="plan-same-date" className="text-xs text-ink-600 dark:text-parchment-300/80">
+                      {t('plan.sameDate', { titles: siblingTitles })}
+                    </p>
+                  )}
                 </div>
 
                 {/* Elements */}
@@ -538,7 +584,7 @@ export default function ServicePlanner() {
                           )}
                           <div className="min-w-0 flex-1">
                             <div className="flex items-center gap-2 flex-wrap">
-                              <span className={`text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded ${KIND_BADGE[e.kind] ?? KIND_BADGE.other}`}>{kindLabel(t, e.kind)}</span>
+                              <span className={`text-[11px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded ${KIND_BADGE[e.kind] ?? KIND_BADGE.other}`}>{kindLabel(t, e.kind)}</span>
                               <span className="text-sm font-medium text-ink-900 dark:text-parchment-50">{e.title}</span>
                               {e.reference && <span className="text-xs text-ink-500 dark:text-parchment-300/70">{e.reference}</span>}
                             </div>

@@ -66,7 +66,7 @@ const HARD_EN = [
   '— Select —',
   'Too many submissions from this network',
   'Submitting…',
-  'Powered by OpenChurch',
+  'Powered by ScaffoldLabs',
 ]
 
 const FORM_KEYS = [
@@ -173,8 +173,10 @@ describe('PublicForm leftover chrome is translated', () => {
     expect(screen.queryByText(STRINGS.en['form.emailHelp'])).toBeNull()
     expect(screen.getByRole('button', { name: STRINGS.es['form.submit'] })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: STRINGS.en['form.submit'] })).toBeNull()
+    // Brand credit matches church.powered (ES: Con tecnología de ScaffoldLabs).
     expect(screen.getByText(STRINGS.es['form.powered'])).toBeInTheDocument()
-    expect(screen.queryByText(STRINGS.en['form.powered'])).toBeNull()
+    expect(STRINGS.es['form.powered']).toBe(STRINGS.es['church.powered'])
+    expect(STRINGS.es['form.powered']).not.toBe(STRINGS.en['form.powered'])
     expect(screen.getByLabelText('Preferred ministry')).toBeInTheDocument()
     expect(screen.getByText('Available days')).toBeInTheDocument()
     expect(screen.getByLabelText('Sunday')).toBeInTheDocument()
@@ -185,7 +187,8 @@ describe('PublicForm leftover chrome is translated', () => {
     routes({}, { ...FORM, org: { locale: 'es' } })
     mount()
     expect(await screen.findByText(STRINGS.es['form.powered'])).toBeInTheDocument()
-    expect(screen.queryByText(STRINGS.en['form.powered'])).toBeNull()
+    expect(STRINGS.es['form.powered']).toBe(STRINGS.es['church.powered'])
+    expect(STRINGS.es['form.powered']).not.toBe(STRINGS.en['form.powered'])
     expect(screen.getByRole('option', { name: STRINGS.es['form.select'] })).toBeInTheDocument()
     expect(screen.getByLabelText(STRINGS.es['form.name'])).toBeInTheDocument()
     expect(screen.getByRole('button', { name: STRINGS.es['form.submit'] })).toBeInTheDocument()
@@ -291,11 +294,14 @@ describe('PublicForm leftover chrome is translated', () => {
 
   it('i18n strings and the component wiring cannot reintroduce hard-EN chrome', () => {
     const jsx = stripComments(FORM_SRC)
+    const SAME_IN_BOTH = new Set(['form.powered'])
     for (const key of FORM_KEYS) {
       expect(FORM_SRC, key).toMatch(new RegExp(`t\\('${key.replace('.', '\\.')}'`))
       expect(STRINGS.en[key], key).toBeTruthy()
       expect(STRINGS.es[key], key).toBeTruthy()
-      expect(STRINGS.es[key], key).not.toBe(STRINGS.en[key])
+      if (!SAME_IN_BOTH.has(key)) {
+        expect(STRINGS.es[key], key).not.toBe(STRINGS.en[key])
+      }
     }
     expect(FORM_SRC).toMatch(/useLocale\(/)
     expect(FORM_SRC).toMatch(/setPublicLocale/)
@@ -315,13 +321,14 @@ describe('PublicForm leftover chrome is translated', () => {
     expect(STRINGS.en['form.notFound']).toBe('Form not available')
     expect(STRINGS.en['form.thanks']).toBe('Thank you')
     expect(STRINGS.en['form.submit']).toBe('Submit')
-    expect(STRINGS.en['form.powered']).toBe('Powered by OpenChurch')
+    expect(STRINGS.en['form.powered']).toBe('Powered by ScaffoldLabs')
     expect(STRINGS.en['form.select']).toBe('— Select —')
     expect(STRINGS.en['form.notFoundBefore']).toMatch(/open form at/i)
     expect(STRINGS.es['form.notFound']).toMatch(/formulario/i)
     expect(STRINGS.es['form.thanks']).toMatch(/gracias/i)
     expect(STRINGS.es['form.submit']).toMatch(/enviar/i)
-    expect(STRINGS.es['form.powered']).toMatch(/openchurch/i)
+    expect(STRINGS.es['form.powered']).toBe('Con tecnología de ScaffoldLabs')
+    expect(STRINGS.es['form.powered']).toBe(STRINGS.es['church.powered'])
     expect(STRINGS.es['form.name']).toMatch(/nombre/i)
     expect(STRINGS.es['form.select']).toMatch(/seleccion/i)
   })

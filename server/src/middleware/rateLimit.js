@@ -152,3 +152,66 @@ export const changePasswordLimiter = rateLimit({
     error: 'Too many password-change attempts. Please wait a few minutes and try again.',
   },
 })
+
+// ── Unauthenticated token / public surfaces (Argus R427, 2026-10-26) ──
+// Argus #427 listed the remaining unauthenticated routes that had no
+// limiter. Each of these authorises with a secret the caller must guess
+// (a single-use token in the body, or a capability token in the path), or
+// is a public evaluation endpoint. None of the secrets is guessable in
+// practice; these limiters are defense in depth against scripted guessing
+// and CPU burn, sized so a real user never meets them.
+
+// Reset-password and accept-invite: token in the body, per IP. Only
+// FAILED attempts count (skipSuccessfulRequests), so a parish office NAT
+// where several people finish a reset the same morning is never throttled.
+export const resetPasswordLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: int('RESET_PASSWORD_MAX_PER_IP', 20),
+  skipSuccessfulRequests: true,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many password-reset attempts from this network. Please try again in a few minutes.' },
+})
+
+export const acceptInviteLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: int('ACCEPT_INVITE_MAX_PER_IP', 20),
+  skipSuccessfulRequests: true,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many invitation attempts from this network. Please try again in a few minutes.' },
+})
+
+// Capability-token GETs (kiosk shell, member ICS feed). Only misses count:
+// a calendar provider (Google, Apple) polls many members' feeds from a
+// shared IP range, and a kiosk tablet reloads all day, so successful reads
+// must never accrue. The ceiling is loose because stale (rotated) tokens
+// legitimately 404 from those shared ranges too.
+export const kioskTokenLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: int('KIOSK_TOKEN_MISS_MAX_PER_IP', 60),
+  skipSuccessfulRequests: true,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests from this device. Please wait a moment.' },
+})
+
+export const calendarFeedLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: int('CALENDAR_FEED_MISS_MAX_PER_IP', 300),
+  skipSuccessfulRequests: true,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many calendar feed requests from this network. Please try again later.' },
+})
+
+// Public schedule evaluation POSTs (/facility-hold, /volunteer-roster,
+// /mcp). No caller in the product uses them; they compute synthetic
+// output. Every request counts, per IP, shared across the three routes.
+export const publicScheduleLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: int('PUBLIC_SCHEDULE_MAX_PER_IP', 60),
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests from this address. Please try again in a few minutes.' },
+})

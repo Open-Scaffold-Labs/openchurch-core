@@ -228,7 +228,7 @@ function Deaneries({ onChanged }) {
   return (
     <div className="mb-6">
       <button type="button" onClick={() => setOpen(o => !o)} aria-expanded={open}
-        className="text-[12.5px] text-church-700 hover:underline">
+        className="text-xs text-church-700 hover:underline">
         {open ? 'Hide deaneries' : `Deaneries (${regions.length})`}
       </button>
 
@@ -252,7 +252,7 @@ function Deaneries({ onChanged }) {
             <ul className="mb-3 divide-y divide-parchment-300/50">
               {regions.map(r => (
                 <li key={r.id} className="flex items-center justify-between py-1.5">
-                  <span className="text-[13.5px] text-ink-800">
+                  <span className="text-sm text-ink-800">
                     {r.name}
                     <span className="text-ink-400 text-[12px] ml-2">
                       {r.parish_count === 1 ? '1 parish' : `${r.parish_count} parishes`}
@@ -277,7 +277,7 @@ function Deaneries({ onChanged }) {
               Add
             </button>
           </form>
-          {error && <p className="mt-2 text-[12.5px] text-church-700">{error}</p>}
+          {error && <p className="mt-2 text-xs text-church-700">{error}</p>}
         </div>
       )}
     </div>
@@ -320,7 +320,7 @@ function DeaneryPicker({ parishOrgId, value }) {
     <>
       <label htmlFor={`deanery-${parishOrgId}`} className="sr-only">Deanery for this parish</label>
       <select id={`deanery-${parishOrgId}`} value={current} onChange={change} disabled={busy}
-        className="px-2 py-1 text-[12.5px] rounded-lg border border-parchment-300 bg-parchment-50 text-ink-700 focus:outline-none focus:ring-2 focus:ring-brass-400">
+        className="px-2 py-1 text-xs rounded-lg border border-parchment-300 bg-parchment-50 text-ink-700 focus:outline-none focus:ring-2 focus:ring-brass-400">
         <option value="">—</option>
         {regions.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
       </select>

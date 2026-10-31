@@ -8,7 +8,7 @@ import { useLocale } from '../i18n'
 // Parishioner-facing public form page (Sprint Forms / F.3).
 // Unauthenticated, outside the app shell. Visual shape mirrors
 // PublicEvents — same brand mark, same parchment/brass card, same
-// quiet "Powered by OpenChurch" footer — so a church can hand out
+// quiet "Powered by ScaffoldLabs" footer — so a church can hand out
 // /p/<slug>/forms/<formSlug> in a bulletin without parishioners
 // feeling they've been thrown into a SaaS.
 //

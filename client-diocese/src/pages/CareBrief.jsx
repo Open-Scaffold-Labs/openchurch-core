@@ -68,11 +68,11 @@ export default function CareBrief() {
       `}</style>
 
       <div className="no-print flex items-center justify-between mb-5">
-        <Link to={`/care/${parishId}`} className="inline-flex items-center gap-1 text-[12.5px] text-ink-500 hover:text-church-700">
+        <Link to={`/care/${parishId}`} className="inline-flex items-center gap-1 text-xs text-ink-500 hover:text-church-700">
           <ChevronLeft size={14} /> Back to the parish
         </Link>
         <div className="flex items-center gap-3">
-          <label className="flex items-center gap-1.5 text-[12.5px] text-ink-600">
+          <label className="flex items-center gap-1.5 text-xs text-ink-600">
             <input type="checkbox" checked={internal} onChange={e => setInternal(e.target.checked)} />
             Include internal notes
           </label>
@@ -93,7 +93,7 @@ export default function CareBrief() {
         <header className="text-center border-b border-parchment-300 pb-5 mb-6">
           <p className="text-[10.5px] uppercase tracking-[0.2em] text-brass-600 mb-2">Parish Care Brief</p>
           <h1 className="font-serif text-3xl font-bold text-church-700 leading-tight">{brief.parish.name}</h1>
-          <p className="text-[12.5px] text-ink-500 mt-1.5">
+          <p className="text-xs text-ink-500 mt-1.5">
             {[brief.parish.region, brief.diocese].filter(Boolean).join(' · ')}
           </p>
           {churchYear && <p className="font-serif italic text-[13px] text-ink-600 mt-2">{churchYear}</p>}
@@ -110,7 +110,7 @@ export default function CareBrief() {
           <Block title="Recently">
             <ul className="space-y-1.5">
               {brief.recent_history.map((h, i) => (
-                <li key={i} className="text-[13.5px] leading-snug">
+                <li key={i} className="text-sm leading-snug">
                   <span className="text-ink-400 tabular-nums mr-2">{h.occurred_on}</span>
                   {h.summary}
                 </li>
@@ -122,7 +122,7 @@ export default function CareBrief() {
         {(brief.current_work.open_support_requests > 0 || brief.current_work.transitions.length > 0 ||
           brief.current_work.reports.length > 0) && (
           <Block title="Current work">
-            <ul className="space-y-1.5 text-[13.5px] leading-snug">
+            <ul className="space-y-1.5 text-sm leading-snug">
               {/* A count and a plain statement of whose channel it is. The
                   ticket text is the parish's message to OpenChurch and never
                   prints here — see careBrief.js. It also no longer reads as
@@ -154,7 +154,7 @@ export default function CareBrief() {
           <Block title="Agreed next steps">
             <ul className="space-y-2">
               {brief.agreed_next_steps.map((f, i) => (
-                <li key={i} className="text-[13.5px] leading-snug">
+                <li key={i} className="text-sm leading-snug">
                   {f.next_action}
                   <span className="block text-[12px] text-ink-500 mt-0.5">
                     {[f.context, f.owner_name, f.due_on && `by ${f.due_on}`].filter(Boolean).join(' · ')}
@@ -173,7 +173,7 @@ export default function CareBrief() {
                   <span className="font-medium">{p.name}</span>
                   <span className="text-ink-500"> — {p.role}</span>
                   {(p.email || p.phone) && (
-                    <span className="block text-[11.5px] text-ink-500">{[p.phone, p.email].filter(Boolean).join(' · ')}</span>
+                    <span className="block text-[11px] text-ink-500">{[p.phone, p.email].filter(Boolean).join(' · ')}</span>
                   )}
                 </li>
               ))}
@@ -182,7 +182,7 @@ export default function CareBrief() {
         )}
 
         {brief.withheld && (
-          <p className="text-[11.5px] italic text-ink-500 border-l-2 border-parchment-300 pl-3 mb-5">{brief.withheld}</p>
+          <p className="text-[11px] italic text-ink-500 border-l-2 border-parchment-300 pl-3 mb-5">{brief.withheld}</p>
         )}
 
         <footer className="border-t border-parchment-300 pt-4 mt-6">

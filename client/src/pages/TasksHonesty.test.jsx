@@ -97,7 +97,7 @@ describe('Tasks list honesty in Spanish', () => {
       return ok({})
     }))
     mount(<Tasks />)
-    expect(await screen.findByText('No tasks yet')).toBeInTheDocument()
+    expect(await screen.findByText(es['task.emptyTitle'])).toBeInTheDocument()
     expect(screen.queryByText(es['load.failedTitle'])).not.toBeInTheDocument()
     expect(screen.queryByText(es['load.failedBody'])).not.toBeInTheDocument()
   })
@@ -116,8 +116,8 @@ describe('Tasks member picker honesty in Spanish', () => {
 
   async function openNew() {
     mount(<Tasks />)
-    fireEvent.click(await screen.findByRole('button', { name: 'New Task' }))
-    expect(await screen.findByRole('heading', { name: 'New Task' })).toBeInTheDocument()
+    fireEvent.click(await screen.findByRole('button', { name: es['task.new'] }))
+    expect(await screen.findByRole('heading', { name: es['task.new'] })).toBeInTheDocument()
   }
 
   it('a refused roster says the member list failed', async () => {
@@ -142,7 +142,7 @@ describe('Tasks member picker honesty in Spanish', () => {
     spanish()
     stub(ok([MARIA]))
     await openNew()
-    fireEvent.change(screen.getByRole('textbox', { name: 'Search members…' }), { target: { value: 'Maria' } })
+    fireEvent.change(screen.getByRole('textbox', { name: es['task.searchMembers'] }), { target: { value: 'Maria' } })
     expect(await screen.findByText('Maria Ruiz')).toBeInTheDocument()
     expect(screen.queryByText(es['mem.listFailed'])).not.toBeInTheDocument()
   })
@@ -163,7 +163,8 @@ describe('Linked events honesty in Spanish', () => {
     spanish()
     vi.stubGlobal('fetch', vi.fn(async () => ok([])))
     mount(<LinkedEvents taskId="task-1" assignedMemberId={4} />)
-    expect(await screen.findByText(/isn't on any events yet/i)).toBeInTheDocument()
+    expect(await screen.findByText(es['task.this_task_s_assignee_isn'])).toBeInTheDocument()
+    expect(screen.queryByText(en['task.this_task_s_assignee_isn'])).not.toBeInTheDocument()
     expect(screen.queryByText(es['dash.upcomingUnread'])).not.toBeInTheDocument()
   })
 })

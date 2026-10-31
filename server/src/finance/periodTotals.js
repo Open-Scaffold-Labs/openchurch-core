@@ -93,3 +93,23 @@ export async function computePeriodTotals(orgId, start, end, db = pool) {
     },
   }
 }
+
+// Gifts the chart cannot classify, with the category the parish typed.
+// A null account is unknown: it is not an assessable false. Refunds of
+// those gifts net against them inside their own category only, so one
+// category's refund never hides another category's gift.
+export async function unmappedDonationLines(orgId, start, end, db = pool) {
+  const { rows } = await db.query(
+    `SELECT COALESCE(NULLIF(TRIM(l.memo), ''), 'Uncategorized') AS category,
+            to_char(SUM(l.amount), 'FM999999990.00') AS amount
+       FROM ochr_parish_ledger l
+      WHERE l.organization_id = $1
+        AND l.entry_date >= $2::date AND l.entry_date <= $3::date
+        AND l.source_type IN ('donation', 'donation_refund')
+        AND l.account_code IS NULL
+      GROUP BY 1
+     HAVING SUM(l.amount) <> 0
+      ORDER BY 1`,
+    [orgId, start, end])
+  return rows
+}

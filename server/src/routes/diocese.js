@@ -24,6 +24,14 @@ import { financialObservations } from '../finance/observations.js'
 import { overlapsRange, findOverlappingSubmission, overlapMessage, overlapRemedy } from '../finance/fiscalPeriod.js'
 import { PERIOD_ADJUSTMENT_LIST_COLS, PERIOD_ADJUSTMENT_LIST_JOINS } from '../finance/periodAdjustmentRollup.js'
 import { settlePeriodAdjustment, settleOpenOnSubmission } from '../finance/periodAdjustmentSettle.js'
+import {
+  DEPOSIT_ADJUSTMENTS_PENDING, submissionHasPendingDepositAdjustments,
+  adjustmentSubmissionHasPendingDepositAdjustments,
+  lockSubmissionsForDepositCheck, isDepositLockBusy, DEPOSIT_LOCK_BUSY,
+} from '../finance/depositAdjustmentGuard.js'
+import { applyMappingList, MappingRejected } from '../finance/mappingWrite.js'
+import { EFFECTIVE_COA } from '../finance/effectiveCoa.js'
+import { requireRole } from '../middleware/auth.js'
 
 const router = Router()
 
@@ -400,6 +408,11 @@ router.patch('/submissions/:id', async (req, res) => {
     }
     expected = parsed.toISOString()
   }
+  const db = await pool.connect()
+  const finish = async (status, body) => {
+    await db.query(status < 300 ? 'COMMIT' : 'ROLLBACK')
+    return res.status(status).json(body)
+  }
   try {
     // Approving is what admits a period to the roll-up and the bill, so
     // this is the last gate before two overlapping periods are both
@@ -407,8 +420,18 @@ router.patch('/submissions/:id', async (req, res) => {
     // time; this catches what that cannot — two overlapping rows that were
     // both 'submitted' before the guard existed, or landed in a race. The
     // second one may still be RETURNED: that is the way to resolve it.
+    // R418-1: approving admits the period to the roll-up and the bill, and
+    // its deposit adjustments are not in either yet. Returning stays open.
+    // R418-2: lock the submission row FIRST (the same row lock reversal
+    // approval takes before it records an adjustment), then check under it.
+    await db.query('BEGIN')
+    await lockSubmissionsForDepositCheck(db, 's.id = $1 AND s.diocese_org_id = $2', [id, req.organizationId])
+    if (next === 'approved' &&
+        await submissionHasPendingDepositAdjustments(db, { submissionId: id, dioceseOrgId: req.organizationId })) {
+      return finish(DEPOSIT_ADJUSTMENTS_PENDING.status, DEPOSIT_ADJUSTMENTS_PENDING.body)
+    }
     if (next === 'approved') {
-      const { rows: mine } = await pool.query(
+      const { rows: mine } = await db.query(
         `SELECT organization_id,
                 to_char(period_start, 'YYYY-MM-DD') AS period_start,
                 to_char(period_end, 'YYYY-MM-DD')   AS period_end
@@ -417,13 +440,13 @@ router.patch('/submissions/:id', async (req, res) => {
         [id, req.organizationId]
       )
       if (mine.length) {
-        const overlap = await findOverlappingSubmission(pool, {
+        const overlap = await findOverlappingSubmission(db, {
           organizationId: mine[0].organization_id, dioceseOrgId: req.organizationId,
           periodStart: mine[0].period_start, periodEnd: mine[0].period_end,
           statuses: ['approved'], excludeId: id,
         })
         if (overlap) {
-          return res.status(409).json({
+          return finish(409, {
             // The remedy depends on what the other period IS — an approved
             // one cannot be returned, and the old sentence said it could.
             error: overlapMessage(overlap, overlapRemedy(overlap, 'chancery')),
@@ -439,7 +462,7 @@ router.patch('/submissions/:id', async (req, res) => {
     // The expected-timestamp guard lives in this same WHERE, not in a read
     // before it, so a resubmit that lands between a check and the write
     // still cannot be approved unseen.
-    const { rows } = await pool.query(
+    const { rows } = await db.query(
       `UPDATE ochr_report_submissions s
           SET status = $1, review_note = $2, reviewed_by = $3, reviewed_at = NOW()
         WHERE s.id = $4 AND s.diocese_org_id = $5 AND s.status = 'submitted'
@@ -460,22 +483,24 @@ router.patch('/submissions/:id', async (req, res) => {
       // can have refused is the timestamp, and the chancery needs to look
       // again before it decides.
       if (expected !== null) {
-        const { rows: still } = await pool.query(
+        const { rows: still } = await db.query(
           `SELECT 1 FROM ochr_report_submissions
             WHERE id = $1 AND diocese_org_id = $2 AND status = 'submitted'`,
           [id, req.organizationId]
         )
         if (still.length) {
-          return res.status(409).json({
+          return finish(409, {
             error: 'The parish resubmitted this period after you loaded it. Reload to review the new figures.',
             code: 'submission_changed',
           })
         }
       }
-      return res.status(404).json({ error: 'No reviewable submission found' })
+      return finish(404, { error: 'No reviewable submission found' })
     }
-    res.json(rows[0])
+    return finish(200, rows[0])
   } catch (err) {
+    await db.query('ROLLBACK').catch(() => {})
+    if (isDepositLockBusy(err)) return res.status(DEPOSIT_LOCK_BUSY.status).json(DEPOSIT_LOCK_BUSY.body)
     // 23P01 — the 097 exclusion constraint caught an overlap the
     // check-then-write above raced past. Two concurrent requests both read
     // "no overlap" on separate pooled connections and both wrote; the
@@ -489,6 +514,8 @@ router.patch('/submissions/:id', async (req, res) => {
     }
     monitor.error('diocese.submissions.patch', err, { orgId: req.organizationId, id })
     res.status(500).json({ error: 'Failed to review the submission' })
+  } finally {
+    db.release()
   }
 })
 
@@ -603,6 +630,13 @@ router.post('/adjustments/:id/settle', async (req, res) => {
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
+    await lockSubmissionsForDepositCheck(client,
+      `s.id = (SELECT pa.submission_id FROM ochr_period_adjustments pa WHERE pa.id = $1 AND pa.diocese_org_id = $2) AND s.diocese_org_id = $2`,
+      [id, req.organizationId])
+    if (await adjustmentSubmissionHasPendingDepositAdjustments(client, { adjustmentId: id, dioceseOrgId: req.organizationId })) {
+      await client.query('ROLLBACK')
+      return res.status(DEPOSIT_ADJUSTMENTS_PENDING.status).json(DEPOSIT_ADJUSTMENTS_PENDING.body)
+    }
     const result = await settlePeriodAdjustment(client, {
       dioceseOrgId: req.organizationId,
       adjustmentId: id,
@@ -621,6 +655,7 @@ router.post('/adjustments/:id/settle', async (req, res) => {
     })
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {})
+    if (isDepositLockBusy(err)) return res.status(DEPOSIT_LOCK_BUSY.status).json(DEPOSIT_LOCK_BUSY.body)
     if (err?.code === '23514') {
       return res.status(409).json({
         error: 'A credit must be recorded before this adjustment can be marked resolved. Nothing was lost.',
@@ -642,6 +677,11 @@ router.post('/submissions/:id/adjustments/settle', async (req, res) => {
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
+    await lockSubmissionsForDepositCheck(client, 's.id = $1 AND s.diocese_org_id = $2', [id, req.organizationId])
+    if (await submissionHasPendingDepositAdjustments(client, { submissionId: id, dioceseOrgId: req.organizationId })) {
+      await client.query('ROLLBACK')
+      return res.status(DEPOSIT_ADJUSTMENTS_PENDING.status).json(DEPOSIT_ADJUSTMENTS_PENDING.body)
+    }
     const result = await settleOpenOnSubmission(client, {
       dioceseOrgId: req.organizationId,
       submissionId: id,
@@ -666,6 +706,7 @@ router.post('/submissions/:id/adjustments/settle', async (req, res) => {
     res.json({ already_recorded: result.already, recorded: items })
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {})
+    if (isDepositLockBusy(err)) return res.status(DEPOSIT_LOCK_BUSY.status).json(DEPOSIT_LOCK_BUSY.body)
     if (err?.code === '23514') {
       return res.status(409).json({
         error: 'A credit must be recorded before this adjustment can be marked resolved. Nothing was lost.',
@@ -947,6 +988,95 @@ router.put('/coa', async (req, res) => {
     res.status(500).json({ error: 'Failed to save chart of accounts' })
   } finally {
     client.release()
+  }
+})
+
+
+// PUT /api/diocese/parishes/:parishOrgId/mappings — BOOKS-1.1 D2.
+// Chancery writes effective-dated mappings for an affiliated parish with
+// set_by='diocese'. Tenant-scoped: the parish must have an active (or at
+// least live) affiliation with this diocese. Used for pass-through /
+// restricted mappings (4450/2320) the parish cannot set itself.
+router.put('/parishes/:parishOrgId/mappings', requireRole('admin'), async (req, res) => {
+  const parishOrgId = Number(req.params.parishOrgId)
+  if (!Number.isInteger(parishOrgId) || parishOrgId < 1) {
+    return res.status(400).json({ error: 'Invalid parish id' })
+  }
+  const list = Array.isArray(req.body?.mappings) ? req.body.mappings : null
+  if (!list) return res.status(400).json({ error: 'mappings array is required' })
+  if (list.length > 200) return res.status(400).json({ error: 'Too many mappings in one request (max 200)' })
+
+  const requested = req.body?.effective_from
+  if (requested != null && requested !== '' && (typeof requested !== 'string' || !ISO_DATE.test(requested))) {
+    return res.status(400).json({ error: 'effective_from must be YYYY-MM-DD' })
+  }
+
+  try {
+    // Ledger P2: D2 writes need an active affiliation with detail grant.
+    // Suspended orgs and summary grant are refused (same spirit as
+    // account-level financials drill-down).
+    const { rows: aff } = await pool.query(
+      `SELECT id, status, grant_level FROM ochr_diocese_affiliations
+        WHERE diocese_org_id = $1 AND parish_org_id = $2
+          AND status = 'active'
+        ORDER BY created_at DESC
+        LIMIT 1`,
+      [req.organizationId, parishOrgId])
+    if (!aff.length) {
+      return res.status(404).json({ error: 'Parish not found in this diocese' })
+    }
+    if (aff[0].grant_level !== 'detail') {
+      return res.status(403).json({
+        code: 'grant_level_insufficient',
+        error: 'Mapping writes need a detail grant from the parish. Nothing was saved.',
+      })
+    }
+
+    const { rows: chart } = await pool.query(
+      `SELECT code, name, acct_type, assessable FROM (${EFFECTIVE_COA}) c WHERE c.active`,
+      [parishOrgId])
+    const byCode = new Map(chart.map(r => [r.code, r]))
+    for (const m of list) {
+      const type = m?.source_type
+      const key = typeof m?.source_key === 'string' ? m.source_key.trim() : ''
+      const code = typeof m?.account_code === 'string' ? m.account_code.trim() : ''
+      if (!['donation_category', 'payroll', 'fund'].includes(type) || !key) {
+        return res.status(400).json({ error: 'Each mapping needs a valid source_type and source_key' })
+      }
+      if (code && !byCode.has(code)) {
+        return res.status(400).json({ error: `Unknown account code ${code}` })
+      }
+    }
+
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      await applyMappingList(client, parishOrgId, list, requested || null, byCode, { setBy: 'diocese' })
+      await client.query('COMMIT')
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {})
+      if (err instanceof MappingRejected) {
+        return res.status(err.status).json({ error: err.message, code: err.code })
+      }
+      throw err
+    } finally {
+      client.release()
+    }
+
+    const { rows } = await pool.query(
+      `SELECT id, source_type, source_key, account_code, set_by,
+              CASE WHEN effective_from = '-infinity'::date THEN '-infinity'
+                   ELSE to_char(effective_from, 'YYYY-MM-DD') END AS effective_from
+         FROM ochr_coa_mappings
+        WHERE organization_id = $1 AND superseded_on IS NULL
+        ORDER BY source_type COLLATE "C", source_key COLLATE "C"`,
+      [parishOrgId])
+    res.json({ parish_org_id: parishOrgId, mappings: rows })
+  } catch (err) {
+    monitor.error('diocese.parishMappings.put', err, {
+      orgId: req.organizationId, parishOrgId,
+    })
+    res.status(500).json({ error: 'Failed to save diocese mappings' })
   }
 })
 

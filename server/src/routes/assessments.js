@@ -37,6 +37,10 @@ import pool from '../db.js'
 import { requireIntParam } from '../utils/params.js'
 import { monitor } from '../monitoring/index.js'
 import { computeBases } from '../finance/assessmentBases.js'
+import {
+  ASSESSMENT_DEPOSIT_ADJUSTMENTS_PENDING, assessmentYearHasPendingDepositAdjustments,
+  lockAssessmentYearPeriods, isDepositLockBusy, DEPOSIT_LOCK_BUSY,
+} from '../finance/depositAdjustmentGuard.js'
 
 const router = Router()
 
@@ -205,13 +209,19 @@ router.post('/', async (req, res) => {
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
+    // R418-1: the bases would silently omit deposit adjustments.
+    await lockAssessmentYearPeriods(client, { dioceseOrgId: req.organizationId, year: baseYear })
+    if (await assessmentYearHasPendingDepositAdjustments(client, { dioceseOrgId: req.organizationId, year: baseYear })) {
+      await client.query('ROLLBACK')
+      return res.status(ASSESSMENT_DEPOSIT_ADJUSTMENTS_PENDING.status).json(ASSESSMENT_DEPOSIT_ADJUSTMENTS_PENDING.body)
+    }
     const { rows } = await client.query(
       `INSERT INTO ochr_assessments (diocese_org_id, fiscal_year, rate_bps, notes, bands, base_year)
        VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
       [req.organizationId, year, bps, notes, bands ? JSON.stringify(bands) : null, baseYear]
     )
     const id = rows[0].id
-    for (const b of await computeBases(req.organizationId, baseYear)) {
+    for (const b of await computeBases(req.organizationId, baseYear, client)) {
       const { assessed, breakdown } = assessFor(b.base, { bands, rate_bps: bps })
       await client.query(
         `INSERT INTO ochr_assessment_lines (assessment_id, parish_org_id, base, rate_bps, assessed, breakdown)
@@ -223,6 +233,7 @@ router.post('/', async (req, res) => {
     res.status(201).json(await detail(id, req.organizationId))
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {})
+    if (isDepositLockBusy(err)) return res.status(DEPOSIT_LOCK_BUSY.status).json(DEPOSIT_LOCK_BUSY.body)
     if (err?.code === '23505') {
       return res.status(409).json({ error: `An assessment for ${year} already exists` })
     }
@@ -264,7 +275,12 @@ router.post('/:id/recompute', async (req, res) => {
     if (!a.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Not found' }) }
     if (a[0].status !== 'draft') { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Only a draft assessment can be recomputed' }) }
 
-    const bases = await computeBases(req.organizationId, a[0].base_year)
+    await lockAssessmentYearPeriods(client, { dioceseOrgId: req.organizationId, year: a[0].base_year })
+    if (await assessmentYearHasPendingDepositAdjustments(client, { dioceseOrgId: req.organizationId, year: a[0].base_year })) {
+      await client.query('ROLLBACK')
+      return res.status(ASSESSMENT_DEPOSIT_ADJUSTMENTS_PENDING.status).json(ASSESSMENT_DEPOSIT_ADJUSTMENTS_PENDING.body)
+    }
+    const bases = await computeBases(req.organizationId, a[0].base_year, client)
     for (const b of bases) {
       // A line that carries a per-parish override keeps it: the DO UPDATE
       // re-derives at the LINE's own rate, not the year's. A line with no
@@ -307,6 +323,7 @@ router.post('/:id/recompute', async (req, res) => {
     res.json(await detail(id, req.organizationId))
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {})
+    if (isDepositLockBusy(err)) return res.status(DEPOSIT_LOCK_BUSY.status).json(DEPOSIT_LOCK_BUSY.body)
     monitor.error('assessments.recompute', err, { orgId: req.organizationId, id })
     res.status(500).json({ error: 'Failed to recompute' })
   } finally {
@@ -389,6 +406,10 @@ router.patch('/:id', async (req, res) => {
         return refuse(400, { error: `Cannot move from '${a.status}' to '${nextStatus}'` })
       }
       if (nextStatus === 'published') {
+        await lockAssessmentYearPeriods(client, { dioceseOrgId: req.organizationId, year: a.base_year })
+        if (await assessmentYearHasPendingDepositAdjustments(client, { dioceseOrgId: req.organizationId, year: a.base_year })) {
+          return refuse(ASSESSMENT_DEPOSIT_ADJUSTMENTS_PENDING.status, ASSESSMENT_DEPOSIT_ADJUSTMENTS_PENDING.body)
+        }
         const { rows: lines } = await client.query(
           `SELECT l.parish_org_id, p.name AS parish_name, l.base, l.paid, l.status
              FROM ochr_assessment_lines l
@@ -421,6 +442,7 @@ router.patch('/:id', async (req, res) => {
     res.json(await detail(id, req.organizationId))
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {})
+    if (isDepositLockBusy(err)) return res.status(DEPOSIT_LOCK_BUSY.status).json(DEPOSIT_LOCK_BUSY.body)
     monitor.error('assessments.patch', err, { orgId: req.organizationId, id })
     res.status(500).json({ error: 'Failed to update the assessment' })
   } finally {

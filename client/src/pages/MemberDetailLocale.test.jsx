@@ -65,6 +65,7 @@ const NEW_KEYS = [
   'member.recordSacrament',
   'member.attendance',
   'member.donationHistory',
+  'member.giftsNameMatchedNote',
   'member.activePledges',
   'member.noContact',
   'member.updatedOn',

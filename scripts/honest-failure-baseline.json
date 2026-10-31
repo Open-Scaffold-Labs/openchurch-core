@@ -1,5 +1,4 @@
 [
-  "awaited-parse client/src/pages/Events.jsx :: async function enrichEventWithLiturgical(eventDate) {",
   "discarded-write client/src/context/AuthContext.jsx :: try { await fetch(apiUrl( ), { method: }) } catch {}",
   "empty-on-error client/src/pages/Schedule.jsx :: .catch(() => { if (!cancelled) setLitByDate({}) })",
   "ternary-empty client/src/App.jsx :: .then(r => (r.ok ? r.json() : { affiliation: null }))",

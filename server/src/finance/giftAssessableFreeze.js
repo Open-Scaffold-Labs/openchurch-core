@@ -47,7 +47,11 @@ export async function giftAssessableAtFreeze(orgId, start, end, db = pool) {
     map[String(r.donation_id)] = {
       amount: Number(r.amount).toFixed(2),
       account_code: r.account_code,
-      assessable: r.acct_type === 'revenue' && r.assessable === true,
+      // A missing account is unknown. Stamping false would tell a later
+      // refund the gift was outside the base, which nobody has decided.
+      assessable: r.account_code == null || r.acct_type === 'unmapped'
+        ? null
+        : (r.acct_type === 'revenue' && r.assessable === true),
     }
   }
   return map

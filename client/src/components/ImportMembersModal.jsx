@@ -3,6 +3,8 @@ import { motion } from 'framer-motion'
 import { Upload, Download, X, CheckCircle2, AlertTriangle, Loader2, FileText } from 'lucide-react'
 import { apiUrl } from '../api'
 import { scrimCls } from './MobileSheet'
+import { dialogMotionNow } from '../utils/motion'
+import { useLocale } from '../i18n'
 
 // Bulk-import members from a CSV file. Strict schema: name, email, phone,
 // role, tags — see TEMPLATE_CSV below for the canonical shape. Rows whose
@@ -33,6 +35,7 @@ function downloadTemplate() {
 }
 
 export default function ImportMembersModal({ onClose, onImported }) {
+  const { t } = useLocale()
   const [file,    setFile]    = useState(null)   // File | null
   const [csvText, setCsvText] = useState('')     // string content of file
   const [loading, setLoading] = useState(false)
@@ -45,7 +48,7 @@ export default function ImportMembersModal({ onClose, onImported }) {
     if (!f) return
     const isCsv = /\.csv$/i.test(f.name) || f.type === 'text/csv' || f.type === 'application/vnd.ms-excel'
     if (!isCsv) {
-      setError('Please select a .csv file.')
+      setError(t('imp.mem.please_select_a_csv_file'))
       return
     }
     try {
@@ -53,7 +56,7 @@ export default function ImportMembersModal({ onClose, onImported }) {
       setFile(f)
       setCsvText(text)
     } catch {
-      setError('Could not read that file.')
+      setError(t('imp.mem.could_not_read_that_file'))
     }
   }
 
@@ -92,10 +95,7 @@ export default function ImportMembersModal({ onClose, onImported }) {
       onClick={onClose}
     >
       <motion.div
-        initial={{ opacity: 0, scale: 0.96, y: 12 }}
-        animate={{ opacity: 1, scale: 1, y: 0 }}
-        exit={{ opacity: 0, scale: 0.96, y: 12 }}
-        transition={{ duration: 0.22, ease: [0.25, 0.1, 0.25, 1] }}
+        {...dialogMotionNow()}
         onClick={e => e.stopPropagation()}
         className="w-full max-w-lg bg-parchment-50 dark:bg-ink-900 rounded-2xl border border-parchment-300/60 dark:border-brass-900/30 shadow-warm-md overflow-hidden"
       >
@@ -107,10 +107,10 @@ export default function ImportMembersModal({ onClose, onImported }) {
             </div>
             <div>
               <h2 className="font-display text-lg font-semibold text-ink-900 dark:text-parchment-50">
-                Import members from CSV
+                {t('imp.mem.import_members_from_csv')}
               </h2>
               <p className="text-xs text-ink-500 dark:text-parchment-300/70 mt-0.5">
-                Strict schema — download the template if you're starting from scratch.
+                {t('imp.mem.strict_schema_download_the_template')}
               </p>
             </div>
           </div>
@@ -164,14 +164,14 @@ export default function ImportMembersModal({ onClose, onImported }) {
             <>
               {/* Instructions + template */}
               <div className="text-sm text-ink-600 dark:text-parchment-300/80 leading-relaxed">
-                Columns (in any order): <span className="font-mono text-xs">name, email, phone, role, tags</span>. Only <span className="font-mono text-xs">name</span> is required. Tags should be a comma-separated string — wrap in quotes if the tag contains commas.
+                Columns (in any order): <span className="font-mono text-xs">{t('imp.mem.name_email_phone_role_tags')}</span>. Only <span className="font-mono text-xs">name</span> {t('imp.mem.is_required_tags_should_be')}
               </div>
               <button
                 type="button"
                 onClick={downloadTemplate}
                 className="inline-flex items-center gap-2 text-xs font-semibold text-church-800 hover:text-church-900 dark:text-brass-300 dark:hover:text-brass-200 transition-colors"
               >
-                <Download size={13} /> Download template CSV
+                <Download size={13} /> {t('imp.mem.download_template_csv')}
               </button>
 
               {/* File picker */}
@@ -204,17 +204,17 @@ export default function ImportMembersModal({ onClose, onImported }) {
                       {previewCount} data row{previewCount === 1 ? '' : 's'} detected
                     </p>
                     <p className="text-xs text-church-700 hover:text-church-900 dark:text-brass-300 dark:hover:text-brass-200 underline">
-                      Choose a different file
+                      {t('imp.mem.choose_a_different_file')}
                     </p>
                   </>
                 ) : (
                   <>
                     <Upload size={22} className="text-ink-400 dark:text-parchment-400/60" />
                     <p className="text-sm font-semibold text-ink-700 dark:text-parchment-100">
-                      Drop a CSV here, or click to pick
+                      {t('imp.mem.drop_a_csv_here_or')}
                     </p>
                     <p className="text-xs text-ink-500 dark:text-parchment-300/70">
-                      UTF-8 CSV up to 10 MB
+                      {t('imp.mem.utf_8_csv_up_to')}
                     </p>
                   </>
                 )}
@@ -237,7 +237,7 @@ export default function ImportMembersModal({ onClose, onImported }) {
               onClick={onClose}
               className="px-5 py-2 rounded-lg bg-church-900 dark:bg-church-700 text-parchment-50 text-sm font-semibold shadow-warm hover:bg-church-800 dark:hover:bg-church-600 transition-colors"
             >
-              Done
+              {t('imp.mem.done')}
             </button>
           ) : (
             <>
@@ -246,7 +246,7 @@ export default function ImportMembersModal({ onClose, onImported }) {
                 onClick={onClose}
                 className="px-4 py-2 rounded-lg text-sm font-semibold text-ink-500 hover:text-ink-800 dark:text-parchment-300/70 dark:hover:text-parchment-100 transition-colors"
               >
-                Cancel
+                {t('imp.mem.cancel')}
               </button>
               <button
                 type="button"
@@ -255,7 +255,7 @@ export default function ImportMembersModal({ onClose, onImported }) {
                 className="inline-flex items-center gap-2 px-5 py-2 rounded-lg bg-church-900 dark:bg-church-700 text-parchment-50 text-sm font-semibold shadow-warm hover:bg-church-800 dark:hover:bg-church-600 transition-colors disabled:opacity-50"
               >
                 {loading && <Loader2 size={14} className="animate-spin" />}
-                {loading ? 'Importing…' : 'Import'}
+                {loading ? t('imp.mem.importing') : t('imp.mem.import')}
               </button>
             </>
           )}

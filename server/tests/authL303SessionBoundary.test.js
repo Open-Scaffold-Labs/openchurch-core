@@ -449,9 +449,9 @@ describe('attack class: 401 vs 403 vs 404 agreement', () => {
 })
 
 describe('attack class: role checks on Mass Intention / member / register / export', () => {
-  // SP-014..022: Viewers read Members only of these three (Help role table).
-  it('viewer may read members, not intentions or register, and writes none of them', async () => {
-    expect((await request(server).get('/api/mass-intentions').set(auth(viewerToken))).status).toBe(403)
+  // José Oct 28 2026: Viewers may READ Mass Intentions; register stays closed; writes stay 403.
+  it('viewer may read members and intentions, not register, and writes none of them', async () => {
+    expect((await request(server).get('/api/mass-intentions').set(auth(viewerToken))).status).toBe(200)
     expect((await request(server).get('/api/clients').set(auth(viewerToken))).status).toBe(200)
     expect((await request(server).get('/api/sacraments').set(auth(viewerToken))).status).toBe(403)
 

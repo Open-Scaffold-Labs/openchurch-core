@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- App-target manifest. Tracking is off: this shell adds no tracking SDK.
+	     Collected data types stay empty and are PENDING: Stage 9
+	     classification is not yet approved. Approved classifications must
+	     also be reflected here in NSPrivacyCollectedDataTypes where
+	     applicable, not only in App Store Connect (Apple TN3184).
+	     No required-reason API key is declared: the app Swift sources and
+	     the Capacitor 8.5.3 plugins call none (source scan; archive Privacy
+	     Report NOT RUN). Add the key only with a real category. -->
+	<key>NSPrivacyTracking</key>
+	<false/>
+	<key>NSPrivacyTrackingDomains</key>
+	<array/>
+	<key>NSPrivacyCollectedDataTypes</key>
+	<array/>
+</dict>
+</plist>

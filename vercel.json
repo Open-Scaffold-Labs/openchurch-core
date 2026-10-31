@@ -24,9 +24,22 @@
           "value": "no-referrer"
         }
       ]
+    },
+    {
+      "source": "/preview/(.*)",
+      "headers": [
+        {
+          "key": "X-Robots-Tag",
+          "value": "noindex, nofollow"
+        }
+      ]
     }
   ],
   "rewrites": [
+    {
+      "source": "/.well-known/agent-booking.json",
+      "destination": "/api/index"
+    },
     {
       "source": "/api/:path*",
       "destination": "/api/index"

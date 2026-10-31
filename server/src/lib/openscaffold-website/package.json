@@ -1,0 +1,13 @@
+{
+  "name": "@openscaffold/website",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Vendored @openscaffold/website v2 libraries for OpenChurch (blocks, connectors, looks, SEO). Schema/routers not mounted.",
+  "main": "index.js",
+  "type": "commonjs",
+  "osl": {
+    "upstream": "Open-Scaffold-Labs/openscaffold-website",
+    "commit": "8a42e47073d910d2e8edee4600b5ce0c965c6885",
+    "consume": "libraries-only"
+  }
+}

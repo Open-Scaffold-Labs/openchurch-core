@@ -5,6 +5,30 @@
 
 import crypto from 'node:crypto'
 
+export const STRIPE_CONNECT_MODE_A0 = 'A0_STRIPE_HANDLES_PRICING_DIRECT_CHARGE'
+
+export function encodeStripeForm(obj, prefix = '', out = new URLSearchParams()) {
+  if (obj === null || obj === undefined) return out
+  for (const [key, value] of Object.entries(obj)) {
+    if (value === undefined || value === null) continue
+    const fullKey = prefix ? `${prefix}[${key}]` : key
+    if (Array.isArray(value)) {
+      value.forEach((item, idx) => {
+        if (item !== null && typeof item === 'object') {
+          encodeStripeForm(item, `${fullKey}[${idx}]`, out)
+        } else if (item !== undefined && item !== null) {
+          out.append(`${fullKey}[${idx}]`, String(item))
+        }
+      })
+    } else if (typeof value === 'object') {
+      encodeStripeForm(value, fullKey, out)
+    } else {
+      out.append(fullKey, String(value))
+    }
+  }
+  return out
+}
+
 // Stripe's API takes application/x-www-form-urlencoded with bracket
 // notation for nesting: line_items[0][price_data][unit_amount]=7900
 function encodeForm(params, prefix = '', out = []) {
@@ -34,7 +58,7 @@ function encodeForm(params, prefix = '', out = []) {
 // same key (24h), so a retried or concurrent call for the same operation
 // is one movement of money at the provider, not two. Callers derive the
 // key from the thing being paid or refunded, never from the request.
-export async function stripeRequest(path, params, secretKey, { method, idempotencyKey } = {}) {
+export async function stripeRequest(path, params, secretKey, { method, idempotencyKey, stripeAccount } = {}) {
   if (!secretKey) throw new Error('stripeRequest: missing secret key')
   const m = method ?? (params ? 'POST' : 'GET')
   const res = await fetch(`https://api.stripe.com/v1/${path}`, {
@@ -43,8 +67,11 @@ export async function stripeRequest(path, params, secretKey, { method, idempoten
       'Authorization': `Bearer ${secretKey}`,
       ...(m === 'POST' ? { 'Content-Type': 'application/x-www-form-urlencoded' } : {}),
       ...(idempotencyKey ? { 'Idempotency-Key': String(idempotencyKey) } : {}),
+      ...(typeof stripeAccount === 'string' && stripeAccount.trim().startsWith('acct_')
+        ? { 'Stripe-Account': stripeAccount.trim() }
+        : {}),
     },
-    ...(m === 'POST' && params ? { body: encodeForm(params).join('&') } : {}),
+    ...(m === 'POST' && params ? { body: encodeStripeForm(params).toString() } : {}),
   })
   const data = await res.json().catch(() => ({}))
   if (!res.ok) {

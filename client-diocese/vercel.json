@@ -4,9 +4,7 @@
   "outputDirectory": "dist",
   "installCommand": "npm install && npm install --prefix ../server",
   "git": {
-    "deploymentEnabled": {
-      "main": false
-    }
+    "deploymentEnabled": false
   },
   "headers": [
     {

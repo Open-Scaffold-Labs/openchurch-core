@@ -394,7 +394,10 @@ describe('tables outside the hold guard are named, not assumed', () => {
   // Reset tokens have their own guard. A new table must be added here
   // deliberately, with a decision about its guard.
   const UNGUARDED = [
-    'ochr_assessment_lines', 'ochr_assessments', 'ochr_diocese_affiliations', 'ochr_diocese_regions',
+    'ochr_assessment_lines', 'ochr_assessments',
+    // One row for the whole database: the day unmapped gifts stop falling back to 4420.
+    'ochr_books_cutover',
+    'ochr_diocese_affiliations', 'ochr_diocese_regions',
     'ochr_email_suppressions', 'ochr_liturgical_calendar', 'ochr_notification_prefs', 'ochr_organizations',
     'ochr_parish_care_briefs', 'ochr_parish_followups', 'ochr_parish_timeline', 'ochr_parish_transitions',
     'ochr_password_reset_tokens', 'ochr_payroll_shifts',

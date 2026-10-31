@@ -1,0 +1,6 @@
+// Copy this file to Local.xcconfig in the same directory.
+// Local.xcconfig is gitignored. Put the Apple team id Xcode shows for
+// your account on the line below. Do not commit that file.
+//
+// DEVELOPMENT_TEAM = 
+DEVELOPMENT_TEAM =

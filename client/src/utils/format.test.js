@@ -10,7 +10,7 @@
 // was never the part that lied.
 
 import { describe, it, expect, vi } from 'vitest'
-import { mutate, loadOne, loadList, asMemberRoster, memberRosterUnreadable } from './format'
+import { mutate, loadOne, loadList, asMemberRoster, memberRosterUnreadable, initials } from './format'
 
 const respond = (status, body) => vi.stubGlobal('fetch', vi.fn(async () => ({
   ok: status >= 200 && status < 300,
@@ -213,5 +213,21 @@ describe('member roster shape', () => {
     const r = await loadList('/api/clients')
     expect(r.ok).toBe(false)
     expect(r.data).toEqual([])
+  })
+})
+
+describe('initials (polish 2)', () => {
+  it('reads the name, not its sample tag', () => {
+    expect(initials('[Sample] Aaliyah Jackson')).toBe('AJ')
+  })
+  it('keeps ordinary names and accents as they were', () => {
+    expect(initials('Lucas Anthony Morales')).toBe('LA')
+    expect(initials('Ángel Núñez')).toBe('ÁN')
+    expect(initials('Fr.  Daniel')).toBe('FD')
+  })
+  it('never makes an initial from punctuation, and is safe on empty input', () => {
+    expect(initials('(Guest) — Mary')).toBe('GM')
+    expect(initials('')).toBe('')
+    expect(initials(null)).toBe('')
   })
 })

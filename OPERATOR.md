@@ -34,8 +34,11 @@ connection semantics, deployed-dev parity. Neither one speaks for production.
 - Gradients (beyond the sanctioned parchment washes), glassmorphism, `backdrop-blur`, neon,
   glow blobs. (P10)
 - Hover motion of any kind (`whileHover={{ scale }}` etc.). Hover = border/color shift toward
-  brass. Entrances 300–500ms on `cubic-bezier(0.4, 0, 0.2, 1)`. Nothing pulses, bounces,
-  springs, or celebrates. (P8)
+  brass. Durations per PHILOSOPHY §12: control feedback 150–300ms, panels and dialogs
+  240–400ms, exits quicker, on ease-out curves (`cubic-bezier(0.4, 0, 0.2, 1)` or
+  `cubic-bezier(0.22, 0.8, 0.32, 1)`). Nothing pulses, bounces, springs, or celebrates. A
+  quiet progress ring is allowed only while a save is in flight. Every animation honors
+  `prefers-reduced-motion`. (P8)
 - New UI/component/chart/animation libraries. (P8, P10)
 - `alert()` for anything; `confirm()` tolerated only as a destructive double-check until the
   styled dialog exists. Errors go through ToastProvider or inline banners. (P1)

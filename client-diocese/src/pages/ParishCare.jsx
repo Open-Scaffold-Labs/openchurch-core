@@ -151,14 +151,14 @@ export default function ParishCare() {
                   <p className="text-[11px] font-semibold uppercase tracking-widest text-ink-500">{meta.label}</p>
                 </div>
                 <p className="font-serif text-2xl text-church-700 leading-none mb-2">{counts[key] ?? 0}</p>
-                <p className="text-[11.5px] text-ink-500 leading-snug">{meta.meaning}</p>
+                <p className="text-[11px] text-ink-500 leading-snug">{meta.meaning}</p>
               </button>
             )
           })}
         </div>
 
         {(stateFilter || q) && (
-          <p className="text-[12.5px] text-ink-500 mb-4">
+          <p className="text-xs text-ink-500 mb-4">
             Showing {parishes.length} of {data.total ?? parishes.length}
             {stateFilter ? ` in ${(FALLBACK_MEANING[stateFilter]?.label ?? stateFilter).toLowerCase()}` : ''}
             {q ? ` matching “${q}”` : ''}.{' '}
@@ -237,7 +237,7 @@ function SectionList({ title, rows, selected, onSelect, empty, muted }) {
                   <span className={`mt-1.5 inline-block w-1.5 h-1.5 rounded-full shrink-0 ${tone.dot}`} aria-hidden="true" />
                   <span className="min-w-0 flex-1">
                     <span className="block font-medium text-ink-900 truncate">{p.parish_name}</span>
-                    <span className="block text-[12.5px] text-ink-500 leading-snug mt-0.5">{p.status.because}</span>
+                    <span className="block text-xs text-ink-500 leading-snug mt-0.5">{p.status.because}</span>
                   </span>
                   <StatusChip status={p.status} />
                 </button>
@@ -299,7 +299,7 @@ function ContextPanel({ panel, onClose }) {
           </div>
           {parish.region && <p className="text-[11px] text-ink-500 mt-0.5">{parish.region}</p>}
           <div className="mt-2"><StatusChip status={status} size="md" /></div>
-          <p className="text-[12.5px] text-ink-600 leading-snug mt-2">{status.because}</p>
+          <p className="text-xs text-ink-600 leading-snug mt-2">{status.because}</p>
           {status.also?.map((line, i) => (
             <p key={i} className="text-[12px] text-ink-500 leading-snug mt-1.5">{line}</p>
           ))}
@@ -309,7 +309,7 @@ function ContextPanel({ panel, onClose }) {
           <div className="border-t border-parchment-300/60 pt-4">
             <p className="text-[11px] font-semibold uppercase tracking-widest text-brass-600 mb-1.5">Agreed next action</p>
             <p className="text-[13px] text-ink-800 leading-snug">{agreed.next_action}</p>
-            <p className="text-[11.5px] text-ink-500 mt-1">{agreed.context}</p>
+            <p className="text-[11px] text-ink-500 mt-1">{agreed.context}</p>
             {agreed.due_on && <p className="text-[11px] text-ink-400 mt-1">By {agreed.due_on}</p>}
           </div>
         )}
@@ -320,7 +320,7 @@ function ContextPanel({ panel, onClose }) {
             <ul className="space-y-2.5">
               {timeline.slice(0, 4).map(t => (
                 <li key={t.id}>
-                  <p className="text-[12.5px] text-ink-700 leading-snug">{t.summary}</p>
+                  <p className="text-xs text-ink-700 leading-snug">{t.summary}</p>
                   <p className="text-[11px] text-ink-400 mt-0.5">
                     {t.occurred_on}{t.actor_name ? ` · ${t.actor_name}` : ''}
                   </p>

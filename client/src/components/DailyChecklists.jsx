@@ -10,8 +10,9 @@ import { loadList } from '../utils/format'
 
 // In flight is not an empty day and not a parish with no routines.
 function ChecklistPending() {
+  const { t } = useLocale()
   return (
-    <div role="status" aria-label="Loading" className="space-y-2">
+    <div role="status" aria-label={t('common.loading')} className="space-y-2">
       <SkeletonBlock className="h-3 w-1/3" />
       <SkeletonBlock className="h-3 w-2/3" />
     </div>
@@ -166,16 +167,18 @@ export default function DailyChecklists() {
           <p className="text-[11px] font-semibold uppercase tracking-widest text-brass-700 dark:text-brass-300">{t('chk.title')}</p>
         </div>
         {canWrite && (
-          <button type="button" onClick={() => setManaging(m => !m)} aria-label={t('chk.manage')}
-            className="p-1.5 rounded-lg text-ink-400 hover:text-church-700 dark:hover:text-brass-300">
-            <Settings2 size={14} />
+          <button type="button" onClick={() => setManaging(m => !m)} aria-expanded={managing}
+            className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs font-medium text-ink-500 dark:text-parchment-300/80 hover:text-church-700 dark:hover:text-brass-300">
+            <Settings2 size={14} aria-hidden="true" />
+            {/* SP-157: was icon-only; Help now points here by name. */}
+            <span>{t('chk.manage')}</span>
           </button>
         )}
       </div>
 
       {runsFailed && (
         <p className="text-[12px] text-amber-700 dark:text-amber-400 leading-snug">
-          Today’s checklists didn’t load — this isn’t a day with nothing on it.
+          {t('chk.loadFailedToday')}
         </p>
       )}
       {runs.length === 0 && !runsFailed && (
@@ -193,14 +196,24 @@ export default function DailyChecklists() {
                   {done}/{run.items.length}
                 </span>
               </p>
+              {/* The day's progress fills a little with each tick (V1.4, study #9).
+                  Decorative: the n/m count above is the accessible figure. */}
+              <div aria-hidden="true" className="h-1 mb-2 rounded-full bg-parchment-200 dark:bg-ink-800 overflow-hidden">
+                <div
+                  className="h-full rounded-full bg-sage-600 dark:bg-sage-500 transition-[width] duration-300 ease-out"
+                  style={{ width: `${run.items.length ? (done / run.items.length) * 100 : 0}%` }}
+                />
+              </div>
               <ul className="space-y-1">
                 {run.items.map((item, i) => (
                   <li key={i}>
-                    <label className={`flex items-start gap-2 text-sm cursor-pointer ${item.done ? 'text-ink-400 dark:text-parchment-400/50 line-through' : 'text-ink-700 dark:text-parchment-200'}`}>
+                    <label className={`flex items-start gap-2 text-sm cursor-pointer ${item.done ? 'text-ink-400 dark:text-parchment-400/50' : 'text-ink-700 dark:text-parchment-200'}`}>
                       <input type="checkbox" checked={item.done} disabled={!canWrite}
                         onChange={e => toggle(run, i, e.target.checked)}
                         className="mt-0.5 h-4 w-4 accent-church-700" />
-                      <span>{item.text}</span>
+                      {/* A pen line drawn through the words, not an instant
+                          strike (V1.4, study #9). */}
+                      <span className={`pen-strike${item.done ? ' is-struck' : ''}`}>{item.text}</span>
                     </label>
                   </li>
                 ))}

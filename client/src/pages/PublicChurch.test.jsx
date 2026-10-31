@@ -116,22 +116,15 @@ describe('PublicChurch contact form is translated (OC-READY-01-035)', () => {
     expect(screen.getByText(STRINGS.en['contact.intro'])).toBeInTheDocument()
     expect(await screen.findByText(STRINGS.en['contact.interest'])).toBeInTheDocument()
     expect(screen.getByText(STRINGS.en['contact.unsure'])).toBeInTheDocument()
-    expect(screen.getByPlaceholderText(STRINGS.en['contact.namePh'])).toHaveAttribute(
-      'aria-label',
-      STRINGS.en['contact.namePh'],
-    )
-    expect(screen.getByPlaceholderText(STRINGS.en['contact.emailPh'])).toHaveAttribute(
-      'aria-label',
-      STRINGS.en['contact.emailPh'],
-    )
-    expect(screen.getByPlaceholderText(STRINGS.en['contact.phonePh'])).toHaveAttribute(
-      'aria-label',
-      STRINGS.en['contact.phonePh'],
-    )
-    expect(screen.getByPlaceholderText(STRINGS.en['contact.messagePh'])).toHaveAttribute(
-      'aria-label',
-      STRINGS.en['contact.messagePh'],
-    )
+    // B-463-2: visible labels via htmlFor/id (not aria-label alone).
+    expect(screen.getByLabelText(STRINGS.en['contact.name'])).toHaveAttribute('id', 'connect-name')
+    expect(screen.getByLabelText(STRINGS.en['contact.email'])).toHaveAttribute('id', 'connect-email')
+    expect(screen.getByLabelText(STRINGS.en['contact.phone'])).toHaveAttribute('id', 'connect-phone')
+    expect(screen.getByLabelText(STRINGS.en['contact.message'])).toHaveAttribute('id', 'connect-message')
+    expect(screen.getByPlaceholderText(STRINGS.en['contact.namePh'])).toBeInTheDocument()
+    expect(screen.getByPlaceholderText(STRINGS.en['contact.emailPh'])).toBeInTheDocument()
+    expect(screen.getByPlaceholderText(STRINGS.en['contact.phonePh'])).toBeInTheDocument()
+    expect(screen.getByPlaceholderText(STRINGS.en['contact.messagePh'])).toBeInTheDocument()
     expect(screen.getByRole('button', { name: STRINGS.en['contact.send'] })).toBeInTheDocument()
   })
 
@@ -145,6 +138,11 @@ describe('PublicChurch contact form is translated (OC-READY-01-035)', () => {
     expect(screen.queryByText(STRINGS.en['contact.intro'])).toBeNull()
     expect(await screen.findByText(STRINGS.es['contact.interest'])).toBeInTheDocument()
     expect(screen.queryByText(STRINGS.en['contact.interest'])).toBeNull()
+    expect(screen.getByLabelText(STRINGS.es['contact.name'])).toBeInTheDocument()
+    expect(screen.queryByLabelText(STRINGS.en['contact.name'])).toBeNull()
+    expect(screen.getByLabelText(STRINGS.es['contact.email'])).toBeInTheDocument()
+    expect(screen.getByLabelText(STRINGS.es['contact.phone'])).toBeInTheDocument()
+    expect(screen.getByLabelText(STRINGS.es['contact.message'])).toBeInTheDocument()
     expect(screen.getByPlaceholderText(STRINGS.es['contact.namePh'])).toBeInTheDocument()
     expect(screen.queryByPlaceholderText(STRINGS.en['contact.namePh'])).toBeNull()
     expect(screen.getByPlaceholderText(STRINGS.es['contact.emailPh'])).toBeInTheDocument()
@@ -162,10 +160,9 @@ describe('PublicChurch contact form is translated (OC-READY-01-035)', () => {
     expect(screen.queryByRole('heading', { name: STRINGS.en['contact.title'] })).toBeNull()
     expect(screen.getByPlaceholderText(STRINGS.es['contact.namePh'])).toBeInTheDocument()
     expect(screen.queryByPlaceholderText(STRINGS.en['contact.namePh'])).toBeNull()
-    expect(screen.getByPlaceholderText(STRINGS.es['contact.emailPh'])).toHaveAttribute(
-      'aria-label',
-      STRINGS.es['contact.emailPh'],
-    )
+    expect(screen.getByLabelText(STRINGS.es['contact.email'])).toHaveAttribute('id', 'connect-email')
+    expect(screen.getByLabelText(STRINGS.es['contact.name'])).toHaveAttribute('id', 'connect-name')
+    expect(screen.getByPlaceholderText(STRINGS.es['contact.emailPh'])).toBeInTheDocument()
     expect(screen.getByRole('button', { name: STRINGS.es['contact.send'] })).toBeInTheDocument()
   })
 
@@ -301,7 +298,7 @@ const PAGE_HARD_EN = [
   'Find us',
   'Get directions',
   'Upcoming events',
-  'Powered by OpenChurch',
+  'Powered by ScaffoldLabs',
 ]
 
 const PAGE_KEYS = [
@@ -364,8 +361,11 @@ describe('PublicChurch page chrome is translated (OC-READY-01-036)', () => {
     expect(screen.queryByRole('link', { name: STRINGS.en['church.events'] })).toBeNull()
     expect(screen.getByRole('link', { name: STRINGS.es['church.give'] })).toBeInTheDocument()
     expect(screen.queryByRole('link', { name: STRINGS.en['church.give'] })).toBeNull()
+    // Beacon B-460-6 — ES footer translates; brand name ScaffoldLabs stays.
     expect(screen.getByText(STRINGS.es['church.powered'])).toBeInTheDocument()
-    expect(screen.queryByText(STRINGS.en['church.powered'])).toBeNull()
+    expect(STRINGS.es['church.powered']).toBe('Con tecnología de ScaffoldLabs')
+    expect(STRINGS.es['church.powered']).toContain('ScaffoldLabs')
+    expect(STRINGS.es['church.powered']).not.toBe(STRINGS.en['church.powered'])
     // Parish-supplied content is still the API text — not inventively translated.
     expect(screen.getByText('A parish')).toBeInTheDocument()
     expect(screen.getByText('Sundays 10am')).toBeInTheDocument()
@@ -444,10 +444,14 @@ describe('PublicChurch page chrome is translated (OC-READY-01-036)', () => {
 
   it('i18n strings and the page-chrome wiring cannot reintroduce hard-EN chrome', () => {
     const jsx = stripComments(CHURCH_SRC)
+    // Beacon B-460-6 — church.powered ES is translated; ScaffoldLabs brand stays.
+    const KEYS_MUST_DIFFER = PAGE_KEYS
     for (const key of PAGE_KEYS) {
       expect(CHURCH_SRC, key).toMatch(new RegExp(`t\\('${key.replace('.', '\\.')}'`))
       expect(STRINGS.en[key], key).toBeTruthy()
       expect(STRINGS.es[key], key).toBeTruthy()
+    }
+    for (const key of KEYS_MUST_DIFFER) {
       expect(STRINGS.es[key], key).not.toBe(STRINGS.en[key])
     }
     expect(CHURCH_SRC).toMatch(/useLocale\(/)
@@ -469,13 +473,65 @@ describe('PublicChurch page chrome is translated (OC-READY-01-036)', () => {
     expect(STRINGS.en['church.findUs']).toBe('Find us')
     expect(STRINGS.en['church.events']).toBe('Upcoming events')
     expect(STRINGS.en['church.give']).toBe('Give')
-    expect(STRINGS.en['church.powered']).toBe('Powered by OpenChurch')
+    expect(STRINGS.en['church.powered']).toBe('Powered by ScaffoldLabs')
     expect(STRINGS.en['church.notFoundBefore']).toMatch(/published page/i)
     expect(STRINGS.es['church.notFound']).toMatch(/iglesia/i)
     expect(STRINGS.es['church.serviceTimes']).toMatch(/horario/i)
     expect(STRINGS.es['church.welcome']).toMatch(/bienvenid/i)
     expect(STRINGS.es['church.findUs']).toMatch(/encu[eé]ntre/i)
     expect(STRINGS.es['church.give']).toMatch(/donar/i)
-    expect(STRINGS.es['church.powered']).toMatch(/openchurch/i)
+    expect(STRINGS.es['church.powered']).toBe('Con tecnología de ScaffoldLabs')
+    expect(STRINGS.es['church.powered']).toContain('ScaffoldLabs')
+  })
+})
+
+describe('OC-WEB-1 public branding', () => {
+  afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks() })
+
+  it('renders display_name, logo, and accent CSS var from branding', async () => {
+    const branded = {
+      church: CHURCH,
+      page: PAGE.page,
+      branding: {
+        display_name: 'Our Lady Custom',
+        logo_url: 'https://cdn.example.org/crest.png',
+        accent_hex: '#1A4F8B',
+        using_defaults: false,
+      },
+    }
+    routes({ '/page': () => ok(branded) })
+    render(
+      <LocaleProvider>
+        <MemoryRouter initialEntries={['/p/st-test']}>
+          <Routes>
+            <Route path="/p/:slug" element={<PublicChurch />} />
+          </Routes>
+        </MemoryRouter>
+      </LocaleProvider>,
+    )
+    expect(await screen.findByRole('heading', { name: 'Our Lady Custom' })).toBeInTheDocument()
+    // alt="" marks the crest decorative (the h1 already names the parish),
+    // so it is omitted from the a11y tree — query the DOM directly.
+    const logo = document.querySelector('img[src="https://cdn.example.org/crest.png"]')
+    expect(logo).toBeTruthy()
+    const root = document.querySelector('[style*="--parish-accent"]')
+    expect(root).toBeTruthy()
+    expect(root.getAttribute('style')).toMatch(/--parish-accent:\s*#1A4F8B/i)
+  })
+
+  it('falls back to church name and default accent when branding is absent', async () => {
+    routes({ '/page': () => ok(PAGE) })
+    render(
+      <LocaleProvider>
+        <MemoryRouter initialEntries={['/p/st-test']}>
+          <Routes>
+            <Route path="/p/:slug" element={<PublicChurch />} />
+          </Routes>
+        </MemoryRouter>
+      </LocaleProvider>,
+    )
+    expect(await screen.findByRole('heading', { name: 'St Test' })).toBeInTheDocument()
+    const root = document.querySelector('[style*="--parish-accent"]')
+    expect(root.getAttribute('style')).toMatch(/--parish-accent:\s*#5A1E23/i)
   })
 })

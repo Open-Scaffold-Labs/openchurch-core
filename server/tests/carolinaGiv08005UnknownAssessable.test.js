@@ -84,6 +84,9 @@ async function affiliatedPair(tag) {
 }
 
 async function chargedGift(par, amount, date, extra = {}) {
+  const mapped = await request(server).put('/api/finance/mappings').set(auth(par.token))
+    .send({ mappings: [{ source_type: 'donation_category', source_key: 'General', account_code: '4420' }] })
+  expect(mapped.status).toBeLessThan(300)
   const res = await request(server).post('/api/donations').set(auth(par.token))
     .send({
       donor_name: extra.donor_name || 'Carolina Certifier',
@@ -101,9 +104,11 @@ async function chargedGift(par, amount, date, extra = {}) {
 async function restrictedFund(par, name) {
   const fund = await request(server).post('/api/funds').set(auth(par.token)).send({ name })
   expect(fund.status).toBe(201)
-  const map = await request(server).put('/api/finance/mappings').set(auth(par.token))
-    .send({ mappings: [{ source_type: 'fund', source_key: String(fund.body.id), account_code: '4450' }] })
-  expect(map.status).toBeLessThan(300)
+  await pool.query(
+    `INSERT INTO ochr_coa_mappings
+       (organization_id, source_type, source_key, account_code, effective_from, set_by)
+     SELECT $1, 'fund', $2, '4450', cutover_on, 'diocese' FROM ochr_books_cutover`,
+    [par.orgId, String(fund.body.id)])
   return fund.body.id
 }
 

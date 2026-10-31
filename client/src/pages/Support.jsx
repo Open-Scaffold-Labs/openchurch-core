@@ -17,7 +17,9 @@ import { useCallback, useEffect, useState } from 'react'
 import { LifeBuoy, ChevronDown, ChevronRight, Loader2, RefreshCw, Search } from 'lucide-react'
 import { apiUrl } from '../api'
 import { useLocale } from '../i18n'
-import PageWrapper from '../components/PageWrapper'
+import { allowsAiSend } from '../native/aiGate'
+import { useNativeAi } from '../native/NativeAiContext'
+import PageWrapper, { PageHeader } from '../components/PageWrapper'
 import EmptyState from '../components/EmptyState'
 import { SkeletonRowList } from '../components/Skeleton'
 
@@ -45,7 +47,7 @@ const inputCls = 'rounded-lg border border-parchment-300 dark:border-brass-900/4
 
 function Badge({ tone, children }) {
   return (
-    <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-wider whitespace-nowrap ${tone}`}>
+    <span className={`px-2 py-0.5 rounded-full text-[11px] font-semibold uppercase tracking-wider whitespace-nowrap ${tone}`}>
       {children}
     </span>
   )
@@ -61,7 +63,7 @@ function DiagnosisBlock({ diagnosis }) {
   }
   return (
     <div className="rounded-xl bg-parchment-100 dark:bg-ink-900/60 px-3.5 py-3 space-y-1.5">
-      <div className="text-[10px] font-semibold uppercase tracking-widest text-ink-500 dark:text-parchment-300/70">
+      <div className="text-[11px] font-semibold uppercase tracking-widest text-ink-500 dark:text-parchment-300/70">
         {t('sup.diagnosis')}{diagnosis.confidence ? ` · ${diagnosis.confidence}` : ''}
       </div>
       {diagnosis.narrative && <p className="text-xs text-ink-700 dark:text-parchment-200 leading-relaxed">{diagnosis.narrative}</p>}
@@ -82,6 +84,7 @@ function DiagnosisBlock({ diagnosis }) {
 
 function TicketRow({ ticket, vendor, onSaved }) {
   const { t, dateLocale } = useLocale()
+  const { kind: nativeAiKind } = useNativeAi()
   const [open, setOpen] = useState(false)
   const [detail, setDetail] = useState(null)
   const [loading, setLoading] = useState(false)
@@ -181,18 +184,18 @@ function TicketRow({ ticket, vendor, onSaved }) {
                 </p>
               )}
 
-              <DiagnosisBlock diagnosis={detail.diagnosis} />
+              {allowsAiSend(nativeAiKind) && <DiagnosisBlock diagnosis={detail.diagnosis} />}
 
               <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
                 <label className="block">
-                  <span className="text-[10px] font-semibold uppercase tracking-widest text-ink-500 dark:text-parchment-300/70">{t('sup.fStatus')}</span>
+                  <span className="text-[11px] font-semibold uppercase tracking-widest text-ink-500 dark:text-parchment-300/70">{t('sup.fStatus')}</span>
                   <select value={form.status} onChange={e => setForm(f => ({ ...f, status: e.target.value }))}
                     className={`mt-1 w-full ${inputCls}`}>
                     {statusOptions.map(s => <option key={s} value={s}>{t(`sup.status.${s}`)}</option>)}
                   </select>
                 </label>
                 <label className="block">
-                  <span className="text-[10px] font-semibold uppercase tracking-widest text-ink-500 dark:text-parchment-300/70">{t('sup.fSeverity')}</span>
+                  <span className="text-[11px] font-semibold uppercase tracking-widest text-ink-500 dark:text-parchment-300/70">{t('sup.fSeverity')}</span>
                   <select value={form.severity} disabled={!vendor}
                     onChange={e => setForm(f => ({ ...f, severity: e.target.value }))}
                     className={`mt-1 w-full ${inputCls} disabled:opacity-60`}>
@@ -200,7 +203,7 @@ function TicketRow({ ticket, vendor, onSaved }) {
                   </select>
                 </label>
                 <label className="block">
-                  <span className="text-[10px] font-semibold uppercase tracking-widest text-ink-500 dark:text-parchment-300/70">{t('sup.fClassification')}</span>
+                  <span className="text-[11px] font-semibold uppercase tracking-widest text-ink-500 dark:text-parchment-300/70">{t('sup.fClassification')}</span>
                   <select value={form.classification} disabled={!vendor}
                     onChange={e => setForm(f => ({ ...f, classification: e.target.value }))}
                     className={`mt-1 w-full ${inputCls} disabled:opacity-60`}>
@@ -209,7 +212,7 @@ function TicketRow({ ticket, vendor, onSaved }) {
                   </select>
                 </label>
                 <label className="block">
-                  <span className="text-[10px] font-semibold uppercase tracking-widest text-ink-500 dark:text-parchment-300/70">{t('sup.fAssigned')}</span>
+                  <span className="text-[11px] font-semibold uppercase tracking-widest text-ink-500 dark:text-parchment-300/70">{t('sup.fAssigned')}</span>
                   <input value={form.assigned_to} disabled={!vendor}
                     onChange={e => setForm(f => ({ ...f, assigned_to: e.target.value }))}
                     placeholder="—" className={`mt-1 w-full ${inputCls} disabled:opacity-60`} />
@@ -217,7 +220,7 @@ function TicketRow({ ticket, vendor, onSaved }) {
               </div>
 
               <label className="block">
-                <span className="text-[10px] font-semibold uppercase tracking-widest text-ink-500 dark:text-parchment-300/70">{t('sup.fNotes')}</span>
+                <span className="text-[11px] font-semibold uppercase tracking-widest text-ink-500 dark:text-parchment-300/70">{t('sup.fNotes')}</span>
                 <textarea rows={2} value={form.resolution_notes}
                   onChange={e => setForm(f => ({ ...f, resolution_notes: e.target.value }))}
                   className={`mt-1 w-full ${inputCls}`} />
@@ -286,14 +289,9 @@ export default function Support() {
   useEffect(() => { setTickets(null); load() }, [load])
 
   return (
-    <PageWrapper>
+    <PageWrapper type="list">
       <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
-        <div>
-          <h1 className="font-display text-2xl font-semibold text-church-900 dark:text-parchment-50">{t('sup.title')}</h1>
-          <p className="text-sm text-ink-500 dark:text-parchment-300/70 mt-0.5">
-            {vendor ? t('sup.subtitleVendor') : t('sup.subtitle')}
-          </p>
-        </div>
+        <PageHeader title={t('sup.title')} subtitle={vendor ? t('sup.subtitleVendor') : t('sup.subtitle')} />
         <div className="flex flex-wrap items-center gap-2">
           <div className="relative">
             <Search size={14} className="absolute left-2.5 top-2.5 text-ink-400" />

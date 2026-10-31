@@ -209,6 +209,15 @@ describe('FBF2 timeline — invent-backfill refusal', () => {
     expect(calendar).toMatch(/status IN \('open', 'scheduled'\)/)
   })
 
+  it('the FD-8 history latch trigger assigns only entered_history, never a stamp', async () => {
+    const { rows } = await pool.query(
+      `SELECT prosrc FROM pg_proc WHERE proname = 'ochr_mass_intention_history_latch'`)
+    expect(rows).toHaveLength(1)
+    const assigns = [...rows[0].prosrc.matchAll(/NEW\.(\w+)\s*:=/g)].map(m => m[1])
+    expect(assigns.length).toBeGreaterThan(0)
+    expect(new Set(assigns)).toEqual(new Set(['entered_history']))
+  })
+
   it('installed stamp columns stay nullable with no default; no rewrite triggers', async () => {
     const { rows: cols } = await pool.query(
       `SELECT table_name, column_name, is_nullable, column_default
@@ -238,9 +247,27 @@ describe('FBF2 timeline — invent-backfill refusal', () => {
           AND t.tgname <> 'ochr_organization_hold_guard'
           -- Stage 7 (migration 116): refuses a NEW plaintext security_code;
           -- returns NEW unchanged, so it cannot backfill or rewrite a stamp.
-          AND t.tgname <> 'trg_checkins_no_plaintext_code'`
+          AND t.tgname <> 'trg_checkins_no_plaintext_code'
+          -- Migration 120 (FD-8 / R339-1): sets only entered_history
+          -- (a monotonic boolean); proven below never to assign a stamp.
+          AND t.tgname <> 'ochr_mass_intention_history_latch'
+          -- Migration 122 (R348-2): increments book_revision only.
+          -- Proven below never to assign a stamp.
+          AND t.tgname <> 'ochr_mass_intention_book_revision'
+          -- Migration 126 (R382-1): sets only offering_recorded.
+          -- Proven below never to assign a stamp.
+          AND t.tgname <> 'ochr_mass_intention_offering_latch'`
     )
     expect(trigs).toEqual([])
+    const { rows: [offering] } = await pool.query(
+      `SELECT prosrc FROM pg_proc WHERE proname = 'ochr_mass_intention_offering_latch'`
+    )
+    expect([...new Set([...offering.prosrc.matchAll(/NEW\.(\w+)\s*:=/g)].map(m => m[1]))]).toEqual(['offering_recorded'])
+    const { rows: [revision] } = await pool.query(
+      `SELECT prosrc FROM pg_proc WHERE proname = 'ochr_mass_intention_book_revision'`
+    )
+    const revisionAssigns = [...revision.prosrc.matchAll(/NEW\.(\w+)\s*:=/g)].map(m => m[1])
+    expect(new Set(revisionAssigns)).toEqual(new Set(['book_revision']))
     const { rows: [guard] } = await pool.query(
       `SELECT prosrc FROM pg_proc WHERE proname = 'ochr_held_organization_write_guard'`
     )

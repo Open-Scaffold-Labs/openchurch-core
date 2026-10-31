@@ -30,9 +30,16 @@ const MUTATING_METHODS = new Set(['POST', 'PATCH', 'PUT', 'DELETE'])
 // POST sub-paths that mutate (or, for commit, create) a known entity.
 // Order matters: /unassign before /assign.
 const SUBPATH_OPS = [
+  { re: /\/site\/publish\/?$/i, action: 'update', op: 'publish_site', verb: 'Published the parish page' },
+  { re: /\/site\/unpublish\/?$/i, action: 'update', op: 'unpublish_site', verb: 'Took the parish page down' },
+  { re: /\/site\/revert\/?$/i, action: 'update', op: 'revert_site', verb: 'Restored the previous parish page' },
   { re: /\/void\/?$/i,     action: 'update', op: 'void',     verb: 'Voided' },
+  { re: /\/correct\/?$/i,  action: 'update', op: 'correct',  verb: 'Corrected' },
   { re: /\/restore\/?$/i,  action: 'update', op: 'restore',  verb: 'Restored' },
   { re: /\/unassign\/?$/i, action: 'update', op: 'unassign', verb: 'Unassigned' },
+  // Undo before mark-said: the undo URL also contains "bulk-mark-said".
+  { re: /\/bulk-mark-said\/[0-9a-f-]{36}\/undo\/?$/i, action: 'update', op: 'undo_mark_said', verb: 'Undid mark said' },
+  { re: /\/bulk-mark-said\/?$/i, action: 'update', op: 'mark_said', verb: 'Marked said' },
   { re: /\/assign\/?$/i,   action: 'update', op: 'assign',   verb: 'Assigned' },
   { re: /\/commit\/?$/i,   action: 'create', op: 'commit',   verb: 'Committed' },
 ]
@@ -149,6 +156,13 @@ function resolveEntityId(req, responseBody) {
     return String(responseBody.drafts[0].id)
   }
   if (req.params?.id != null) return String(req.params.id)
+  // SP-313: site publish / unpublish / draft-save return { site: … } with
+  // no top-level id and no :id param. Scope those rows to the organization
+  // so /audit?entity_type=organization&entity_id=… finds them (same as
+  // older org PATCH rows). Do not rewrite historical NULL rows.
+  if (responseBody?.site != null && req.organizationId != null) {
+    return String(req.organizationId)
+  }
   return null
 }
 
@@ -160,6 +174,18 @@ function resolveEntityId(req, responseBody) {
 function summaryFor(entityType, action, responseBody, reqBody, entityId, subOp) {
   if (entityType === 'checkin' || entityType === 'mass_intention') return buildSummary(entityType, action, null, entityId, subOp)
   return buildSummary(entityType, action, responseBody ?? reqBody, entityId, subOp)
+}
+
+// SP-191. An element write used the plan's entity type and the element's
+// title, so the log said "Created service_plan: Entrance Hymn". Name both.
+function servicePlanElementSummary(action, note) {
+  const plan = note?.planTitle ? `plan ${note.planTitle}` : 'plan'
+  if (note?.reorder) return `Reordered elements on ${plan}`
+  const element = note?.elementTitle ? `element ${note.elementTitle}` : 'element'
+  if (action === 'create') return `Created ${element} on ${plan}`
+  if (action === 'update') return `Updated ${element} on ${plan}`
+  if (action === 'delete') return `Deleted ${element} on ${plan}`
+  return `${action} ${element} on ${plan}`
 }
 
 function buildSummary(entityType, action, body, entityId, subOp) {
@@ -273,7 +299,30 @@ const finiteOrNull = v => {
   return Number.isFinite(n) ? n : null
 }
 
-export function massIntentionAuditMetadata({ action, subOp, change, snapshot }) {
+const MARK_BATCH_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const MARK_DATE = /^\d{4}-\d{2}-\d{2}$/
+
+// D-1: before/after of a mark-said write. Same typed #285 fields, plus the
+// civil fulfilment day (the fact this ceremony records). Title, intention
+// wording, requester text and notes are not accepted here.
+function projectMarkSnapshot(row) {
+  if (!row || typeof row !== 'object') return null
+  const snap = {
+    id: posInt(row.id),
+    requested_by_client_id: posInt(row.requested_by_client_id),
+    calendar_event_id: posInt(row.calendar_event_id),
+  }
+  if (MI_AUDIT_STATUSES.has(row.status)) snap.status = row.status
+  if (row.fulfilled_mass_date == null) snap.fulfilled_mass_date = null
+  else if (typeof row.fulfilled_mass_date === 'string' && MARK_DATE.test(row.fulfilled_mass_date)) {
+    snap.fulfilled_mass_date = row.fulfilled_mass_date
+  } else {
+    snap.fulfilled_mass_date = null
+  }
+  return snap
+}
+
+export function massIntentionAuditMetadata({ action, subOp, change, snapshot, before, batchId }) {
   if (action === 'delete') return {}
   const out = {}
   // R285-4 / R4-L1: every write projects the typed snapshot of the row THIS
@@ -289,12 +338,29 @@ export function massIntentionAuditMetadata({ action, subOp, change, snapshot }) 
   out.requested_by_client_id = member
   out.calendar_event_id = posInt(row.calendar_event_id)
   if (MI_AUDIT_STATUSES.has(row.status)) out.status = row.status
+  // D-1: one audit row per intention carries the batch and both snapshots.
+  // A missing or non-uuid batch id is dropped rather than copied from the body.
+  if (typeof batchId === 'string' && MARK_BATCH_UUID.test(batchId)) {
+    out.batch_id = batchId.toLowerCase()
+    const prior = projectMarkSnapshot(before)
+    const next = projectMarkSnapshot(snapshot)
+    if (prior) out.before = prior
+    if (next) out.after = next
+    const changed = []
+    if (prior && next) {
+      if (prior.status !== next.status) changed.push('status')
+      if (prior.fulfilled_mass_date !== next.fulfilled_mass_date) changed.push('fulfilled_mass_date')
+      if (prior.calendar_event_id !== next.calendar_event_id) changed.push('calendar_event_id')
+    }
+    out.changed = changed
+  }
   // R285-F1/F2: an edit names the fields whose STORED value changed (the
   // route compares the locked row with the UPDATE's RETURNING row). The link
   // label is written only when the stored member id really changed, so a
   // re-sent id or a null on an unlinked row is not called linked/unlinked.
   // `member` is from the same committed snapshot (R285-4).
-  if (action === 'update' && !subOp && change && Array.isArray(change.changed)) {
+  // Decision 8: an admin correction names its changed fields the same way.
+  if (action === 'update' && (!subOp || subOp.op === 'correct') && change && Array.isArray(change.changed)) {
     const changed = MI_AUDIT_CHANGE_FIELDS.filter(f => change.changed.includes(f))
     out.changed = changed
     if (changed.includes('stipend')) {
@@ -337,6 +403,10 @@ export function auditLog(entityType) {
     res.on('finish', () => {
       if (res.statusCode < 200 || res.statusCode >= 300) return
       if (!req.user?.id || !req.organizationId) return
+      // #285 F5: the route already wrote this row inside its own transaction
+      // (committed with the change, or rolled back with it). #285 F3: the
+      // route changed nothing (idempotent no-op), so there is no action to record.
+      if (res.locals?.auditRecorded || res.locals?.auditNoop) return
 
       const life = entityType === 'user' ? res.locals?.loginLifecycle : null
       const stew = res.locals?.stewardship
@@ -353,7 +423,13 @@ export function auditLog(entityType) {
         // R3-3: a check-in summary never reads the body (names live there);
         // it is built from the action, entity type and id only.
         // R5-3: called through the seam object so a test can spy on it.
-        summary = _auditInternalsForTests.summaryFor(entityType, action, responseBody, req.body, entityId, subOp)
+        const elementNote = entityType === 'service_plan' ? res.locals?.servicePlanElement : null
+        if (elementNote) {
+          summary = servicePlanElementSummary(action, elementNote)
+          if (elementNote.elementId) entityId = String(elementNote.elementId)
+        } else {
+          summary = _auditInternalsForTests.summaryFor(entityType, action, responseBody, req.body, entityId, subOp)
+        }
         metadata = entityType === 'mass_intention'
           ? massIntentionAuditMetadata({ action, subOp, change: res.locals?.massIntentionChange, snapshot: res.locals?.massIntentionSnapshot })
           : isCheckinCheckout(entityType, req.originalUrl)
@@ -397,6 +473,34 @@ export function auditLog(entityType) {
 
     next()
   }
+}
+
+// #285 F5: write a mass_intention audit row on the route's OWN transaction
+// client, before COMMIT. The row then commits with the change or rolls back
+// with it: no window where the change is durable and its audit row is lost
+// (process death after COMMIT, failed post-response INSERT). An audit
+// failure therefore fails the write (500, nothing saved) instead of being
+// swallowed. Same columns, summary and closed metadata as the middleware.
+// The caller sets res.locals.auditRecorded = true after COMMIT so the
+// middleware does not write a second row.
+export async function writeMassIntentionAuditInTx(executor, req, { status, change, snapshot, before, batchId } = {}) {
+  if (!req.user?.id || !req.organizationId) return false
+  const subOp = resolveSubpathOp(req.originalUrl)
+  const action = subOp?.action ?? actionFor(req.method)
+  const entityId = snapshot?.id != null ? String(snapshot.id) : (req.params?.id != null ? String(req.params.id) : null)
+  const summary = summaryFor('mass_intention', action, null, null, entityId, subOp)
+  const metadata = massIntentionAuditMetadata({ action, subOp, change, snapshot, before, batchId })
+  await executor.query(
+    `INSERT INTO ochr_audit_log
+       (organization_id, user_id, user_email, user_name, action, entity_type,
+        entity_id, summary, metadata, request_method, request_path,
+        status_code, ip_address)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+    [req.organizationId, req.user.id, req.user.email ?? null, req.user.name ?? null,
+     action, 'mass_intention', entityId, summary, metadata, req.method,
+     pathOnly(req.originalUrl), status, req.ip ?? null]
+  )
+  return true
 }
 
 // Test seam for AUDIT-L2-04 mutation probes. Not used in production paths.

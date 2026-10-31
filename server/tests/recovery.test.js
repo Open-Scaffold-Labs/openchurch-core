@@ -10,19 +10,38 @@ import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
 import request from 'supertest'
 import 'dotenv/config'
 
-import pool from '../src/db.js'
-import { RUN_ID, app, bindServer, closeServer, migrateOnce } from './support/harness.js'
+import { createScratchDatabase, dropScratchDatabase } from './support/scratchDb.js'
 
+// The weekly digest lists every non-held organization. On the suite
+// database that walk includes every parish the other files created, and
+// it outgrows the 15s test timeout. Vitest does not cancel a timed-out
+// test, so that walk is still running — and still calling monitor.error
+// and global.fetch — when the next test counts those calls. This file
+// uses a database of its own, created before db.js is imported (the pool
+// is bound to DATABASE_URL at import time). The assertions are unchanged.
+const baseUrl = process.env.DATABASE_URL
+const RUN_ID = `${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
+
+let pool
 let server
+let closeServer
+let scratch
 
 beforeAll(async () => {
-  await migrateOnce()
-  server = await bindServer()
-}, 60_000)
+  scratch = await createScratchDatabase(baseUrl, 'rec')
+  process.env.DATABASE_URL = scratch.url
+  ;({ default: pool } = await import('../src/db.js'))
+  const harness = await import('./support/harness.js')
+  closeServer = harness.closeServer
+  await harness.migrateOnce()
+  server = await harness.bindServer()
+}, 120_000)
 
 afterAll(async () => {
-  await closeServer(server)
-  await pool.end()
+  if (closeServer) await closeServer(server)
+  await pool?.end()
+  process.env.DATABASE_URL = baseUrl
+  await dropScratchDatabase(scratch?.admin, scratch?.name)
 })
 
 describe('the weekly backup refuses rather than lying', () => {

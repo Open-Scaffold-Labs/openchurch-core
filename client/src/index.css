@@ -43,6 +43,102 @@
 }
 
 @layer utilities {
+  /* Loading placeholder: a slow parchment shimmer that says "one moment"
+     (PHILOSOPHY §12). Never a pulse. Stills under reduce-motion via the
+     base-layer rule above; the parchment tone stays. */
+  .skeleton-shimmer {
+    background-color: theme('colors.parchment.200');
+    background-image: linear-gradient(90deg,
+      theme('colors.parchment.200') 0%,
+      theme('colors.parchment.100') 50%,
+      theme('colors.parchment.200') 100%);
+    background-size: 200% 100%;
+    animation: skeleton-shimmer 1.6s linear infinite;
+  }
+  .dark .skeleton-shimmer {
+    background-color: theme('colors.ink.800');
+    background-image: linear-gradient(90deg,
+      theme('colors.ink.800') 0%,
+      theme('colors.ink.700') 50%,
+      theme('colors.ink.800') 100%);
+  }
+  /* A register entry committed moments ago settles like fresh ink, once
+     (PHILOSOPHY §12, V1.2). The words "Entered in the register." come
+     first; this only supports them. The row warms to brass-50 and fades
+     back; the serif cells come into focus. Stills under reduce-motion. */
+  .ink-settle > td {
+    animation: ink-row-warm 1.6s ease-out both;
+  }
+  .ink-settle > td.font-display {
+    animation: ink-row-warm 1.6s ease-out both, ink-settle-text 0.7s cubic-bezier(0.22, 0.8, 0.32, 1) both;
+  }
+  .dark .ink-settle > td {
+    --ink-warm: theme('colors.brass.900');
+  }
+  @keyframes ink-row-warm {
+    from { background-color: var(--ink-warm, theme('colors.brass.50')); }
+    to { background-color: transparent; }
+  }
+  @keyframes ink-settle-text {
+    from { opacity: 0; filter: blur(1.5px); }
+    to { opacity: 1; filter: blur(0); }
+  }
+  /* Liturgical colour changes ease across like vestments on a Sunday
+     instead of snapping (V1.3, study #3). Only the colour channels slow;
+     layout never moves. Reduce-motion makes it instant. */
+  .lit-ease {
+    transition-property: background-color, border-color, color;
+    transition-duration: 600ms;
+    transition-timing-function: ease-in-out;
+  }
+  /* A finished task is crossed out with a drawn pen line (V1.4, study
+     #9). The line is a single solid stroke in currentColor, painted as a
+     background so it can be drawn left to right. Reduce-motion: instant. */
+  .pen-strike {
+    background-image: linear-gradient(currentColor, currentColor);
+    background-repeat: no-repeat;
+    background-position: 0 55%;
+    background-size: 0% 1.5px;
+    transition: background-size 280ms cubic-bezier(0.22, 0.8, 0.32, 1), color 280ms ease-out;
+  }
+  .pen-strike.is-struck {
+    background-size: 100% 1.5px;
+  }
+  /* A row arriving in a list for the first time: a short fade and a 4px
+     settle (V1.5). Callers stagger it with animation-delay. */
+  .row-arrive {
+    animation: row-arrive 220ms cubic-bezier(0.22, 0.8, 0.32, 1) both;
+  }
+  @keyframes row-arrive {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: none; }
+  }
+  /* Language switch (V1.5, study #7): the app dims for 150ms while the
+     words change, then comes back. Set and cleared by setLocale in
+     i18n/index.jsx; never set under reduce-motion. */
+  #root {
+    transition: opacity 150ms ease-out;
+  }
+  html[data-locale-swap] #root {
+    opacity: 0.15;
+  }
+  /* The slot that just received something glows brass for a moment
+     (V1.5, study #8: an intention arriving at its Mass). */
+  .slot-glow {
+    animation: row-arrive 220ms cubic-bezier(0.22, 0.8, 0.32, 1) both, slot-glow 900ms ease-out both;
+  }
+  .dark .slot-glow {
+    --slot-glow: theme('colors.brass.800');
+  }
+  @keyframes slot-glow {
+    from { background-color: var(--slot-glow, theme('colors.brass.200')); }
+    to { background-color: transparent; }
+  }
+  @keyframes skeleton-shimmer {
+    from { background-position: 100% 0; }
+    to { background-position: -100% 0; }
+  }
+
   .card-glow {
     @apply shadow-warm dark:shadow-black/40;
   }
@@ -192,10 +288,80 @@
     margin-bottom: env(safe-area-inset-bottom, 0px);
   }
 
+  /* SP-117: the floating assistant quill (bottom-5 + h-12 + safe-mb) sits
+     over the page. Reserve that band at the bottom of the scroll area so the
+     last controls on every page can always scroll clear of it. */
+  .oc-fab-clearance {
+    padding-bottom: calc(5.5rem + env(safe-area-inset-bottom, 0px)) !important;
+    /* Keyboard focus scrolls a control clear of the floating assistant
+       button instead of under it (WCAG 2.4.11; App Review finding 7 —
+       Register row actions at 200% zoom). */
+    scroll-padding-bottom: calc(5.5rem + env(safe-area-inset-bottom, 0px));
+  }
+  @media print {
+    .oc-fab-clearance { padding-bottom: 0 !important; }
+  }
+
   /* Flush 4rem top bar (the shell header). border-box would crush the
      row if we only added padding, so the box grows by the same inset. */
   .safe-h-16 {
     height: calc(4rem + env(safe-area-inset-top, 0px));
+  }
+
+  /* Native shell only. initNativeShell adds the class when the bridge
+     says this is the iOS app. The document and the parish pane stop
+     chaining a rubber-band bounce into the chrome. A browser without
+     the class scrolls as before. iOS 15 does not honor
+     overscroll-behavior; that limit is for a device. */
+  html.native-shell,
+  html.native-shell body,
+  html.native-shell main {
+    overscroll-behavior: none;
+  }
+
+  html.native-shell input,
+  html.native-shell textarea,
+  html.native-shell select {
+    scroll-margin-top: calc(5rem + env(safe-area-inset-top, 0px));
+    scroll-margin-bottom: calc(1.5rem + env(safe-area-inset-bottom, 0px));
+  }
+}
+
+@layer base {
+  /* Native controls belong to the theme (polish 1). Without color-scheme a
+     dark parish screen still opened light-grey dropdown lists, date pickers
+     and scrollbars. accent-color carries burgundy into checkboxes, radios
+     and range controls instead of the browser's blue. */
+  html { color-scheme: light; accent-color: theme('colors.church.700'); }
+  html.dark { color-scheme: dark; accent-color: theme('colors.brass.400'); }
+
+  /* One focus mark for the whole product: a brass ring, offset from the
+     control, shown only for keyboard focus (PHILOSOPHY §13: "focus visible
+     (brass, not invisible)"). Controls that draw their own focus:ring keep
+     it — their focus:outline-none outranks this rule. */
+  :focus-visible {
+    outline: 2px solid theme('colors.brass.500');
+    outline-offset: 2px;
+  }
+
+  /* Dropdowns in the parish's own material: a quiet chevron instead of each
+     browser's grey widget. Selects that already draw their own chevron opt
+     out with appearance-none, which they all carry. */
+  select:not([multiple]):not([size]):not(.appearance-none) {
+    appearance: none;
+    -webkit-appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%238D8071' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 6l4 4 4-4'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 0.65rem center;
+    background-size: 0.95rem;
+    padding-right: 2.1rem;
+  }
+
+  /* The date picker's calendar glyph, softened to sit with the field. */
+  input[type='date']::-webkit-calendar-picker-indicator,
+  input[type='time']::-webkit-calendar-picker-indicator {
+    opacity: 0.55;
+    cursor: pointer;
   }
 }
 
@@ -206,10 +372,14 @@
      pixels short of reliable. Checkboxes and radios are excluded: they
      are judged together with their label, which is the real target. */
   @media (pointer: coarse) {
+    /* SP-289 / B-463-1: iOS Safari auto-zooms focused fields under 16px.
+       Tailwind text-sm (0,1,0) beat the bare tag rule on select/textarea;
+       !important keeps every field ≥16px under coarse pointers. */
     input:not([type='checkbox']):not([type='radio']):not([type='hidden']),
     select,
     textarea {
       min-height: 44px;
+      font-size: 16px !important;
     }
 
     /* Standalone buttons, same reasoning. The audit found roughly thirty
@@ -242,4 +412,52 @@
       min-width: 24px;
     }
   }
+}
+
+
+/* OC-WEB-1 / Beacon B-460-1 — visitor high-contrast look.
+   The toggle sets data-os-look="high-contrast"; without these rules it was a visual no-op. */
+[data-os-look="high-contrast"] {
+  background-color: #ffffff !important;
+  color: #000000 !important;
+}
+[data-os-look="high-contrast"] h1,
+[data-os-look="high-contrast"] h2,
+[data-os-look="high-contrast"] h3,
+[data-os-look="high-contrast"] p,
+[data-os-look="high-contrast"] li,
+[data-os-look="high-contrast"] a,
+[data-os-look="high-contrast"] span,
+[data-os-look="high-contrast"] strong,
+[data-os-look="high-contrast"] summary,
+[data-os-look="high-contrast"] label,
+[data-os-look="high-contrast"] button {
+  color: #000000 !important;
+}
+[data-os-look="high-contrast"] section,
+[data-os-look="high-contrast"] [class*="bg-parchment"],
+[data-os-look="high-contrast"] [class*="bg-ink"] {
+  background-color: #ffffff !important;
+  border-color: #000000 !important;
+}
+[data-os-look="high-contrast"] a {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+[data-os-look="high-contrast"] button[aria-pressed="true"] {
+  background-color: #000000 !important;
+  color: #ffffff !important;
+  border-color: #000000 !important;
+}
+[data-os-look="high-contrast"] [style*="--parish-accent"],
+[data-os-look="high-contrast"] a[style],
+[data-os-look="high-contrast"] [class*="shadow-warm"] {
+  border-color: #000000 !important;
+}
+
+/* Beacon #460 note: brass focus ring on white is ~3.2:1 in high contrast.
+   Use black so the keyboard outline stays clearly visible on white. */
+[data-os-look="high-contrast"] :focus-visible {
+  outline: 2px solid #000000;
+  outline-offset: 2px;
 }

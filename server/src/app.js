@@ -31,8 +31,13 @@ import { auditLog } from './middleware/auditLog.js'
 import authRouter from './routes/auth.js'
 import clientsRouter from './routes/clients.js'
 import eventsRouter from './routes/events.js'
-import scheduleRouter from './routes/schedule.js'
+import { createRequire } from 'node:module'
+import scheduleRouter, { publicScheduleRouter } from './routes/schedule.js'
+const require = createRequire(import.meta.url)
+const { SCHEDULE_ACTION_TOOLS } = require('./lib/openscaffold-schedule/index.js')
 import aiRouter from './routes/ai.js'
+import nativeAiAccessRouter from './routes/nativeAiAccess.js'
+import { nativeAiHttpGate } from './ai/nativeAiGate.js'
 import tasksRouter from './routes/tasks.js'
 import calendarRouter from './routes/calendar.js'
 import availabilityRouter from './routes/availability.js'
@@ -63,6 +68,7 @@ import auditLogRouter from './routes/auditLog.js'
 import vaultRouter from './routes/vault.js'
 import givingStatementsRouter from './routes/givingStatements.js'
 import organizationRouter from './routes/organization.js'
+import parishDisplayNameRouter from './routes/parishDisplayName.js'
 import insightsRouter from './routes/insights.js'
 import publicEventsRouter from './routes/publicEvents.js'
 import attendanceRouter from './routes/attendance.js'
@@ -98,6 +104,9 @@ import fundsRouter from './routes/funds.js'
 import { kioskAdminRouter, kioskPublicRouter } from './routes/kiosk.js'
 import feeSchedulesRouter from './routes/feeSchedules.js'
 import invoicesRouter from './routes/invoices.js'
+import depositsRouter from './routes/deposits.js'
+import cateringRouter from './routes/catering.js'
+import { hallSignReadLimiter, hallSignWriteLimiter, hallSignGet, hallSignSign, hallSignDecline } from './routes/hallSign.js'
 import importsRouter from './routes/imports.js'
 import { maskPath } from './utils/redact.js'
 
@@ -117,13 +126,17 @@ app.disable('x-powered-by')
 // localhost dev servers are allowed so dev "just works" with no env
 // setup. credentials: true is required so the browser will accept and
 // send the httpOnly session cookie on credentialed fetches.
-app.use(cors({
+// Pre-auth middleware is exported by identity: tests/routeAuthAllowlist
+// allows a path-less middleware (one that runs for EVERY request, before any
+// requireAuth) only if it is one of these exact function objects (R427-3).
+export const corsMiddleware = cors({
   credentials: true,
   origin(origin, cb) {
     if (isAllowedOrigin(origin)) return cb(null, true)
     return cb(null, false) // not an error — just no CORS headers for this origin
   },
-}))
+})
+app.use(corsMiddleware)
 
 // Security headers (audit H10) — hand-set, no new dependency. HSTS is
 // meaningful only behind TLS, which Vercel guarantees in production.
@@ -133,7 +146,7 @@ app.use(cors({
 // (Enforce) here. Report-Only is the only CSP mode this PR ships; flipping
 // to Enforce is a separate decision after reports are reviewed.
 // Session/cookie auth is unchanged — this middleware only calls res.set.
-app.use((_req, res, next) => {
+export function securityHeaders(_req, res, next) {
   res.set('X-Content-Type-Options', 'nosniff')
   res.set('X-Frame-Options', 'DENY')
   res.set('Referrer-Policy', REFERRER_POLICY)
@@ -150,7 +163,8 @@ app.use((_req, res, next) => {
     res.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains')
   }
   next()
-})
+}
+app.use(securityHeaders)
 
 // Billing webhook MUST mount before express.json() — most providers
 // sign the raw bytes of the body, so consuming-then-reparsing as JSON
@@ -166,7 +180,17 @@ app.use('/api/email', emailWebhookRouter)
 // 10 MB is generous for JSON bodies but necessary for CSV-member-import
 // payloads, which can run several MB for big churches. Tenant routes
 // are authed so there's no unauth'd DoS vector through this limit.
-app.use(express.json({ limit: '10mb' }))
+// R401-1: the three unauthenticated schedule POSTs get a 32 KB parser that
+// runs first, so real bytes are counted while streaming (chunked bodies
+// included) and the 10 MB parser below never reads them (body-parser skips
+// a request whose body is already parsed).
+export const publicScheduleJsonParser = express.json({ limit: '32kb' })
+app.post(
+  ['/api/schedule/facility-hold', '/api/schedule/volunteer-roster', '/api/schedule/mcp'],
+  publicScheduleJsonParser
+)
+export const jsonBodyParser = express.json({ limit: '10mb' })
+app.use(jsonBodyParser)
 
 // Cookie CSRF belt: SameSite=Lax is the strategy (see sessionCookie.js).
 // This refuses a cookie-bearing mutation whose Origin is present and
@@ -355,6 +379,34 @@ app.get('/health', healthHandler)
 // (no prefix stripping) and production (stripped) both work.
 app.get('/api/health', healthHandler)
 
+// TARS S398-SCHED-03: static informational manifest. Relative paths only
+// (never built from the Host header), no org identity, and only the
+// read-only discovery surface that actually exists. No booking, checkout,
+// voice, or payment capability is advertised because none is implemented.
+const AGENT_BOOKING_MANIFEST = Object.freeze({
+  schema_version: '2026-10-25',
+  standard: 'OSL-AGENT-BOOKING-v1',
+  vertical_key: 'open-church',
+  status: 'informational',
+  calendar_mode: 'MODE_C_EVENT_FACILITY_TEE',
+  secondary_mode: 'MODE_D_SHIFT_ROSTER',
+  capabilities: ['availability_evaluation', 'sample_ics_feed'],
+  endpoints: {
+    mcp_discovery: '/api/schedule/mcp',
+    mode: '/api/schedule/mode',
+    sample_ics_feed: '/api/schedule/feed.ics',
+  },
+  mcp_tools: SCHEDULE_ACTION_TOOLS
+    .map(t => t.name)
+    .filter(n => n === 'schedule.check_availability' || n === 'schedule.fill_waitlist'),
+  catering_integration: '@openscaffold/catering v0.1.0',
+})
+function agentBookingManifestHandler(_req, res) {
+  res.json(AGENT_BOOKING_MANIFEST)
+}
+app.get('/.well-known/agent-booking.json', agentBookingManifestHandler)
+app.get('/api/.well-known/agent-booking.json', agentBookingManifestHandler)
+
 // Auth endpoints — signup/login are public; /me enforces its own auth.
 app.use('/api/auth', authRouter)
 
@@ -362,6 +414,7 @@ app.use('/api/auth', authRouter)
 // must stay public — calendar apps can't send Authorization headers. It
 // is mounted BEFORE requireAuth is applied to the rest of calendar-sync.
 app.use('/api/calendar-sync', calendarSyncPublicRouter)
+app.use('/api/schedule', publicScheduleRouter)
 // Public events feed (Sprint P). Unauthenticated — parishioners can
 // hit this without an account. Privacy boundary is enforced at the
 // query layer: every endpoint filters ochr_events.is_public = TRUE
@@ -379,6 +432,12 @@ app.use('/api/swap',          swapPublicRouter)
 // The router resolves the org from the token, 404s on a bad one, and
 // rate-limits the check-in endpoint per-IP.
 app.use('/api/kiosk',         kioskPublicRouter)
+// Hall agreement signing link (OC-CAT-1). Each method is its own path.
+// The token is the credential. It does not charge and it does not write
+// the register. Limiters sit on the route so a prefix is not public.
+app.get('/api/hall-sign/:token', hallSignReadLimiter, hallSignGet)
+app.post('/api/hall-sign/:token/sign', hallSignWriteLimiter, hallSignSign)
+app.post('/api/hall-sign/:token/decline', hallSignWriteLimiter, hallSignDecline)
 // One-click unsubscribe (RFC 8058). Public — the List-Unsubscribe header
 // in every notification points here, and a mail client acting on it has
 // no session to present. Authorisation is the HMAC in the path, which
@@ -408,6 +467,11 @@ app.use('/api/funds',         requireAuth, writeGate, auditLog('fund'), fundsRou
 // Vocabulary rule stands everywhere downstream: sacraments are never sold.
 app.use('/api/fee-schedules', requireAuth, writeGate, auditLog('fee_schedule'), feeSchedulesRouter)
 app.use('/api/invoices',      requireAuth, writeGate, auditLog('invoice'), invoicesRouter)
+// Event deposits (130): staff record, apply, request; admins approve inside.
+app.use('/api/deposits',      requireAuth, writeGate, auditLog('deposit'), depositsRouter)
+// Parish hall holds, expected deposit schedules, and banquet orders.
+// Sending the agreement is admin-only inside the router. No charges.
+app.use('/api/catering',      requireAuth, writeGate, auditLog('catering'), cateringRouter)
 app.use('/api/events',        requireAuth, writeGate, auditLog('event'),  eventsRouter)
 // Attendance (Sprint T) nested under events. Reads + writes go
 // through the same writeGate (staff+admin can mark; viewers read-
@@ -417,7 +481,13 @@ app.use('/api/events/:id/attendance', requireAuth, writeGate, auditLog('attendan
 app.use('/api/schedule',      requireAuth, writeGate, scheduleRouter)
 // Parish capabilities only: a diocese session is refused until an approved
 // diocese capability is wired (TARS #280 disposition 8).
-app.use('/api/ai',            requireAuth, requireOrgType('parish'), writeGate, aiRouter)
+// Native agreement is mounted before /api/ai so the shell can read and
+// record it without passing the AI admission gate or the staff write gate.
+// Viewers may agree; the route uses the JWT parish and login only.
+app.use('/api/ai/native-access', requireAuth, requireOrgType('parish'), auditLog('ai_agreement'), nativeAiAccessRouter)
+// nativeAiHttpGate refuses the iOS shell before a handler can reserve
+// quota or call dispatch. Web requests pass through. dispatch() checks again.
+app.use('/api/ai',            requireAuth, requireOrgType('parish'), nativeAiHttpGate, writeGate, aiRouter)
 app.use('/api/tasks',         requireAuth, writeGate, auditLog('task'),   tasksRouter)
 app.use('/api/calendar',      requireAuth, writeGate, auditLog('calendar_event'), calendarRouter)
 app.use('/api/availability',  requireAuth, writeGate, auditLog('availability'), availabilityRouter)
@@ -432,7 +502,11 @@ app.use('/api/payroll',       requireAuth, writeGate, auditLog('payroll'),  payr
 app.use('/api/donations',     requireAuth, writeGate, auditLog('donation'), donationsRouter)
 app.use('/api/sacraments',    requireAuth, writeGate, auditLog('sacrament'), sacramentsRouter)
 app.use('/api/mass-intentions', requireAuth, writeGate, auditLog('mass_intention'), massIntentionsRouter)
-app.use('/api/finance',       requireAuth, writeGate, auditLog('finance'), financeRouter)
+// SP-007 / SP-030 / SP-037: parish finance ledger is admin-only for every
+// method (reads and writes). writeGate alone let Staff GETs through. Matches
+// pledges / insights / giving-statements / audit. Donations and funds stay
+// on writeGate above — daily office work is out of this ticket.
+app.use('/api/finance',       requireAuth, requireRole('admin'), auditLog('finance'), financeRouter)
 app.use('/api/checklists',    requireAuth, writeGate, auditLog('checklist'), checklistsRouter)
 // DIO.1 — the diocese umbrella. requireOrgType hard-gates the diocese
 // surface (reads included); the parish-side affiliation panel is
@@ -468,7 +542,7 @@ app.use('/api/imports',       requireAuth, writeGate, auditLog('import_batch'), 
 // In-app assistant (SUP.3) — every signed-in role may ask (viewers get
 // stuck too). Per-org daily cap inside the route; no writeGate because
 // the only "mutation" is the assistant's own usage log.
-app.use('/api/assistant',     requireAuth, requireOrgType('parish'), assistantRouter)
+app.use('/api/assistant',     requireAuth, requireOrgType('parish'), nativeAiHttpGate, assistantRouter)
 // Platform AI stop (Stage 7): operator seats only, 404 otherwise.
 app.use('/api/admin/ai-switch', requireAuth, aiSwitchRouter)
 app.use('/api/notifications', requireAuth, writeGate, notificationsRouter)
@@ -527,6 +601,11 @@ app.use('/api/vault',         requireAuth, writeGate, auditLog('vault'), vaultRo
 // at the SQL layer; the role gate is the second line of defense against
 // a regular staff user enumerating donor totals.
 app.use('/api/giving-statements', requireAuth, requireRole('admin'), givingStatementsRouter)
+// SP-079. The order-of-worship print needs the parish display name.
+// The settings block below stays admin-only (letterhead, EIN, signatory).
+// This read is mounted first so staff are not handed that block, and it
+// is not on the Viewer allow-list. The handler scopes by the session org.
+app.use('/api/organization/display-name', requireAuth, requireRole('admin', 'staff'), parishDisplayNameRouter)
 // Org-level settings (letterhead, EIN, signatory). Admin-only because
 // these power the legal/tax document headers; a staff user changing
 // the EIN by accident would brick every printed statement until the
@@ -588,7 +667,7 @@ app.use('/api/cron', cronRouter)
 // without catching. Logs structured context to stdout (Vercel's runtime
 // logs pick this up automatically) and returns an opaque 500 with a
 // short reference id the user can quote in support.
-app.use((err, req, res, _next) => {
+export function errorHandler(err, req, res, _next) {
   const ref = Math.random().toString(36).slice(2, 10)
   // ARG-LEAK-1: body-parser errors (malformed JSON, oversize, bad charset)
   // carry the raw request body in err.body, and V8's SyntaxError message
@@ -610,7 +689,8 @@ app.use((err, req, res, _next) => {
     stack:   err?.stack,
   })
   res.status(500).json({ error: 'Internal server error', ref })
-})
+}
+app.use(errorHandler)
 
 export default app
 

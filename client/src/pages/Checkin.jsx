@@ -1,8 +1,9 @@
 import { useEffect, useState, useMemo, useRef } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
-import { motion } from 'framer-motion'
+import { motion, AnimatePresence } from 'framer-motion'
+import { listRowMotion } from '../utils/motion'
 import { UserCheck, LogOut, Loader2, Plus, X, Printer, Tablet, Copy, RefreshCw, Power, Search, ChevronLeft } from 'lucide-react'
-import PageWrapper from '../components/PageWrapper'
+import PageWrapper, { PageHeader } from '../components/PageWrapper'
 import EmptyState from '../components/EmptyState'
 import LoadFailure from '../components/LoadFailure'
 import { apiUrl } from '../api'
@@ -12,6 +13,7 @@ import { initials, loadList } from '../utils/format'
 import { LIT_COLOR_TEXT, LIT_COLOR_DOT, LIT_COLOR_DOT_NONE } from '../utils/liturgicalColors'
 import { useConfirm, usePrompt } from '../components/ConfirmProvider'
 import { useLocale } from '../i18n'
+import { seasonLabel } from '../i18n/liturgical'
 
 // Positive integer IDs only. Labels, titles, and dates never invent a
 // Mass or a person — the same rule as the roster's client_id gate and
@@ -113,31 +115,31 @@ function KioskCard() {
       const d = await res.json().catch(() => ({}))
       if (!res.ok) throw new Error(d.error || "That didn't save — nothing was lost. Please try again.")
       setToken(d.kiosk_token)
-      toast.success(token ? 'New kiosk link generated' : 'Kiosk enabled')
+      toast.success(token ? t('chk.new_kiosk_link') : t('chk.kiosk_enabled'))
     } catch (err) { toast.error(err.message) }
     finally { setWorking(false) }
   }
 
   async function disable() {
     if (!(await ask({
-      title: 'Turn off the kiosk?',
-      body: 'The current kiosk link stops working straight away.',
-      confirmLabel: 'Turn off kiosk',
+      title: t('chk.disableKioskTitle'),
+      body: t('chk.disableKioskBody'),
+      confirmLabel: t('chk.disableKioskConfirm'),
     }))) return
     setWorking(true)
     try {
       const res = await fetch(apiUrl('/api/kiosk-admin'), { method: 'DELETE' })
-      if (!res.ok && res.status !== 204) throw new Error("That didn't delete — nothing was changed. Please try again.")
+      if (!res.ok && res.status !== 204) throw new Error(t('chk.didntDelete'))
       setToken(null)
-      toast.success('Kiosk disabled')
+      toast.success(t('chk.kiosk_disabled'))
     } catch (err) { toast.error(err.message) }
     finally { setWorking(false) }
   }
 
   function copy() {
     navigator.clipboard?.writeText(url).then(
-      () => toast.success('Kiosk link copied'),
-      () => toast.error('Could not copy'),
+      () => toast.success(t('chk.kiosk_link_copied')),
+      () => toast.error(t('chk.could_not_copy')),
     )
   }
 
@@ -147,10 +149,10 @@ function KioskCard() {
     <div className="bg-parchment-50 dark:bg-ink-900 rounded-2xl border border-parchment-300/60 dark:border-brass-900/30 shadow-warm p-5 space-y-3">
       <div className="flex items-center gap-2">
         <Tablet size={16} className="text-brass-600 dark:text-brass-300" />
-        <h2 className="text-sm font-bold uppercase tracking-widest text-brass-700 dark:text-brass-300">Self-serve kiosk</h2>
+        <h2 className="text-sm font-bold uppercase tracking-widest text-brass-700 dark:text-brass-300">{t('ck.kiosk')}</h2>
       </div>
       <p className="text-xs text-ink-500 dark:text-parchment-300/70 -mt-1">
-        Open this link on a tablet at the entrance so people can check themselves in — no login.
+        {t('ck.kioskHint')}
       </p>
 
       {readFailed ? (
@@ -169,22 +171,22 @@ function KioskCard() {
               onFocus={e => e.target.select()}
               className="flex-1 min-w-0 px-3 py-2 text-xs rounded-lg border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-100 dark:bg-ink-800 text-ink-700 dark:text-parchment-200 focus:outline-none"
             />
-            <button onClick={copy} title="Copy link" className="shrink-0 px-3 py-2 rounded-lg border border-parchment-300/70 dark:border-brass-900/40 text-ink-700 dark:text-parchment-200 hover:bg-parchment-200 dark:hover:bg-ink-800 transition-colors">
+            <button onClick={copy} title={t('ck.copyLink')} className="shrink-0 px-3 py-2 rounded-lg border border-parchment-300/70 dark:border-brass-900/40 text-ink-700 dark:text-parchment-200 hover:bg-parchment-200 dark:hover:bg-ink-800 transition-colors">
               <Copy size={15} />
             </button>
           </div>
           <div className="flex gap-2">
             <button onClick={rotate} disabled={working} className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border border-parchment-300/70 dark:border-brass-900/40 text-ink-700 dark:text-parchment-200 hover:bg-parchment-200 dark:hover:bg-ink-800 disabled:opacity-40 transition-colors">
-              <RefreshCw size={13} /> New link
+              <RefreshCw size={13} /> {t('ck.newLink')}
             </button>
             <button onClick={disable} disabled={working} className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border border-rose-300/70 text-rose-700 dark:text-rose-300 hover:bg-rose-50 dark:hover:bg-rose-900/20 disabled:opacity-40 transition-colors">
-              <Power size={13} /> Turn off
+              <Power size={13} /> {t('ck.turnOff')}
             </button>
           </div>
         </>
       ) : (
         <button onClick={rotate} disabled={working} className="flex items-center gap-2 px-4 py-2 text-sm font-semibold rounded-lg bg-church-900 dark:bg-parchment-100 text-parchment-50 dark:text-church-900 hover:opacity-90 disabled:opacity-40 transition-opacity">
-          <Tablet size={15} /> {working ? 'Enabling…' : 'Enable kiosk'}
+          <Tablet size={15} /> {working ? t('ck.enabling') : t('ck.enable')}
         </button>
       )}
     </div>
@@ -231,10 +233,11 @@ function escapeHtml(s) {
 
 // Name-tag printing (CHK.5) — opens a small print window with a tag.
 // Child tags carry the pickup code (available only right after check-in).
-function printTag({ name, kind, code, room, eventTitle, eventDate }) {
-  const w = window.open('', '_blank', 'width=420,height=340')
-  if (!w) return
-  w.document.write(`<!doctype html><html><head><title>Name tag</title><style>
+// `t` must be passed in: printTag lives outside the component, so useLocale
+// is not in scope here. The HTML is built with real ${t(...)} interpolations
+// so a Spanish desk never prints the literal "{t('ck.nameTag')}" text.
+export function buildNameTagHtml({ name, kind, code, room, eventTitle, eventDate }, t) {
+  return `<!doctype html><html><head><title>${escapeHtml(t('ck.nameTag'))}</title><style>
     @page { margin: 0 }
     body { font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 28px; text-align: center }
     .kind { font-size: 11px; text-transform: uppercase; letter-spacing: 3px; color: #888 }
@@ -248,9 +251,15 @@ function printTag({ name, kind, code, room, eventTitle, eventDate }) {
     <div class="name">${escapeHtml(name)}</div>
     ${room ? `<div class="room">${escapeHtml(room)}</div>` : ''}
     <div class="meta">${escapeHtml(eventTitle)} &middot; ${escapeHtml(eventDate)}</div>
-    ${code ? `<div class="code">${escapeHtml(code)}</div><div class="codelabel">Pickup code</div>` : ''}
+    ${code ? `<div class="code">${escapeHtml(code)}</div><div class="codelabel">${escapeHtml(t('ck.pickupCode'))}</div>` : ''}
     <script>window.onload = function () { window.print() }<\/script>
-  </body></html>`)
+  </body></html>`
+}
+
+function printTag(args, t) {
+  const w = window.open('', '_blank', 'width=420,height=340')
+  if (!w) return
+  w.document.write(buildNameTagHtml(args, t))
   w.document.close()
 }
 
@@ -482,7 +491,7 @@ export default function Checkin() {
       room:       rec.room_name || (roomPick ? rooms.find(r => String(r.id) === roomPick)?.name : '') || '',
       eventTitle: selectedEvent?.title || '',
       eventDate:  selectedEvent ? fmtDate(selectedEvent.date) : '',
-    })
+    }, t)
   }
 
   async function addRoom() {
@@ -492,7 +501,7 @@ export default function Checkin() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name: newRoom.trim() }),
     })
-    if (!res.ok) { toast.error('Could not add room'); return }
+    if (!res.ok) { toast.error(t('chk.could_not_add_room')); return }
     const room = await res.json()
     setRooms(rs => [...rs, room])
     setRoomPick(String(room.id))
@@ -555,7 +564,7 @@ export default function Checkin() {
 
   if (loading) {
     return (
-      <PageWrapper>
+      <PageWrapper type="list">
         <div className="flex items-center justify-center py-24">
           <Loader2 size={20} className="animate-spin text-church-700 dark:text-brass-300" />
         </div>
@@ -568,16 +577,16 @@ export default function Checkin() {
   // screen, it is a full one that looks right and is about the wrong service.
   if (unresolved) {
     return (
-      <PageWrapper>
+      <PageWrapper type="list">
         <div className="max-w-2xl mx-auto py-16 space-y-4">
           <EmptyState
             icon={UserCheck}
             title={unresolved.reason === 404
-              ? "That service isn't on this church's schedule"
-              : "We couldn't open that service"}
+              ? t('chk.serviceNotOnSchedule')
+              : t('chk.serviceOpenFailed')}
             body={unresolved.reason === 404
-              ? 'The link points to a service this church does not have — it may have been deleted, or the link may belong to another church. Nobody has been checked in. Choose a service from the Schedule to continue.'
-              : 'Something went wrong loading that service, so we cannot say which one this is. Nobody has been checked in. Try again, or choose a service from the Schedule.'}
+              ? t('chk.serviceNotOnScheduleBody')
+              : t('chk.serviceOpenFailedBody')}
           />
           {personHome && (
             <Link
@@ -595,7 +604,7 @@ export default function Checkin() {
 
   if (servicesFailed) {
     return (
-      <PageWrapper>
+      <PageWrapper type="list">
         <div className="max-w-2xl mx-auto py-16">
           <EmptyState icon={UserCheck} title={t('checkin.servicesUnread')}
             body={t('checkin.servicesUnreadBody')} />
@@ -606,17 +615,17 @@ export default function Checkin() {
 
   if (events.length === 0) {
     return (
-      <PageWrapper>
+      <PageWrapper type="list">
         <div className="max-w-2xl mx-auto py-16">
-          <EmptyState icon={UserCheck} title="No services in this window"
-            body="Add a Schedule event within the last or next 30 days to check people in." />
+          <EmptyState icon={UserCheck} title={t('ck.noServices')}
+            body={t('ck.noServicesBody')} />
         </div>
       </PageWrapper>
     )
   }
 
   return (
-    <PageWrapper>
+    <PageWrapper type="list">
       <div className="max-w-2xl mx-auto space-y-5">
         <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.25 }}>
           {personHome && (
@@ -628,11 +637,7 @@ export default function Checkin() {
               {personHome.name ? t(personHome.labelKey, { name: personHome.name }) : t(personHome.labelKey)}
             </Link>
           )}
-          <div className="flex items-center gap-2">
-            <UserCheck size={18} className="text-brass-600 dark:text-brass-300" />
-            <h1 className="font-display text-3xl font-semibold text-ink-900 dark:text-parchment-50 tracking-tight">Check-in</h1>
-          </div>
-          <p className="text-sm text-ink-500 dark:text-parchment-300/70 mt-1">Check members and guests in to a service.</p>
+          <PageHeader title={t('ck.title')} leading={<UserCheck size={18} />} subtitle={t('ck.subtitle')} />
         </motion.div>
 
         {isAdmin && <KioskCard />}
@@ -640,7 +645,7 @@ export default function Checkin() {
         {/* Event picker */}
         <select
           value={eventId}
-          aria-label="Choose a service"
+          aria-label={t('ck.chooseService')}
           onChange={e => {
             // Rewrite the URL rather than only local state: the address bar is
             // what the next reload, the back button and a shared link read.
@@ -660,13 +665,22 @@ export default function Checkin() {
             </option>
           ))}
         </select>
+        {/* SP-120: a native <select> clips a long "title — date time" at phone
+            width; repeat the full chosen service under it on small screens. */}
+        {selectedEvent && (
+          // Drawn via ::after from data-label so it stays out of the
+          // accessibility tree and text queries (the <select> already names it).
+          <p data-testid="checkin-service-full" aria-hidden="true"
+            data-label={`${selectedEvent.title} — ${fmtDate(selectedEvent.date)} ${fmtTime(selectedEvent.start_time)}`}
+            className="sm:hidden -mt-1 text-xs text-ink-600 dark:text-parchment-300/80 break-words after:content-[attr(data-label)]" />
+        )}
 
         {/* Liturgical day for the selected service (LIT.3) — reads the
             season/feast now stored on the event (LIT.1). */}
         {selectedEvent?.liturgical_season && (
           <div className={`inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-md border ${LIT_COLOR_TEXT[selectedEvent.liturgical_color] ?? LIT_COLOR_TEXT.White}`}>
             <span className={`w-1.5 h-1.5 rounded-full ${LIT_COLOR_DOT[selectedEvent.liturgical_color] ?? LIT_COLOR_DOT_NONE}`} />
-            {selectedEvent.feast_name || selectedEvent.liturgical_season}
+            {selectedEvent.feast_name || seasonLabel(t, selectedEvent.liturgical_season)}
           </div>
         )}
 
@@ -679,11 +693,11 @@ export default function Checkin() {
           <div className="flex gap-2">
             <select
               value={roomPick}
-              aria-label="Room for the next check-in"
+              aria-label={t('ck.roomAria')}
               onChange={e => setRoomPick(e.target.value)}
               className="flex-1 min-w-0 px-3 py-2 text-sm rounded-lg border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-100 dark:bg-ink-800 text-ink-900 dark:text-parchment-50 focus:outline-none focus:ring-2 focus:ring-church-500"
             >
-              <option value="">No room</option>
+              <option value="">{t('ck.noRoom')}</option>
               {rooms.map(r => (
                 <option key={r.id} value={r.id}>{r.name}</option>
               ))}
@@ -693,7 +707,7 @@ export default function Checkin() {
               value={newRoom}
               onChange={e => setNewRoom(e.target.value)}
               onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addRoom() } }}
-              placeholder="+ Add room"
+              placeholder={t('ck.addRoom')}
               className="w-28 shrink-0 px-3 py-2 text-sm rounded-lg border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-100 dark:bg-ink-800 text-ink-900 dark:text-parchment-50 placeholder-ink-400 dark:placeholder-parchment-400/50 focus:outline-none focus:ring-2 focus:ring-church-500"
             />
           </div>
@@ -703,14 +717,14 @@ export default function Checkin() {
               <div className="flex-1 min-w-0">
                 {pickedMember ? (
                   <div className="flex items-center gap-2 min-h-[42px] px-3 py-2 text-sm rounded-lg border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-100 dark:bg-ink-800 text-ink-900 dark:text-parchment-50">
-                    <span className="w-6 h-6 rounded-full bg-church-900 dark:bg-church-700 flex items-center justify-center text-parchment-50 text-[9px] font-bold shrink-0">
+                    <span className="w-6 h-6 rounded-full bg-church-900 dark:bg-church-700 flex items-center justify-center text-parchment-50 text-[11px] font-bold shrink-0">
                       {initials(pickedMember.name)}
                     </span>
                     <span className="truncate flex-1 font-medium">{pickedMember.name}</span>
                     <button
                       type="button"
                       onClick={() => setMemberPick('')}
-                      aria-label="Clear selected member"
+                      aria-label={t('ck.clearMember')}
                       className="p-1 -mr-1 text-ink-400 hover:text-ink-700 dark:hover:text-parchment-50"
                     >
                       <X size={14} />
@@ -728,8 +742,8 @@ export default function Checkin() {
                         e.preventDefault()
                         if (memberMatches.length === 1) pickMember(memberMatches[0])
                       }}
-                      placeholder="Type a name to find them…"
-                      aria-label="Search a member to check in"
+                      placeholder={t('ck.searchPh')}
+                      aria-label={t('ck.searchAria')}
                       autoComplete="off"
                       className="w-full pl-9 pr-3 py-2.5 text-sm rounded-lg border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-100 dark:bg-ink-800 text-ink-900 dark:text-parchment-50 placeholder-ink-400 dark:placeholder-parchment-400/50 focus:outline-none focus:ring-2 focus:ring-church-500"
                     />
@@ -742,7 +756,7 @@ export default function Checkin() {
                 onClick={async () => { await checkIn({ client_id: Number(memberPick), kind: 'member', room_id: roomPick ? Number(roomPick) : undefined }); setMemberPick('') }}
                 className="shrink-0 inline-flex items-center gap-1.5 px-3 py-2.5 text-sm font-semibold rounded-lg bg-church-900 dark:bg-parchment-100 text-parchment-50 dark:text-church-900 hover:opacity-90 transition-opacity disabled:opacity-40"
               >
-                <Plus size={14} /> Check in
+                <Plus size={14} /> {t('ck.checkIn')}
               </button>
             </div>
             {!pickedMember && memberQueryReady && (
@@ -752,7 +766,7 @@ export default function Checkin() {
                     {t('mem.listFailed')}
                   </li>
                 ) : visibleMemberMatches.length === 0 ? (
-                  <li className="px-3 py-2.5 text-xs text-ink-500 dark:text-parchment-300/70">No matching members</li>
+                  <li className="px-3 py-2.5 text-xs text-ink-500 dark:text-parchment-300/70">{t('ck.noMatch')}</li>
                 ) : (
                   <>
                     {visibleMemberMatches.map(m => (
@@ -763,7 +777,7 @@ export default function Checkin() {
                           aria-label={m.name}
                           className="flex items-center gap-3 w-full px-3 py-3 text-left hover:bg-parchment-100 dark:hover:bg-ink-800/60 transition-colors"
                         >
-                          <div className="w-7 h-7 rounded-full bg-church-900 dark:bg-church-700 flex items-center justify-center text-parchment-50 text-[9px] font-bold shrink-0">
+                          <div className="w-7 h-7 rounded-full bg-church-900 dark:bg-church-700 flex items-center justify-center text-parchment-50 text-[11px] font-bold shrink-0">
                             {initials(m.name)}
                           </div>
                           <p className="text-sm font-medium text-ink-900 dark:text-parchment-50 truncate">{m.name}</p>
@@ -771,7 +785,7 @@ export default function Checkin() {
                       </li>
                     ))}
                     {memberMatches.length > 12 && (
-                      <li className="px-3 py-2 text-[11px] text-ink-500 dark:text-parchment-300/70">Keep typing to narrow the list.</li>
+                      <li className="px-3 py-2 text-[11px] text-ink-500 dark:text-parchment-300/70">{t('ck.keepTyping')}</li>
                     )}
                   </>
                 )}
@@ -785,7 +799,7 @@ export default function Checkin() {
           </div>
           <div className="space-y-2">
             <div className="flex gap-2">
-              {[['guest', 'Guest'], ['child', 'Child']].map(([k, label]) => (
+              {[['guest', t('ck.guest')], ['child', t('ck.child')]].map(([k, label]) => (
                 <button
                   key={k}
                   type="button"
@@ -805,7 +819,7 @@ export default function Checkin() {
                 type="text"
                 value={guestName}
                 onChange={e => setGuestName(e.target.value)}
-                placeholder={guestKind === 'child' ? "Child's name" : 'Guest name'}
+                placeholder={guestKind === 'child' ? t('ck.childName') : t('ck.guestName')}
                 className="flex-1 min-w-0 px-3 py-2 text-sm rounded-lg border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-100 dark:bg-ink-800 text-ink-900 dark:text-parchment-50 placeholder-ink-400 dark:placeholder-parchment-400/50 focus:outline-none focus:ring-2 focus:ring-church-500"
               />
               <button
@@ -824,7 +838,7 @@ export default function Checkin() {
                 }}
                 className="shrink-0 inline-flex items-center gap-1.5 px-3 py-2 text-sm font-semibold rounded-lg border border-church-900 dark:border-parchment-100 text-church-900 dark:text-parchment-100 hover:bg-parchment-100 dark:hover:bg-ink-800 transition-colors disabled:opacity-40"
               >
-                <Plus size={14} /> Check in
+                <Plus size={14} /> {t('ck.checkIn')}
               </button>
             </div>
             {guestKind === 'child' && (
@@ -832,7 +846,7 @@ export default function Checkin() {
                 type="text"
                 value={guardian}
                 onChange={e => setGuardian(e.target.value)}
-                placeholder="Guardian name (optional)"
+                placeholder={t('ck.guardianPh')}
                 className="w-full px-3 py-2 text-sm rounded-lg border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-100 dark:bg-ink-800 text-ink-900 dark:text-parchment-50 placeholder-ink-400 dark:placeholder-parchment-400/50 focus:outline-none focus:ring-2 focus:ring-church-500"
               />
             )}
@@ -846,16 +860,16 @@ export default function Checkin() {
               <p className="text-xs font-semibold text-brass-800 dark:text-brass-200 uppercase tracking-wider">Pickup code — {lastCode.name}</p>
               <p className="text-3xl font-bold tracking-[0.3em] text-brass-700 dark:text-brass-300 font-mono mt-1">{lastCode.code}</p>
               <p className="text-[11px] text-brass-700/80 dark:text-brass-300/70 mt-1">
-                Give this to the guardian — it's required at pickup and won't be shown again.
+                {t('chk.give_this_to_the_guardian')}
               </p>
             </div>
             <div className="shrink-0 flex flex-col items-end gap-2">
               <button
                 type="button"
-                onClick={() => printTag({ name: lastCode.name, kind: 'child', code: lastCode.code, room: lastCode.room || '', eventTitle: selectedEvent?.title || '', eventDate: selectedEvent ? fmtDate(selectedEvent.date) : '' })}
+                onClick={() => printTag({ name: lastCode.name, kind: 'child', code: lastCode.code, room: lastCode.room || '', eventTitle: selectedEvent?.title || '', eventDate: selectedEvent ? fmtDate(selectedEvent.date) : '' }, t)}
                 className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold rounded-lg bg-brass-700 text-parchment-50 hover:bg-brass-800 transition-colors"
               >
-                <Printer size={13} /> Print tag
+                <Printer size={13} /> {t('chk.print_tag')}
               </button>
               <button type="button" onClick={() => setLastCode(null)} className="p-1 text-brass-700 dark:text-brass-300 hover:opacity-70">
                 <X size={16} />
@@ -867,20 +881,23 @@ export default function Checkin() {
         {/* Present list */}
         <div className="bg-parchment-50 dark:bg-ink-900 rounded-2xl border border-parchment-300/60 dark:border-brass-900/30 shadow-warm overflow-hidden">
           <div className="flex items-center justify-between px-4 py-3 border-b border-parchment-300/60 dark:border-brass-900/25">
-            <h2 className="text-sm font-semibold text-ink-800 dark:text-parchment-100">Checked in</h2>
+            <h2 className="text-sm font-semibold text-ink-800 dark:text-parchment-100">{t('ck.checkedIn')}</h2>
             {!checkinsFailed && (
-              <span className="text-xs font-semibold text-brass-700 dark:text-brass-300">{present} present</span>
+              <span className="text-xs font-semibold text-brass-700 dark:text-brass-300">{t('ck.present', { n: present })}</span>
             )}
           </div>
           {checkinsFailed ? (
             <p role="status" className="px-4 py-6 text-center text-xs text-amber-800 dark:text-amber-300">{t('checkin.rosterUnread')}</p>
           ) : checkins.length === 0 ? (
-            <p className="px-4 py-6 text-center text-xs text-ink-500 dark:text-parchment-300/70">No one checked in yet.</p>
+            <p className="px-4 py-6 text-center text-xs text-ink-500 dark:text-parchment-300/70">{t('ck.none')}</p>
           ) : (
-            checkins.map(c => {
+            // Someone just checked in fades into the roster; the people who
+            // were already present stay still (V1.3, study #4).
+            <AnimatePresence initial={false}>
+            {checkins.map(c => {
               const personHref = rosterPersonHref(c.client_id, serviceIdForHops)
               return (
-              <div key={c.id} className="flex items-center justify-between gap-3 px-4 py-2.5 border-t border-parchment-300/50 dark:border-brass-900/25 first:border-t-0">
+              <motion.div key={c.id} {...listRowMotion(0)} className="flex items-center justify-between gap-3 px-4 py-2.5 border-t border-parchment-300/50 dark:border-brass-900/25 first:border-t-0">
                 <div className="min-w-0">
                   {/* THE ROSTER CARRIES WHO, THE WAY THE HEADER CARRIES WHICH
                       SERVICE. The row already holds client_id; it was rendered
@@ -911,25 +928,25 @@ export default function Checkin() {
                       <Link
                         to={personHref}
                         className="tap-line hover:text-church-800 dark:hover:text-brass-200 hover:underline"
-                        title={`Open ${c.person_name}'s profile`}
+                        title={t('ck.openProfile', { name: c.person_name })}
                       >
                         {c.person_name}
                       </Link>
                     ) : (
                       c.person_name
                     )}
-                    {c.kind !== 'member' && <span className="ml-2 text-[10px] font-semibold uppercase tracking-wider text-ink-400 dark:text-parchment-300/60">{c.kind}</span>}
+                    {c.kind !== 'member' && <span className="ml-2 text-[11px] font-semibold uppercase tracking-wider text-ink-400 dark:text-parchment-300/60">{c.kind}</span>}
                   </p>
                   {c.room_name && <p className="text-[11px] text-ink-500 dark:text-parchment-300/70">{c.room_name}</p>}
                 </div>
                 {c.checked_out_at ? (
-                  <span className="text-[11px] text-ink-400 dark:text-parchment-300/60">out</span>
+                  <span className="text-[11px] text-ink-400 dark:text-parchment-300/60">{t('ck.out')}</span>
                 ) : (
                   <div className="flex items-center gap-1.5 shrink-0">
                     <button
                       type="button"
                       onClick={() => tagFor(c)}
-                      title="Print tag"
+                      title={t('ck.printTag')}
                       className="p-1.5 rounded-lg text-ink-400 hover:text-church-900 dark:hover:text-parchment-50 transition-colors"
                     >
                       <Printer size={13} />
@@ -943,9 +960,10 @@ export default function Checkin() {
                     </button>
                   </div>
                 )}
-              </div>
+              </motion.div>
               )
-            })
+            })}
+            </AnimatePresence>
           )}
         </div>
 
@@ -953,7 +971,7 @@ export default function Checkin() {
         {(recentFailed || recent.length > 0) && (
           <div className="bg-parchment-50 dark:bg-ink-900 rounded-2xl border border-parchment-300/60 dark:border-brass-900/30 shadow-warm overflow-hidden">
             <div className="px-4 py-3 border-b border-parchment-300/60 dark:border-brass-900/25">
-              <h2 className="text-sm font-semibold text-ink-800 dark:text-parchment-100">Recent attendance</h2>
+              <h2 className="text-sm font-semibold text-ink-800 dark:text-parchment-100">{t('ck.recentAttendance')}</h2>
             </div>
             {recentFailed && (
               <p role="status" className="px-4 py-6 text-center text-xs text-amber-800 dark:text-amber-300">{t('checkin.recentUnread')}</p>

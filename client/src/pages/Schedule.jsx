@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useId, startTransition } from 'react'
 import { useSearchParams, Link, useNavigate } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { ChevronLeft, ChevronRight, Plus, X, Trash2, Clock, Users, Users2, Repeat, AlertTriangle, History, Cross, CalendarDays, Printer, UserCheck } from 'lucide-react'
@@ -10,30 +10,35 @@ import { useToast } from '../components/ToastProvider'
 import LoadFailure from '../components/LoadFailure'
 import MemberPicker from '../components/MemberPicker'
 import OrderedMemberPicker from '../components/OrderedMemberPicker'
-import PageWrapper from '../components/PageWrapper'
+import PageWrapper, { PageHeader } from '../components/PageWrapper'
 import { sheetOverlayCls, sheetPanelCls, MobileSheetGrip } from '../components/MobileSheet'
 import { LIT_COLOR_DOT, LIT_COLOR_TEXT, LIT_COLOR_STRIPE } from '../utils/liturgicalColors'
 import { seasonLabel } from '../i18n/liturgical'
 import { initials, loadList } from '../utils/format'
-import { toLocalISO, parseLocalDate, calendarDay } from '../utils/dates'
+import { toLocalISO, parseLocalDate, calendarDay, formatParishDay } from '../utils/dates'
 import { useConfirm } from '../components/ConfirmProvider'
+import useDialogFocus from '../components/useDialogFocus'
 import MassIntentionAssign from '../components/MassIntentionAssign'
-import { isIntentionDraftNonce } from '../utils/intentionDraft'
+import { attachCreatedMass, isIntentionDraftNonce, parseCreatedMassId } from '../utils/intentionDraft'
 import { isMassCalendarEvent } from '../utils/massEvent'
+import { splitDeathMark } from '../utils/deathMark'
+import { dialogMotionNow } from '../utils/motion'
 
 // ── Constants ────────────────────────────────────────────────
 const START_HOUR  = 7
 const END_HOUR    = 21
 const HOUR_HEIGHT = 64 // px per hour
+// Smallest week-grid tile: py-1 (8) + two text-xs title lines (30) + time (16) + 2.
+const MIN_TILE_HEIGHT = 56
 const HOURS       = Array.from({ length: END_HOUR - START_HOUR }, (_, i) => START_HOUR + i)
 // Parchment & Brass inversion: the liturgical color of the day owns each
 // tile's left edge; the event *type* is expressed as a quiet ink glyph,
 // not a color fill. All tiles share one parchment surface so the season's
 // hue is the only polychrome element on the calendar.
 const TYPE_META = {
-  service: { label: 'Service', icon: Cross },
-  meeting: { label: 'Meeting', icon: Users },
-  event:   { label: 'Event',   icon: CalendarDays },
+  service: { labelKey: 'sched.type.service', icon: Cross },
+  meeting: { labelKey: 'sched.type.meeting', icon: Users },
+  event:   { labelKey: 'sched.type.event',   icon: CalendarDays },
 }
 
 // Shared tile treatment — surface, text, and the neutral type badge.
@@ -217,31 +222,62 @@ function NowLine() {
 
 // ── Event block ──────────────────────────────────────────────
 // Mass intentions (MI.3) — the calendar side of the intention↔Mass link.
-// Shown as the traditional † with the intention text; the schedule is a
+// The traditional † shows only for an intention for the departed (SP-158),
+// the same rule as the book, the sheet and the packet; the schedule is a
 // read surface for these, the book (/mass-intentions) stays the editor.
-function IntentionLine({ intentions, compact = false }) {
+function DeathMarkedText({ text }) {
+  const { departed, text: body } = splitDeathMark(text)
+  return <>{departed && <><span className="font-display">†</span>{' '}</>}{body}</>
+}
+
+// SP-184: "+1" alone hid every name after the first from anyone not
+// hovering. The visible line stays short; the whole list is read out to
+// assistive technology, and the hover title keeps every name too.
+export function IntentionLine({ intentions, compact = false }) {
+  const { t } = useLocale()
   if (!intentions.length) return null
-  const first = intentions[0].formatted_intention || intentions[0].intention
+  const { departed, text: first } = splitDeathMark(intentions[0].formatted_intention || intentions[0].intention)
   const extra = intentions.length - 1
+  const all = intentions.map(mi => mi.formatted_intention || mi.intention)
   return (
     <p
-      className={`${compact ? 'text-[10px]' : 'text-xs'} mt-0.5 truncate text-brass-700 dark:text-brass-300`}
-      title={intentions.map(mi => mi.formatted_intention || mi.intention).join('\n')}
+      className={`${compact ? 'text-[11px]' : 'text-xs'} mt-0.5 truncate text-brass-700 dark:text-brass-300`}
+      title={all.join('\n')}
+      data-testid="sched-intention-line"
     >
-      <span className="font-display">†</span> {first}{extra > 0 ? ` +${extra}` : ''}
+      <span aria-hidden="true">
+        {departed && <><span className="font-display">†</span>{' '}</>}{first}{extra > 0 ? ` +${extra}` : ''}
+      </span>
+      <span className="sr-only">{t('sched.intentionsAll', { names: all.join('; ') })}</span>
     </p>
   )
 }
 
 function EventBlock({ event, onClick, members, litColor, intentions = [] }) {
+  const { t } = useLocale()
   const meta      = TYPE_META[event.type] ?? TYPE_META.event
   const gridStart = START_HOUR * 60
   const startMins = toMinutes(event.start_time)
   const endMins   = toMinutes(event.end_time)
   const top       = ((startMins - gridStart) / 60) * HOUR_HEIGHT
-  const height    = Math.max(((endMins - startMins) / 60) * HOUR_HEIGHT, 20)
-  const short     = height < 36
-  const tall      = height >= 56
+  // App Review R4 (Beacon): a 40-minute Healing Eucharist (~43px) showed
+  // two title lines and clipped its time. Every tile is at least
+  // MIN_TILE_HEIGHT tall: py-1 padding + two title lines + the time line,
+  // so the time is never hidden (plus the intention line when there is
+  // one). A 30-minute tile may reach a little into the next half hour; a
+  // later tile there paints over it (DOM order), so the later one stays whole.
+  const titleLineBox = 15 // text-xs leading-tight
+  const intentionH   = intentions.length > 0 ? 14 : 0
+  const height    = Math.max(((endMins - startMins) / 60) * HOUR_HEIGHT, MIN_TILE_HEIGHT + intentionH)
+  // Assignee chips (20px) only when two title lines, the time and the
+  // intention line still fit; the title keeps priority over the chips.
+  const hasAssignees = Array.isArray(event.assigned_to) && event.assigned_to.length > 0
+  const showChips    = hasAssignees && height - 8 - 16 - intentionH - 2 * titleLineBox >= 20
+  // How many title lines the tile can actually show: tile height minus its
+  // py-1 padding, the time line, the intention line and the chips, divided
+  // by the line box. Never fewer than 2 (the minimum height guarantees room).
+  const reserved     = 8 + 16 + intentionH + (showChips ? 20 : 0)
+  const titleLines   = Math.max(2, Math.floor((height - reserved) / titleLineBox))
 
   // assigned_to is a JSONB array of member ids; resolve to objects we
   // can render. Cap at 3 visible chips + "+N" overflow.
@@ -260,32 +296,43 @@ function EventBlock({ event, onClick, members, litColor, intentions = [] }) {
   return (
     <motion.button
       onClick={() => onClick(event)}
-      className={`absolute left-1 right-1 rounded-lg px-2 py-1 overflow-hidden text-left cursor-pointer shadow-warm ${TILE_BLOCK} border-l-[3px] ${stripeCls} hover:border-brass-400 dark:hover:border-brass-500/60 transition-colors`}
+      className={`absolute left-1 right-1 rounded-lg px-2 py-1 overflow-hidden text-left cursor-pointer shadow-warm ${TILE_BLOCK} border-l-[3px] ${stripeCls} hover:border-brass-400 dark:hover:border-brass-500/60 lit-ease`}
       style={{ top, height }}
+      title={event.title}
     >
-      <p className={`font-semibold leading-tight truncate flex items-center gap-1 ${TILE_TEXT} ${short ? 'text-[10px]' : 'text-xs'}`}>
-        <TypeIcon size={10} className="shrink-0 text-ink-400 dark:text-parchment-400/60" aria-label={meta.label} />
-        {event.recurrence_parent_id && <Repeat size={10} className="shrink-0 opacity-70" />}
-        <span className="truncate">{event.title}</span>
+      {/* App Review R2/R3 (Beacon): at 200% zoom a day column is ~70px wide
+          and one-line truncation left "Holy ..." / "Morni...". The title
+          wraps at word boundaries (word-break normal, overflow-wrap
+          break-word only as a last resort for a single word wider than the
+          column, hyphens:auto against <html lang> so a long word gets a
+          proper hyphen, not "Euchar/ist"). It may use every line the tile
+          has room for (titleLines) and only clamps after that; the full
+          title stays in the tile's text and its hover title. */}
+      <p className={`font-semibold leading-tight flex items-start gap-1 ${TILE_TEXT} text-xs`}>
+        <TypeIcon size={10} className="shrink-0 mt-px text-ink-400 dark:text-parchment-400/60" aria-label={t(meta.labelKey)} />
+        {event.recurrence_parent_id && <Repeat size={10} className="shrink-0 mt-px opacity-70" />}
+        <span
+          data-testid="tile-title"
+          className="min-w-0 overflow-hidden [display:-webkit-box] [-webkit-box-orient:vertical] [word-break:normal] [overflow-wrap:break-word] hyphens-auto"
+          style={{ WebkitLineClamp: titleLines }}
+        >{event.title}</span>
       </p>
-      {!short && (
-        <p className={`text-[10px] opacity-70 mt-0.5 ${TILE_TEXT}`}>
-          {fmt12(event.start_time)} – {fmt12(event.end_time)}
-        </p>
-      )}
-      {!short && <IntentionLine intentions={intentions} compact />}
-      {tall && assigned.length > 0 && (
+      <p data-testid="tile-time" className={`text-[11px] opacity-70 mt-0.5 whitespace-nowrap ${TILE_TEXT}`}>
+        {fmt12(event.start_time)} – {fmt12(event.end_time)}
+      </p>
+      <IntentionLine intentions={intentions} compact />
+      {showChips && assigned.length > 0 && (
         <div className="flex -space-x-1 mt-1" title={assigned.map(m => m.name).join(', ')}>
           {visible.map(m => (
             <span
               key={m.id}
-              className="w-4 h-4 rounded-full bg-church-900 dark:bg-church-700 ring-1 ring-white dark:ring-ink-900 flex items-center justify-center text-parchment-50 text-[8px] font-bold"
+              className="w-4 h-4 rounded-full bg-church-900 dark:bg-church-700 ring-1 ring-white dark:ring-ink-900 flex items-center justify-center text-parchment-50 text-[11px] font-bold"
             >
               {initials(m.name)}
             </span>
           ))}
           {overflow > 0 && (
-            <span className="w-4 h-4 rounded-full bg-parchment-300 dark:bg-ink-700 ring-1 ring-white dark:ring-ink-900 flex items-center justify-center text-[8px] font-bold text-ink-700 dark:text-parchment-200">
+            <span className="w-4 h-4 rounded-full bg-parchment-300 dark:bg-ink-700 ring-1 ring-white dark:ring-ink-900 flex items-center justify-center text-[11px] font-bold text-ink-700 dark:text-parchment-200">
               +{overflow}
             </span>
           )}
@@ -295,11 +342,12 @@ function EventBlock({ event, onClick, members, litColor, intentions = [] }) {
   )
 }
 
-// ── Mobile event card (used in the day-list under md) ────────
+// ── Mobile event card (used in the day-list under 1440px) ────────
 // Full-width, tap-to-edit. Avoids the absolute time-positioned math
 // that the desktop EventBlock relies on, since the day-list flow is
 // linear top-to-bottom.
 function MobileEventCard({ event, onClick, members, litColor, intentions = [] }) {
+  const { t } = useLocale()
   const meta = TYPE_META[event.type] ?? TYPE_META.event
   const assignedIds = Array.isArray(event.assigned_to) ? event.assigned_to : []
   const assigned = assignedIds
@@ -315,16 +363,16 @@ function MobileEventCard({ event, onClick, members, litColor, intentions = [] })
   return (
     <button
       onClick={() => onClick(event)}
-      className={`block w-full text-left rounded-lg px-3 py-2.5 shadow-warm ${TILE_BLOCK} border-l-[3px] ${stripeCls} hover:border-brass-400 dark:hover:border-brass-500/60 transition-colors`}
+      className={`block w-full text-left rounded-lg px-3 py-2.5 shadow-warm ${TILE_BLOCK} border-l-[3px] ${stripeCls} hover:border-brass-400 dark:hover:border-brass-500/60 lit-ease`}
     >
       <div className="flex items-start justify-between gap-2">
         <p className={`font-semibold leading-tight flex items-center gap-1 ${TILE_TEXT}`}>
           {event.recurrence_parent_id && <Repeat size={11} className="shrink-0 opacity-70" />}
           <span>{event.title}</span>
         </p>
-        <span className={`shrink-0 flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded ${TILE_BADGE}`}>
+        <span className={`shrink-0 flex items-center gap-1 text-[11px] font-semibold px-1.5 py-0.5 rounded ${TILE_BADGE}`}>
           <TypeIcon size={9} className="shrink-0 opacity-70" />
-          {meta.label}
+          {t(meta.labelKey)}
         </span>
       </div>
       <p className={`text-xs opacity-70 mt-0.5 ${TILE_TEXT}`}>
@@ -336,13 +384,13 @@ function MobileEventCard({ event, onClick, members, litColor, intentions = [] })
           {visible.map(m => (
             <span
               key={m.id}
-              className="w-5 h-5 rounded-full bg-church-900 dark:bg-church-700 ring-2 ring-white dark:ring-ink-900 flex items-center justify-center text-parchment-50 text-[9px] font-bold"
+              className="w-5 h-5 rounded-full bg-church-900 dark:bg-church-700 ring-2 ring-white dark:ring-ink-900 flex items-center justify-center text-parchment-50 text-[11px] font-bold"
             >
               {initials(m.name)}
             </span>
           ))}
           {overflow > 0 && (
-            <span className="w-5 h-5 rounded-full bg-parchment-300 dark:bg-ink-700 ring-2 ring-white dark:ring-ink-900 flex items-center justify-center text-[9px] font-bold text-ink-700 dark:text-parchment-200">
+            <span className="w-5 h-5 rounded-full bg-parchment-300 dark:bg-ink-700 ring-2 ring-white dark:ring-ink-900 flex items-center justify-center text-[11px] font-bold text-ink-700 dark:text-parchment-200">
               +{overflow}
             </span>
           )}
@@ -405,8 +453,29 @@ async function readEventInvoices(eventId) {
 }
 
 // ── Add/Edit Modal ───────────────────────────────────────────
+// SP-101: a new event's end time follows its start time (+1 hour) until
+// the secretary types an end time herself. Never wraps past midnight —
+// a 23:30 start ends at 23:59 rather than at 00:30 "before" it began.
+export function defaultEndTime(start) {
+  const m = /^(\d{2}):(\d{2})/.exec(String(start || ''))
+  if (!m) return ''
+  const h = Number(m[1]); const min = Number(m[2])
+  if (h > 23 || min > 59) return ''
+  const total = Math.min(h * 60 + min + 60, 23 * 60 + 59)
+  return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`
+}
+
+// SP-106: end must be after start (same rule as the server). HH:MM strings
+// compare in clock order; a half-typed time is not judged yet.
+export function eventEndNotAfterStart(start, end) {
+  const re = /^\d{2}:\d{2}/
+  if (typeof start !== 'string' || typeof end !== 'string') return false
+  if (!re.test(start) || !re.test(end)) return false
+  return end.slice(0, 5) <= start.slice(0, 5)
+}
+
 export function EventModal({ event, onClose, onSave, onDelete, members, membersFailed = false, groups = [], groupsFailed = false, intentions = [], intentionsFailed = false, onIntentionsChanged }) {
-  const { isAdmin } = useAuth()
+  const { isAdmin, canWrite } = useAuth()
   const { t, tradition } = useLocale()
   const [form, setForm] = useState(() => {
     if (!event) return EMPTY_FORM
@@ -419,6 +488,35 @@ export function EventModal({ event, onClose, onSave, onDelete, members, membersF
     return { ...EMPTY_FORM, ...event, date, assigned_to: normalized }
   })
   const field = k => e => setForm(f => ({ ...f, [k]: e.target.value }))
+  const timeIdBase = useId()
+  const startId = `${timeIdBase}-start`
+  const endId = `${timeIdBase}-end`
+  const titleId = `${timeIdBase}-title`
+  const dateId = `${timeIdBase}-date`
+  const groupId = `${timeIdBase}-group`
+  const everyId = `${timeIdBase}-every`
+  const forId = `${timeIdBase}-for`
+  const headingId = `${timeIdBase}-heading`
+  const timeErrorId = `${timeIdBase}-time-error`
+  const endBeforeStart = eventEndNotAfterStart(form.start_time, form.end_time)
+  // SP-107: Esc closes, focus is trapped and returns to the opener. A
+  // confirm raised over the modal owns Tab and Esc; useDialogFocus stands
+  // down while it is the top dialog (R369-1).
+  const panelRef = useRef(null)
+  useDialogFocus(panelRef, onClose)
+  // The end time is the secretary's once she edits it (or once an
+  // existing event already carries one); until then it tracks start+1h.
+  const endTouched = useRef(!!(event?.end_time))
+  const onStartChange = (e) => {
+    const start = e.target.value
+    setForm(f => (endTouched.current
+      ? { ...f, start_time: start }
+      : { ...f, start_time: start, end_time: defaultEndTime(start) }))
+  }
+  const onEndChange = (e) => {
+    endTouched.current = true
+    setForm(f => ({ ...f, end_time: e.target.value }))
+  }
   // Edit mode is keyed off a persisted id, not mere truthiness — a
   // prefilled "new" event (day-click date or a group deep-link) is an
   // object too, but should still render as New (Repeat option on,
@@ -450,7 +548,7 @@ export function EventModal({ event, onClose, onSave, onDelete, members, membersF
     applyInvoices(forId, result)
   }
   useEffect(() => {
-    if (!isEdit) {
+    if (!isEdit || !canWrite) {
       invoiceGen.current += 1
       setEventInvoices([])
       setInvoicesFailed(false)
@@ -496,7 +594,7 @@ export function EventModal({ event, onClose, onSave, onDelete, members, membersF
   const [conflicts, setConflicts] = useState([])
   const [conflictCheckFailed, setConflictCheckFailed] = useState(false)
   useEffect(() => {
-    const ready = form.date && form.start_time && form.end_time && form.assigned_to?.length
+    const ready = canWrite && form.date && form.start_time && form.end_time && form.assigned_to?.length
     setConflictCheckFailed(false)
     if (!ready) { setConflicts([]); return }
     const params = new URLSearchParams({
@@ -538,7 +636,7 @@ export function EventModal({ event, onClose, onSave, onDelete, members, membersF
   const [unavailableIds, setUnavailableIds] = useState([])
   const [availabilityCheckFailed, setAvailabilityCheckFailed] = useState(false)
   useEffect(() => {
-    const ready = form.date && form.assigned_to?.length
+    const ready = canWrite && form.date && form.assigned_to?.length
     setAvailabilityCheckFailed(false)
     if (!ready) { setUnavailableIds([]); return }
     let cancelled = false
@@ -593,35 +691,35 @@ export function EventModal({ event, onClose, onSave, onDelete, members, membersF
     const data = await res.json().catch(() => ({}))
     setRotationBusy(false)
     if (!res.ok) {
-      toast.error(data.error || `Auto-fill failed (${res.status})`)
+      toast.error(data.error || t('sched.dlg.rotationFailed', { status: res.status }))
       return
     }
     setRotationResult(data)
-    const skipNote = data.skipped > 0 ? `, ${data.skipped} already assigned` : ''
-    toast.success(`Rotation filled across ${data.occurrences} occurrences (${data.assigned} new${skipNote})`)
+    const skipNote = data.skipped > 0 ? t('sched.dlg.rotationSkipped', { n: data.skipped }) : ''
+    toast.success(t('sched.dlg.rotationToast', { occ: data.occurrences, assigned: data.assigned, skip: skipNote }))
   }
 
   const inputCls = 'w-full px-3 py-2 text-sm rounded-lg border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-100 dark:bg-ink-800 text-ink-900 dark:text-parchment-50 focus:outline-none focus:ring-2 focus:ring-brass-400/50'
 
   return (
     <div className={sheetOverlayCls}>
-      <motion.div
-        initial={{ opacity: 0, scale: 0.96, y: 8 }}
-        animate={{ opacity: 1, scale: 1, y: 0 }}
-        exit={{ opacity: 0, scale: 0.96, y: 8 }}
-        transition={{ duration: 0.18 }}
+      <motion.div {...dialogMotionNow()}
         className={sheetPanelCls}
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={headingId}
       >
         <MobileSheetGrip />
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-parchment-300/50 dark:border-brass-900/25">
-          <h2 className="font-bold text-ink-900 dark:text-parchment-50">{isEdit ? 'Edit Event' : 'New Event'}</h2>
-          <button onClick={onClose} className="-m-2 p-2 text-ink-400 hover:text-ink-700 dark:hover:text-parchment-50 transition-colors">
-            <X size={18} />
+          <h2 id={headingId} className="font-bold text-ink-900 dark:text-parchment-50">{!canWrite && isEdit ? t('sched.dlg.view') : isEdit ? t('sched.dlg.edit') : t('sched.dlg.new')}</h2>
+          <button type="button" onClick={onClose} aria-label={t('sched.dlg.close')} className="-m-2 p-2 text-ink-400 hover:text-ink-700 dark:hover:text-parchment-50 transition-colors">
+            <X size={18} aria-hidden="true" />
           </button>
         </div>
 
-        <div className="p-5 space-y-4">
+        <div data-testid="event-modal-scroll" className="flex-1 min-h-0 overflow-y-auto p-5 space-y-4">
           {/* Type selector — quiet parchment pills; the active type is
               marked by a brass edge, not a color fill. */}
           <div className="flex gap-2">
@@ -631,7 +729,8 @@ export function EventModal({ event, onClose, onSave, onDelete, members, membersF
                 <button
                   key={key}
                   type="button"
-                  onClick={() => setForm(f => ({ ...f, type: key }))}
+                  disabled={!canWrite}
+                  onClick={() => canWrite && setForm(f => ({ ...f, type: key }))}
                   className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-colors ${
                     form.type === key
                       ? 'bg-parchment-200 dark:bg-ink-700 border-brass-400 dark:border-brass-500/60 text-ink-900 dark:text-parchment-50'
@@ -639,7 +738,7 @@ export function EventModal({ event, onClose, onSave, onDelete, members, membersF
                   }`}
                 >
                   <TypeIcon size={11} className="shrink-0 opacity-70" />
-                  {meta.label}
+                  {t(meta.labelKey)}
                 </button>
               )
             })}
@@ -647,20 +746,20 @@ export function EventModal({ event, onClose, onSave, onDelete, members, membersF
 
           {/* Title */}
           <div>
-            <label className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1.5">{t('sched.field.title')} *</label>
-            <input value={form.title} onChange={field('title')} placeholder={t('sched.field.titlePh')} aria-label={t('sched.field.titlePh')} className={inputCls} />
+            <label htmlFor={titleId} className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1.5">{t('sched.field.title')} *</label>
+            <input id={titleId} value={form.title} onChange={field('title')} placeholder={t('sched.field.titlePh')} className={inputCls} readOnly={!canWrite} />
           </div>
 
           {/* Date */}
           <div>
-            <label className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1.5">{t('sched.field.date')} *</label>
-            <input type="date" value={form.date} onChange={field('date')} className={inputCls} />
+            <label htmlFor={dateId} className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1.5">{t('sched.field.date')} *</label>
+            <input id={dateId} type="date" value={form.date} onChange={field('date')} className={inputCls} readOnly={!canWrite} />
             {/* Liturgical context for this date — purely informational.
                 Fades in once the /api/liturgical fetch resolves; absent
                 on dates outside the algorithm's coverage. */}
             {liturgical?.season && (
-              <div className={`mt-2 flex items-center gap-2 px-2.5 py-1.5 rounded-md border text-[11px] font-medium ${LIT_COLOR_TEXT[liturgical.color] ?? LIT_COLOR_TEXT.White}`}>
-                <span className={`w-2 h-2 rounded-full shrink-0 ${LIT_COLOR_DOT[liturgical.color] ?? 'bg-parchment-300'}`} />
+              <div className={`mt-2 flex items-center gap-2 px-2.5 py-1.5 rounded-md border text-[11px] font-medium lit-ease ${LIT_COLOR_TEXT[liturgical.color] ?? LIT_COLOR_TEXT.White}`}>
+                <span className={`w-2 h-2 rounded-full shrink-0 lit-ease ${LIT_COLOR_DOT[liturgical.color] ?? 'bg-parchment-300'}`} />
                 <span className="font-semibold">{seasonLabel(t, liturgical.season, { tradition, block: liturgical.ordinary_block })}</span>
                 {liturgical.feast_name && (
                   <span className="opacity-75">· {liturgical.feast_name}</span>
@@ -672,28 +771,34 @@ export function EventModal({ event, onClose, onSave, onDelete, members, membersF
           {/* Times */}
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1.5">{t('sched.field.start')} *</label>
-              <input type="time" value={form.start_time} onChange={field('start_time')} className={inputCls} />
+              <label htmlFor={startId} className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1.5">{t('sched.field.start')} *</label>
+              <input id={startId} type="time" value={form.start_time} onChange={onStartChange} className={inputCls} readOnly={!canWrite} />
             </div>
             <div>
-              <label className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1.5">{t('sched.field.end')} *</label>
-              <input type="time" value={form.end_time} onChange={field('end_time')} className={inputCls} />
+              <label htmlFor={endId} className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1.5">{t('sched.field.end')} *</label>
+              <input id={endId} type="time" value={form.end_time} onChange={onEndChange} aria-invalid={endBeforeStart || undefined} aria-describedby={endBeforeStart ? timeErrorId : undefined} className={inputCls} readOnly={!canWrite} />
             </div>
           </div>
+          {endBeforeStart && (
+            <p id={timeErrorId} role="alert" data-testid="event-end-before-start" className="-mt-2 text-xs font-medium text-rose-800 dark:text-rose-300">
+              {t('sched.endBeforeStart')}
+            </p>
+          )}
 
           {/* Group — optional. Links this event to a ministry / life
               group / committee so the Schedule page can filter to it
               and the Groups page can deep-link "create event". */}
           <div>
-            <label className="flex items-center gap-1.5 text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1.5">
-              <Users2 size={12} /> Group <span className="font-normal text-ink-400 dark:text-parchment-300/70">(optional)</span>
+            <label htmlFor={groupId} className="flex items-center gap-1.5 text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1.5">
+              <Users2 size={12} aria-hidden="true" /> {t('sched.dlg.group')} <span className="font-normal text-ink-400 dark:text-parchment-300/70">{t('sched.dlg.optional')}</span>
             </label>
             <select
+              id={groupId}
               value={form.group_id ?? ''}
               onChange={e => setForm(f => ({ ...f, group_id: e.target.value }))}
               className={inputCls}
             >
-              <option value="">No group</option>
+              <option value="">{t('sched.dlg.noGroup')}</option>
               {groups.map(g => (
                 <option key={g.id} value={g.id}>{g.name}</option>
               ))}
@@ -723,7 +828,7 @@ export function EventModal({ event, onClose, onSave, onDelete, members, membersF
           {isEdit && (invoicesFailed || eventInvoices.length > 0) && (
             <div className="px-2.5 py-2 rounded-md border border-brass-200/70 dark:border-brass-800/40 bg-brass-50 dark:bg-brass-900/20">
               <p className="text-[11px] font-semibold uppercase tracking-widest text-brass-700 dark:text-brass-300 mb-1">
-                Offerings &amp; fees
+                {t('sched.dlg.fees')}
               </p>
               {invoicesFailed ? (
                 <LoadFailure variant="strip" body={t('sched.invoicesUnread')} onRetry={retryInvoices} />
@@ -738,11 +843,11 @@ export function EventModal({ event, onClose, onSave, onDelete, members, membersF
                         {inv.invoice_no ? `${inv.invoice_no} · ` : ''}{inv.title}
                         <span className="text-ink-500 dark:text-parchment-300/70">
                           {' — '}
-                          {inv.status === 'paid' ? 'settled'
-                            : inv.status === 'waived' ? 'waived'
-                            : inv.status === 'draft' ? 'draft'
+                          {inv.status === 'paid' ? t('sched.dlg.settled')
+                            : inv.status === 'waived' ? t('sched.dlg.waived')
+                            : inv.status === 'draft' ? t('sched.dlg.draft')
                             : bal == null ? t('money.unavailable')
-                            : `$${bal.toFixed(2)} remaining`}
+                            : t('sched.dlg.remaining', { amount: `$${bal.toFixed(2)}` })}
                         </span>
                       </li>
                     )
@@ -750,7 +855,7 @@ export function EventModal({ event, onClose, onSave, onDelete, members, membersF
                 </ul>
               )}
               <Link to="/offerings" className="mt-1 inline-block text-[11px] font-semibold text-brass-700 dark:text-brass-300 hover:underline">
-                Open the offerings workbench →
+                {t('sched.dlg.openWorkbench')}
               </Link>
             </div>
           )}
@@ -758,7 +863,7 @@ export function EventModal({ event, onClose, onSave, onDelete, members, membersF
           {/* Assigned members — drives the personal calendar feed */}
           <div>
             <label className="flex items-center gap-1.5 text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1.5">
-              <Users size={12} /> Assigned Members
+              <Users size={12} aria-hidden="true" /> {t('sched.dlg.assigned')}
             </label>
             <MemberPicker
               failed={membersFailed}
@@ -766,10 +871,11 @@ export function EventModal({ event, onClose, onSave, onDelete, members, membersF
               value={form.assigned_to}
               onChange={(ids) => setForm(f => ({ ...f, assigned_to: ids }))}
               linkProfiles
+              readOnly={!canWrite}
+              placeholder={t('sched.dlg.searchMembers')}
             />
             <p className="mt-1.5 text-[11px] text-ink-500 dark:text-parchment-300/70">
-              Assigned members see this on their calendar feed and get a
-              serving reminder before the event.
+              {t('sched.dlg.assignedHelp')}
             </p>
           </div>
 
@@ -781,7 +887,7 @@ export function EventModal({ event, onClose, onSave, onDelete, members, membersF
               <div className="flex items-center gap-1.5 mb-1.5">
                 <AlertTriangle size={13} className="text-rose-700 dark:text-rose-300 shrink-0" />
                 <span className="text-xs font-semibold text-rose-700 dark:text-rose-200">
-                  {conflicts.length === 1 ? 'Schedule conflict' : `${conflicts.length} schedule conflicts`}
+                  {conflicts.length === 1 ? t('sched.dlg.conflict1') : t('sched.dlg.conflictN', { n: conflicts.length })}
                 </span>
               </div>
               <ul className="space-y-1.5">
@@ -791,7 +897,7 @@ export function EventModal({ event, onClose, onSave, onDelete, members, membersF
                       {c.conflicting_members.map(m => m.name).join(', ')}
                     </span>
                     <span className="text-ink-500 dark:text-parchment-300/70">
-                      {' '}also assigned to{' '}
+                      {' '}{t('sched.dlg.alsoAssigned')}{' '}
                     </span>
                     <span className="font-medium">{c.title}</span>
                     <span className="text-ink-500 dark:text-parchment-300/70">
@@ -829,15 +935,15 @@ export function EventModal({ event, onClose, onSave, onDelete, members, membersF
               <div className="flex items-center gap-1.5 mb-1">
                 <AlertTriangle size={13} className="text-amber-600 dark:text-amber-300 shrink-0" />
                 <span className="text-xs font-semibold text-amber-800 dark:text-amber-200">
-                  {unavailableIds.length === 1 ? 'Member unavailable' : `${unavailableIds.length} members unavailable`}
+                  {unavailableIds.length === 1 ? t('sched.dlg.unavailable1') : t('sched.dlg.unavailableN', { n: unavailableIds.length })}
                 </span>
               </div>
               <p className="text-[11px] text-ink-700 dark:text-parchment-200 leading-snug">
                 <span className="font-semibold">
-                  {unavailableIds.map(id => members.find(m => m.id === id)?.name ?? `Member #${id}`).join(', ')}
+                  {unavailableIds.map(id => members.find(m => m.id === id)?.name ?? t('sched.dlg.memberN', { id })).join(', ')}
                 </span>
                 <span className="text-ink-500 dark:text-parchment-300/70">
-                  {' '}marked themselves unavailable on this date.
+                  {' '}{t('sched.dlg.markedUnavailable')}
                 </span>
               </p>
             </div>
@@ -850,7 +956,7 @@ export function EventModal({ event, onClose, onSave, onDelete, members, membersF
             <div>
               <label className="flex items-center gap-2 text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-2">
                 <Repeat size={12} />
-                <span>Repeat</span>
+                <span>{t('sched.dlg.repeat')}</span>
                 <input
                   type="checkbox"
                   className="ml-auto h-4 w-4 accent-church-700"
@@ -866,27 +972,29 @@ export function EventModal({ event, onClose, onSave, onDelete, members, membersF
               {form.recurrence && (
                 <div className="grid grid-cols-2 gap-3">
                   <div>
-                    <label className="block text-[11px] font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">Every</label>
+                    <label htmlFor={everyId} className="block text-[11px] font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">{t('sched.dlg.every')}</label>
                     <select
+                      id={everyId}
                       value={form.recurrence.interval}
                       onChange={(e) => setForm(f => ({ ...f, recurrence: { ...f.recurrence, interval: Number(e.target.value) } }))}
                       className={inputCls}
                     >
-                      <option value={1}>1 week</option>
-                      <option value={2}>2 weeks</option>
-                      <option value={3}>3 weeks</option>
-                      <option value={4}>4 weeks</option>
+                      <option value={1}>{t('sched.dlg.week1')}</option>
+                      <option value={2}>{t('sched.dlg.weekN', { n: 2 })}</option>
+                      <option value={3}>{t('sched.dlg.weekN', { n: 3 })}</option>
+                      <option value={4}>{t('sched.dlg.weekN', { n: 4 })}</option>
                     </select>
                   </div>
                   <div>
-                    <label className="block text-[11px] font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">For</label>
+                    <label htmlFor={forId} className="block text-[11px] font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">{t('sched.dlg.for')}</label>
                     <select
+                      id={forId}
                       value={form.recurrence.count}
                       onChange={(e) => setForm(f => ({ ...f, recurrence: { ...f.recurrence, count: Number(e.target.value) } }))}
                       className={inputCls}
                     >
                       {[2, 4, 6, 8, 10, 12, 16, 20, 26].map(n => (
-                        <option key={n} value={n}>{n} occurrences</option>
+                        <option key={n} value={n}>{t('sched.dlg.occurrences', { n })}</option>
                       ))}
                     </select>
                   </div>
@@ -894,25 +1002,17 @@ export function EventModal({ event, onClose, onSave, onDelete, members, membersF
               )}
             </div>
           )}
-        </div>
 
-          {/* Rotation auto-fill (VS.1b) — only when editing a recurring
-              series. Server walks FUTURE occurrences and round-robins
-              the ordered list onto each. The current occurrence's
-              `assigned_to` may also change server-side; the modal form
-              shown is the pre-fill snapshot, so we leave the rest of
-              the form alone and let the user re-open if they want to
-              see/edit the updated assignees on this row. */}
-          {isEdit && event?.recurrence_parent_id && (
+          {/* Rotation auto-fill (VS.1b) — writers only; Viewers see the
+              assigned list above and do not rebalance a series. */}
+          {canWrite && isEdit && event?.recurrence_parent_id && (
             <div>
               <label className="flex items-center gap-2 text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-2">
                 <Repeat size={12} />
-                <span>Auto-fill rotation</span>
+                <span>{t('sched.dlg.rotation')}</span>
               </label>
               <p className="text-[11px] text-ink-500 dark:text-parchment-300/70 leading-snug mb-2">
-                Pick members in the order they should serve. Each future
-                occurrence in this series gets the next person on the list
-                (anyone already assigned is skipped).
+                {t('sched.dlg.rotationHelp')}
               </p>
               <OrderedMemberPicker
                 members={members}
@@ -923,13 +1023,16 @@ export function EventModal({ event, onClose, onSave, onDelete, members, membersF
                 <div className="text-[11px] text-ink-500 dark:text-parchment-300/70 min-w-0">
                   {rotationResult ? (
                     <span className="text-brass-700 dark:text-brass-300 font-medium">
-                      Filled {rotationResult.occurrences} occurrences ({rotationResult.assigned} new
-                      {rotationResult.skipped > 0 ? `, ${rotationResult.skipped} already assigned` : ''})
+                      {t('sched.dlg.rotationFilled', {
+                        occ: rotationResult.occurrences,
+                        assigned: rotationResult.assigned,
+                        skip: rotationResult.skipped > 0 ? t('sched.dlg.rotationSkipped', { n: rotationResult.skipped }) : '',
+                      })}
                     </span>
                   ) : rotationIds.length === 0 ? (
-                    'Add at least one member to enable auto-fill.'
+                    t('sched.dlg.rotationNeedOne')
                   ) : (
-                    `Will rotate ${rotationIds.length} member${rotationIds.length === 1 ? '' : 's'} across all future occurrences.`
+                    rotationIds.length === 1 ? t('sched.dlg.rotationWill1') : t('sched.dlg.rotationWillN', { n: rotationIds.length })
                   )}
                 </div>
                 <button
@@ -938,39 +1041,35 @@ export function EventModal({ event, onClose, onSave, onDelete, members, membersF
                   disabled={rotationBusy || rotationIds.length === 0}
                   className="px-3 py-2 text-xs font-semibold rounded-lg border border-church-900 dark:border-parchment-100 text-church-900 dark:text-parchment-100 hover:bg-church-900 hover:text-parchment-50 dark:hover:bg-parchment-100 dark:hover:text-church-900 transition-colors disabled:opacity-40 shrink-0"
                 >
-                  {rotationBusy ? 'Filling…' : 'Auto-fill rotation'}
+                  {rotationBusy ? t('sched.dlg.filling') : t('sched.dlg.rotation')}
                 </button>
               </div>
             </div>
           )}
+        </div>
 
         {/* Footer */}
         <div className="flex items-center justify-between px-5 py-4 border-t border-parchment-300/50 dark:border-brass-900/25">
           <div className="flex items-center gap-3">
-            {isEdit && (
+            {canWrite && isEdit && (
               <button onClick={() => onDelete(event.id)} className="flex items-center gap-1.5 text-xs font-medium text-rose-500 hover:text-rose-700 transition-colors">
-                <Trash2 size={13} /> Delete
+                <Trash2 size={13} aria-hidden="true" /> {t('sched.dlg.delete')}
               </button>
             )}
-            {isEdit && event?.recurrence_parent_id && (
+            {canWrite && isEdit && event?.recurrence_parent_id && (
               <button onClick={() => onDelete(event.id, 'series')} className="flex items-center gap-1.5 text-xs font-medium text-rose-500 hover:text-rose-700 transition-colors">
-                <Repeat size={13} /> Delete series
+                <Repeat size={13} aria-hidden="true" /> {t('sched.dlg.deleteSeries')}
               </button>
             )}
-            {/* Take attendance for THIS service. The desk already has the
-                service open; without this it leaves for Check-in and finds
-                the same one again in a thirty-day dropdown, and for a Mass
-                that has already happened it could not be reached at all.
-                `?event=` is the check-in page's source of truth, so the
-                service on that screen is the service written to. Not gated on
-                edit rights — taking attendance is not editing the schedule. */}
-            {isEdit && (
+            {/* Take attendance for THIS service. Check-in is outside Viewer
+                scope, so only writers see the hop. */}
+            {canWrite && isEdit && (
               <Link
                 to={`/checkin?event=${event.id}`}
                 className="flex items-center gap-1.5 text-xs font-medium text-ink-500 dark:text-parchment-300/70 hover:text-ink-900 dark:hover:text-parchment-50 transition-colors"
-                title="Open check-in for this service"
+                title={t('sched.dlg.checkinTitle')}
               >
-                <UserCheck size={13} /> Check-in
+                <UserCheck size={13} aria-hidden="true" /> {t('sched.dlg.checkin')}
               </Link>
             )}
             {/* This event's audit trail (AUD.4) — admin-only, edit mode
@@ -979,33 +1078,35 @@ export function EventModal({ event, onClose, onSave, onDelete, members, membersF
               <Link
                 to={`/audit?entity_type=calendar_event&entity_id=${event.id}`}
                 className="flex items-center gap-1.5 text-xs font-medium text-ink-500 dark:text-parchment-300/70 hover:text-ink-900 dark:hover:text-parchment-50 transition-colors"
-                title="See every change made to this schedule entry"
+                title={t('sched.dlg.historyTitle')}
               >
-                <History size={13} /> History
+                <History size={13} aria-hidden="true" /> {t('sched.dlg.history')}
               </Link>
             )}
           </div>
           <div className="flex items-center gap-2 flex-wrap justify-end">
             <button onClick={onClose} className="text-sm text-ink-400 hover:text-ink-700 dark:hover:text-parchment-50 transition-colors px-3 py-1.5">
-              Cancel
+              {canWrite ? t('sched.dlg.cancel') : t('sched.dlg.close')}
             </button>
-            {isEdit && event?.recurrence_parent_id && (
+            {canWrite && isEdit && event?.recurrence_parent_id && (
               <button
                 onClick={() => onSave(form, 'following')}
-                disabled={!form.title.trim() || !form.date || !form.start_time || !form.end_time}
-                title="Apply this edit to this occurrence and every later one in the series"
+                disabled={!form.title.trim() || !form.date || !form.start_time || !form.end_time || endBeforeStart}
+                title={t('sched.dlg.saveFollowingTitle')}
                 className="px-3 py-2 text-xs font-semibold rounded-lg border border-church-900 dark:border-parchment-100 text-church-900 dark:text-parchment-100 hover:bg-church-900 hover:text-parchment-50 dark:hover:bg-parchment-100 dark:hover:text-church-900 transition-colors disabled:opacity-40"
               >
-                Save & apply to following
+                {t('sched.dlg.saveFollowing')}
               </button>
             )}
-            <button
-              onClick={() => onSave(form)}
-              disabled={!form.title.trim() || !form.date || !form.start_time || !form.end_time}
-              className="px-4 py-2 text-sm font-semibold rounded-lg bg-church-900 dark:bg-parchment-100 text-parchment-50 dark:text-church-900 hover:opacity-90 transition-opacity disabled:opacity-40"
-            >
-              {conflicts.length > 0 ? (isEdit ? 'Save anyway' : 'Add anyway') : (isEdit ? 'Save' : 'Add Event')}
-            </button>
+            {canWrite && (
+              <button
+                onClick={() => onSave(form)}
+                disabled={!form.title.trim() || !form.date || !form.start_time || !form.end_time || endBeforeStart}
+                className="px-4 py-2 text-sm font-semibold rounded-lg bg-church-900 dark:bg-parchment-100 text-parchment-50 dark:text-church-900 hover:opacity-90 transition-opacity disabled:opacity-40"
+              >
+                {conflicts.length > 0 ? (isEdit ? t('sched.dlg.saveAnyway') : t('sched.dlg.addAnyway')) : (isEdit ? t('sched.dlg.save') : t('sched.addEvent'))}
+              </button>
+            )}
           </div>
         </div>
       </motion.div>
@@ -1050,7 +1151,7 @@ export default function Schedule() {
   const pendingSelectDate = useRef(null)
   const eventResolveGen = useRef(0)
   const { canWrite, user } = useAuth()
-  // SP-021: intentions and groups are not in the Viewer's role table.
+  // SP-021: groups stay outside Viewer scope. Intentions are readable (José Oct 28).
   const isViewer = user?.role === 'viewer'
   const { t, dateLocale } = useLocale()
   const toast = useToast()
@@ -1106,7 +1207,7 @@ export default function Schedule() {
     const start = toDateStr(weekStart)
     const end   = toDateStr(weekEnd)
     setIntentionsFailed(false)
-    if (isViewer) return Promise.resolve()
+    // José Oct 28 2026: Viewers may SEE intentions (SP-271). Fetch for every role.
     return fetch(apiUrl(`/api/mass-intentions/weekly?start=${start}&end=${end}`))
       .then(async (r) => {
         if (!r.ok) throw new Error('weekly')
@@ -1125,7 +1226,7 @@ export default function Schedule() {
     const end   = toDateStr(weekEnd)
     setIntentionsFailed(false)
     setIntentions([])
-    if (isViewer) return () => { cancelled = true }
+    // SP-271: Viewers fetch weekly intentions too (read-only).
     fetch(apiUrl(`/api/mass-intentions/weekly?start=${start}&end=${end}`))
       .then(async (r) => {
         if (!r.ok) throw new Error('weekly')
@@ -1273,9 +1374,17 @@ export default function Schedule() {
     writeEventParam(id)
   }
 
+  // React Router 7 applies setSearchParams inside startTransition, so
+  // a plain setModal(null) committed one render before ?event= left the
+  // URL. In that gap the page showed "closed" while the URL still named
+  // the Mass (a refresh — or the resolve effect re-running on a week
+  // refetch — would reopen it). Put both updates in the same transition
+  // so the detail and the URL clear in one commit.
   const closeEvent = () => {
-    setModal(null)
-    clearEventParam()
+    startTransition(() => {
+      setModal(null)
+      clearEventParam()
+    })
   }
 
   // Open(eventId): ?event=<positive-integer> is the source of truth for
@@ -1378,16 +1487,42 @@ export default function Schedule() {
     // Hand the new event back; do not leave the secretary on the week.
     if (!isEdit && isIntentionReturn(searchParams.get(RETURN_PARAM))) {
       const created = await res.json().catch(() => null)
-      const id = parseScheduleEventId(created?.id)
-      const date = calendarDay(created?.date) || calendarDay(form.date)
-      if (id != null) {
-        navigate(intentionResumeHref({
-          eventId: id,
-          date,
-          nonce: searchParams.get(DRAFT_PARAM),
-        }))
+      // Only a 201 names a created Mass. Another 2xx is not that confirmation:
+      // do not announce it, do not select it, and do not post it again.
+      if (res.status !== 201) {
+        toast.error(t('sched.massUnconfirmed'))
+        closeEvent()
+        load()
         return
       }
+      const id = parseCreatedMassId(created?.id)
+      const date = calendarDay(created?.date) || calendarDay(form.date)
+      if (id == null) {
+        // The 201 landed, but this screen cannot name the Mass. Say that.
+        // Do not say the save failed, and do not say it was selected.
+        toast.error(t('sched.massReturnFailed'))
+        closeEvent()
+        load()
+        return
+      }
+      const text = (value) => (typeof value === 'string' ? value : '')
+      attachCreatedMass(searchParams.get(DRAFT_PARAM), {
+        id,
+        title: text(created?.title),
+        date: date || text(created?.date),
+        start_time: text(created?.start_time) || text(form.start_time),
+        end_time: text(created?.end_time),
+        type: text(created?.type) || text(form.type),
+      })
+      toast.success(t('sched.massAdded', {
+        date: formatParishDay(date, dateLocale, user?.organization?.timezone),
+      }))
+      navigate(intentionResumeHref({
+        eventId: id,
+        date,
+        nonce: searchParams.get(DRAFT_PARAM),
+      }))
+      return
     }
     closeEvent()
     load()
@@ -1400,8 +1535,8 @@ export default function Schedule() {
     // are protected now — a series goes to the Archive as one entry, so
     // "removed" was true and is no longer the whole truth.
     const prompt = scope === 'series'
-      ? { title: 'Delete the whole recurring series?', body: 'Every linked occurrence is removed, not just this one.', confirmLabel: 'Delete series', recoverable: true }
-      : { title: 'Delete this scheduled event?', confirmLabel: 'Delete event', recoverable: true }
+      ? { title: t('sched.dlg.deleteSeriesTitle'), body: t('sched.dlg.deleteSeriesBody'), confirmLabel: t('sched.dlg.deleteSeries'), recoverable: true }
+      : { title: t('sched.dlg.deleteEventTitle'), confirmLabel: t('sched.dlg.deleteEvent'), recoverable: true }
     if (!(await ask(prompt))) return
     const url = scope === 'series'
       ? apiUrl(`/api/calendar/${id}?scope=series`)
@@ -1458,13 +1593,12 @@ export default function Schedule() {
   const intentionDraftNonce = searchParams.get(DRAFT_PARAM)
 
   return (
-    <PageWrapper className="flex flex-col h-full max-w-full">
+    <PageWrapper type="list" className="flex flex-col h-full max-w-full">
 
       {/* ── Toolbar ── */}
       <div className="flex items-center justify-between mb-5 gap-4 flex-wrap">
         <div>
-          <h1 className="font-display text-3xl font-semibold text-ink-900 dark:text-parchment-50 tracking-tight">{t('sched.title')}</h1>
-          <p className="text-sm text-ink-500 dark:text-parchment-300/70 mt-0.5">{weekLabel}</p>
+          <PageHeader title={t('sched.title')} subtitle={weekLabel} />
           {returningToIntention && (
             <Link
               to={intentionResumeHref({ date: intentionBackDate, nonce: intentionDraftNonce })}
@@ -1561,8 +1695,22 @@ export default function Schedule() {
         </div>
       )}
 
-      {/* ── Calendar (desktop, ≥md) ── */}
-      <div className="flex-1 bg-parchment-50 dark:bg-ink-900/90 rounded-2xl border border-parchment-300/50 dark:border-brass-900/30 shadow-warm-md overflow-hidden hidden md:flex flex-col">
+      {/* ── Calendar (desktop, ≥1440px: the `weekgrid` screen) ──
+          App Review R3 (Beacon): beside the pinned 240px sidebar the seven
+          day columns only get a readable ~130px at 1280 CSS px. Below that
+          (tablets, small laptops, and 200-250% zoom on a desktop: a 1920px
+          window is 960/768 CSS px) a column was ~45-90px and titles like
+          "Eucharistic" could only break mid-word. Below the grid screen the
+          day agenda (full titles, page scroll) is used instead.
+          App Review R4 (Beacon): at exactly 1280 CSS px (150% zoom on a
+          1920 screen, or a 1280 laptop at 100%) the grid still clamped
+          "Choral Eucharist, Rit…", so the grid now starts at 1440px. */}
+      {/* App Review R3 (Beacon): at 250% zoom on a short window the toolbar
+          and notices took nearly all of the height, and flex-1 +
+          overflow-hidden let this card shrink to a ~60px scroll strip. A
+          min-height keeps a usable slice of the grid; the page (<main>
+          scrolls) takes the rest instead of a sliver of nested scroll. */}
+      <div data-testid="week-grid" className="flex-1 min-h-[24rem] bg-parchment-50 dark:bg-ink-900/90 rounded-2xl border border-parchment-300/50 dark:border-brass-900/30 shadow-warm-md overflow-hidden hidden weekgrid:flex flex-col">
 
         {/* Day headers */}
         <div className="flex border-b border-parchment-300/50 dark:border-brass-900/25 shrink-0">
@@ -1591,8 +1739,8 @@ export default function Schedule() {
                 {/* Dated-but-unassigned intentions for this day (MI.3) */}
                 {unassignedIntentionsOnDay(day).length > 0 && (
                   <span
-                    className="mt-0.5 inline-block text-[10px] font-semibold text-brass-700 dark:text-brass-300"
-                    title={`${unassignedIntentionsOnDay(day).length} intention(s) awaiting a Mass:\n${unassignedIntentionsOnDay(day).map(mi => mi.formatted_intention || mi.intention).join('\n')}`}
+                    className="mt-0.5 inline-block text-[11px] font-semibold text-brass-700 dark:text-brass-300"
+                    title={`${t('sched.awaitingTitle', { n: unassignedIntentionsOnDay(day).length })}\n${unassignedIntentionsOnDay(day).map(mi => mi.formatted_intention || mi.intention).join('\n')}`}
                   >
                     <span className="font-display">†</span> {unassignedIntentionsOnDay(day).length}
                   </span>
@@ -1611,7 +1759,7 @@ export default function Schedule() {
               {HOURS.map(h => (
                 <div
                   key={h}
-                  className="absolute right-2 text-[10px] font-medium text-ink-500 dark:text-parchment-300/70 -translate-y-2.5"
+                  className="absolute right-2 text-[11px] font-medium text-ink-500 dark:text-parchment-300/70 -translate-y-2.5"
                   style={{ top: (h - START_HOUR) * HOUR_HEIGHT }}
                 >
                   {h === 12 ? '12pm' : h > 12 ? `${h - 12}pm` : `${h}am`}
@@ -1672,8 +1820,12 @@ export default function Schedule() {
         </div>
       </div>
 
-      {/* ── Mobile day-list (<md) ── */}
-      <div className="md:hidden flex-1 bg-parchment-50 dark:bg-ink-900/90 rounded-2xl border border-parchment-300/50 dark:border-brass-900/30 shadow-warm-md overflow-hidden flex flex-col">
+      {/* ── Day agenda (<1440px: phones, tablets, laptops, zoomed desktops) ── */}
+      {/* App Review R3 (Beacon): at 300% zoom this card was squeezed to a
+          ~60px nested scroll area. Below 1440px it now sizes to its content
+          (flex 1 0 auto: grows to fill, never shrinks below its events) and
+          the page scrolls, so the agenda is never a scroll-in-a-scroll. */}
+      <div data-testid="day-agenda" className="weekgrid:hidden flex-[1_0_auto] bg-parchment-50 dark:bg-ink-900/90 rounded-2xl border border-parchment-300/50 dark:border-brass-900/30 shadow-warm-md overflow-hidden flex flex-col">
         {/* Day picker — pill row, current day highlighted, dot when day has events */}
         <div className="flex border-b border-parchment-300/50 dark:border-brass-900/25 shrink-0">
           {weekDays.map((day, i) => {
@@ -1690,7 +1842,7 @@ export default function Schedule() {
                     : 'hover:bg-parchment-100 dark:hover:bg-ink-800/60'
                 }`}
               >
-                <p className={`text-[10px] font-semibold uppercase tracking-wider ${
+                <p className={`text-[11px] font-semibold uppercase tracking-wider ${
                   isSelected
                     ? 'text-parchment-50/90 dark:text-church-900/80'
                     : 'text-ink-500 dark:text-parchment-300/70'
@@ -1712,8 +1864,10 @@ export default function Schedule() {
           })}
         </div>
 
-        {/* Events for the selected day */}
-        <div className="flex-1 overflow-y-auto p-3 space-y-2">
+        {/* Events for the selected day. App Review R4 (Beacon): pb-24 so the
+            last card scrolls clear of the floating assistant button
+            (bottom-5 + 3.5rem) instead of sitting under it at 250-300%. */}
+        <div className="flex-1 p-3 pb-24 space-y-2">
           {(() => {
             const day = weekDays[selectedDayIndex]
             const dayEvents = eventsOnDay(day)
@@ -1742,10 +1896,9 @@ export default function Schedule() {
                     to={`/mass-intentions?date=${toDateStr(day)}`}
                     className="block px-3 py-2 rounded-lg border border-brass-200/70 dark:border-brass-800/40 bg-brass-50 dark:bg-brass-900/20 text-xs text-brass-700 dark:text-brass-300"
                   >
-                    <span className="font-display">†</span>{' '}
-                    {(unassignedIntentionsOnDay(day)[0].formatted_intention || unassignedIntentionsOnDay(day)[0].intention)}
-                    {unassignedIntentionsOnDay(day).length > 1 ? ` +${unassignedIntentionsOnDay(day).length - 1} more` : ''}
-                    <span className="block mt-0.5 text-[10px] opacity-80">{t('sched.awaitingDay')}</span>
+                    <DeathMarkedText text={unassignedIntentionsOnDay(day)[0].formatted_intention || unassignedIntentionsOnDay(day)[0].intention} />
+                    {unassignedIntentionsOnDay(day).length > 1 ? ` ${t('sched.moreN', { n: unassignedIntentionsOnDay(day).length - 1 })}` : ''}
+                    <span className="block mt-0.5 text-[11px] opacity-80">{t('sched.awaitingDay')}</span>
                   </Link>
                 )}
                 {dayEvents.map(ev => (

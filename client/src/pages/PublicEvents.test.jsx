@@ -45,7 +45,7 @@ const HARD_EN = [
   'Sync with Apple Calendar',
   'No upcoming public events scheduled',
   'Check back soon, or contact the church',
-  'Powered by OpenChurch',
+  'Powered by ScaffoldLabs',
 ]
 
 const EVENTS_KEYS = [
@@ -134,8 +134,10 @@ describe('PublicEvents chrome is translated', () => {
     expect(screen.queryByText(STRINGS.en['events.calendarHelp'])).toBeNull()
     expect(screen.getByRole('link', { name: STRINGS.es['events.subscribe'] })).toBeInTheDocument()
     expect(screen.queryByRole('link', { name: STRINGS.en['events.subscribe'] })).toBeNull()
+    // Brand credit matches church.powered (ES: Con tecnología de ScaffoldLabs).
     expect(screen.getByText(STRINGS.es['events.powered'])).toBeInTheDocument()
-    expect(screen.queryByText(STRINGS.en['events.powered'])).toBeNull()
+    expect(STRINGS.es['events.powered']).toBe(STRINGS.es['church.powered'])
+    expect(STRINGS.es['events.powered']).not.toBe(STRINGS.en['events.powered'])
     // Parish-supplied content is still the API text — not inventively translated.
     expect(screen.getByRole('heading', { name: 'Parish Picnic' })).toBeInTheDocument()
     expect(screen.getByText('Hospitality')).toBeInTheDocument()
@@ -208,11 +210,14 @@ describe('PublicEvents chrome is translated', () => {
 
   it('i18n strings and the component wiring cannot reintroduce hard-EN chrome', () => {
     const jsx = stripComments(EVENTS_SRC)
+    const SAME_IN_BOTH = new Set(['events.powered'])
     for (const key of EVENTS_KEYS) {
       expect(EVENTS_SRC, key).toMatch(new RegExp(`t\\('${key.replace('.', '\\.')}'`))
       expect(STRINGS.en[key], key).toBeTruthy()
       expect(STRINGS.es[key], key).toBeTruthy()
-      expect(STRINGS.es[key], key).not.toBe(STRINGS.en[key])
+      if (!SAME_IN_BOTH.has(key)) {
+        expect(STRINGS.es[key], key).not.toBe(STRINGS.en[key])
+      }
     }
     expect(EVENTS_SRC).toMatch(/useLocale\(/)
     expect(EVENTS_SRC).toMatch(/setPublicLocale/)
@@ -229,12 +234,13 @@ describe('PublicEvents chrome is translated', () => {
     expect(STRINGS.en['events.notFound']).toBe('Church not found')
     expect(STRINGS.en['events.title']).toBe('Upcoming events')
     expect(STRINGS.en['events.subscribe']).toBe('Subscribe')
-    expect(STRINGS.en['events.powered']).toBe('Powered by OpenChurch')
+    expect(STRINGS.en['events.powered']).toBe('Powered by ScaffoldLabs')
     expect(STRINGS.en['events.notFoundBefore']).toMatch(/church at/i)
     expect(STRINGS.es['events.notFound']).toMatch(/iglesia/i)
     expect(STRINGS.es['events.title']).toMatch(/evento/i)
     expect(STRINGS.es['events.subscribe']).toMatch(/suscrib/i)
-    expect(STRINGS.es['events.powered']).toMatch(/openchurch/i)
+    expect(STRINGS.es['events.powered']).toBe('Con tecnología de ScaffoldLabs')
+    expect(STRINGS.es['events.powered']).toBe(STRINGS.es['church.powered'])
     expect(STRINGS.es['events.emptyTitle']).toMatch(/evento/i)
   })
 })

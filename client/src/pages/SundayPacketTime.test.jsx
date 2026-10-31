@@ -82,7 +82,7 @@ describe('LOCALE-L1-12 Sunday Packet time', () => {
 
   it('EN serving line shows a morning clock', async () => {
     view()
-    expect(await screen.findByText(/Sunday Mass/)).toBeInTheDocument()
+    expect((await screen.findAllByText(/Sunday Mass/)).length).toBeGreaterThan(0)
     expect(screen.getAllByText(/9:00/).length).toBeGreaterThan(0)
   })
 

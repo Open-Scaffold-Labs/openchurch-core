@@ -377,6 +377,17 @@ router.get('/:id', async (req, res) => {
 // at interval-week strides from the seed date. The first row's id
 // stamps every row's recurrence_parent_id (including its own) so
 // "delete the whole series" is one WHERE clause.
+
+// SP-106: an event cannot end before (or at) its start. Times are HH:MM
+// (seconds ignored); zero-padded strings compare in clock order.
+export const END_BEFORE_START_ERROR = 'End time must be after the start time'
+export function endNotAfterStart(start, end) {
+  const re = /^\d{2}:\d{2}/
+  if (typeof start !== 'string' || typeof end !== 'string') return false
+  if (!re.test(start) || !re.test(end)) return false
+  return end.slice(0, 5) <= start.slice(0, 5)
+}
+
 router.post('/', async (req, res) => {
   const { title, date, start_time, end_time, type, assigned_to, recurrence, group_id } = req.body
   if (!title?.trim()) return res.status(400).json({ error: 'Title is required' })
@@ -385,6 +396,9 @@ router.post('/', async (req, res) => {
   }
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
     return res.status(400).json({ error: 'Date must be YYYY-MM-DD' })
+  }
+  if (endNotAfterStart(start_time, end_time)) {
+    return res.status(400).json({ error: END_BEFORE_START_ERROR })
   }
 
   const groupId = normalizeGroupId(group_id)
@@ -671,6 +685,9 @@ router.patch('/:id', async (req, res) => {
   const followingScope = req.query.scope === 'following'
   try {
     const { title, date, start_time, end_time, type, assigned_to, group_id } = req.body
+    if (endNotAfterStart(start_time, end_time)) {
+      return res.status(400).json({ error: END_BEFORE_START_ERROR })
+    }
 
     const groupId = normalizeGroupId(group_id)
     if (!(await groupBelongsToOrg(groupId, req.organizationId))) {

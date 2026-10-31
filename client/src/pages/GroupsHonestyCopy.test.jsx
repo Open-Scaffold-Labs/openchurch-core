@@ -91,7 +91,7 @@ describe('groups honesty copy in Spanish', () => {
   it('CONTROL — a real empty list is still empty, not the Spanish failure', async () => {
     stubFetch([[u => u.includes('/api/groups') && !u.includes('/api/groups/'), () => ok({ groups: [] })]])
     mount()
-    expect(await screen.findByText(/no groups yet/i)).toBeInTheDocument()
+    expect(await screen.findByText(es['grp.emptyTitle'])).toBeInTheDocument()
     expect(screen.queryByText(es['load.failedTitle'])).not.toBeInTheDocument()
     expect(screen.queryByRole('status')).not.toBeInTheDocument()
   })

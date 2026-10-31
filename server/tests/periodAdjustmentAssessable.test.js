@@ -78,6 +78,9 @@ async function affiliatedPair(tag) {
 }
 
 async function chargedGift(par, amount, date, extra = {}) {
+  const mapped = await request(server).put('/api/finance/mappings').set(auth(par.token))
+    .send({ mappings: [{ source_type: 'donation_category', source_key: 'General', account_code: '4420' }] })
+  expect(mapped.status).toBeLessThan(300)
   const res = await request(server).post('/api/donations').set(auth(par.token))
     .send({
       donor_name: extra.donor_name || 'Frozen Donor',
@@ -96,9 +99,11 @@ async function restrictedFund(par, name) {
   const fund = await request(server).post('/api/funds').set(auth(par.token)).send({ name })
   expect(fund.status).toBe(201)
   const fundId = fund.body.id
-  const map = await request(server).put('/api/finance/mappings').set(auth(par.token))
-    .send({ mappings: [{ source_type: 'fund', source_key: String(fundId), account_code: '4450' }] })
-  expect(map.status).toBeLessThan(300)
+  await pool.query(
+    `INSERT INTO ochr_coa_mappings
+       (organization_id, source_type, source_key, account_code, effective_from, set_by)
+     SELECT $1, 'fund', $2, '4450', cutover_on, 'diocese' FROM ochr_books_cutover`,
+    [par.orgId, String(fundId)])
   return fundId
 }
 
@@ -215,11 +220,12 @@ describe('GIV-08-004 assessable impact of APPLIED credits', () => {
 
     const remap = await request(server).put('/api/finance/mappings').set(auth(par.token))
       .send({ mappings: [{ source_type: 'fund', source_key: String(fundId), account_code: '4420' }] })
-    expect(remap.status).toBeLessThan(300)
+    expect(remap.status).toBe(409)
+    expect(remap.body.code).toBe('period_submitted')
 
     const live = await request(server).get('/api/finance/summary')
       .query({ start: '2083-01-01', end: '2083-12-31' }).set(auth(par.token))
-    expect(Number(live.body.totals.assessable_base)).toBeCloseTo(600, 2)
+    expect(Number(live.body.totals.assessable_base)).toBeCloseTo(400, 2)
 
     await refundInPeriod(par, restrictedGift, 80)
     await settleOpen(dio, subId)
@@ -284,7 +290,8 @@ describe('GIV-08-004 assessable impact of APPLIED credits', () => {
     expect(Number(before.totals_json?.totals?.assessable_base)).toBeCloseTo(200, 2)
     const remap = await request(server).put('/api/finance/mappings').set(auth(par.token))
       .send({ mappings: [{ source_type: 'fund', source_key: String(fundId), account_code: '4420' }] })
-    expect(remap.status).toBeLessThan(300)
+    expect(remap.status).toBe(409)
+    expect(remap.body.code).toBe('period_submitted')
     const afterRemap = await frozen(subId)
     expect(afterRemap.totals_json).toEqual(before.totals_json)
     expect(Number(afterRemap.totals_json?.totals?.assessable_base)).toBeCloseTo(200, 2)
@@ -509,7 +516,8 @@ describe('GIV-08-005 UNKNOWN freeze-time assessability is not zero', () => {
 
     const remap = await request(server).put('/api/finance/mappings').set(auth(par.token))
       .send({ mappings: [{ source_type: 'fund', source_key: String(fund.body.id), account_code: '4450' }] })
-    expect(remap.status).toBeLessThan(300)
+    expect(remap.status).toBe(409)
+    expect(remap.body.code).toBe('period_submitted')
     const flip = await request(server).put('/api/diocese/coa').set(auth(dio.token))
       .send({ accounts: [{ code: '4420', assessable: false, rollup_group: 'Offertory' }] })
     expect(flip.status).toBeLessThan(300)

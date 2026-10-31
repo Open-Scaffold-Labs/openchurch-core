@@ -17,11 +17,33 @@ import LoginDemoShortcut from './loginDemo'
 // VITE_ENABLE_DEMO_LOGIN must stay unset in client/.env.production.
 
 // Server refusals that arrive as English sentences, mapped to locale keys.
-// Only shown after the password matched (server contract).
+// The account-state three are only shown after the password matched
+// (server contract). The rest are the wrong-password, empty-body, and
+// rate-limit sentences from server/src/routes/auth.js and
+// server/src/middleware/rateLimit.js — a Spanish parish was reading
+// "Invalid email or password" in English (App Review finding 3).
 const SERVER_SENTENCES = {
   'This login is deactivated. An admin can turn it back on.': 'login.deactivated',
   'This login is closed. It cannot be turned back on.': 'login.closed',
   'This organization is on hold. Access is stopped; parish history remains.': 'login.held',
+  'Invalid email or password': 'login.invalid',
+  'Email and password are required': 'login.emptyFields',
+  'Too many attempts for this account. Please wait a few minutes, or reset your password.': 'login.rateAccount',
+  'Too many sign-in attempts from this network. Please try again in a few minutes.': 'login.rateNetwork',
+}
+
+// AuthContext's own fallback when the server sent no sentence.
+const STATUS_FALLBACK = /^Login failed \((\d+)\)$/
+
+function loginErrorText(message, t) {
+  if (SERVER_SENTENCES[message]) return t(SERVER_SENTENCES[message])
+  const status = STATUS_FALLBACK.exec(message || '')
+  if (status) return t('login.failedStatus', { status: status[1] })
+  // fetch() itself rejected — offline, DNS, CORS. Never the browser's English.
+  if (message === 'Failed to fetch' || message === 'Load failed' || /NetworkError/.test(message || '')) {
+    return t('login.network')
+  }
+  return message
 }
 
 export default function Login() {
@@ -42,6 +64,15 @@ export default function Login() {
 
   async function onSubmit(e) {
     e.preventDefault()
+    // An empty submit used to be a silently disabled button: Enter did
+    // nothing and nothing was said (App Review finding 8). Say it, in the
+    // person's language, and put focus on the first empty field.
+    if (!email.trim() || !password) {
+      setError(t('login.emptyFields'))
+      const firstEmpty = e.currentTarget?.querySelector?.(!email.trim() ? 'input[type="email"]' : 'input[autocomplete="current-password"]')
+      firstEmpty?.focus?.()
+      return
+    }
     setError('')
     setLoading(true)
     try {
@@ -49,7 +80,7 @@ export default function Login() {
       navigate(redirectTo, { replace: true })
     } catch (err) {
       // The server sentence is English. Show the same fact in the person's language.
-      setError(SERVER_SENTENCES[err.message] ? t(SERVER_SENTENCES[err.message]) : err.message)
+      setError(loginErrorText(err.message, t))
     } finally {
       setLoading(false)
     }
@@ -151,7 +182,7 @@ export default function Login() {
             </div>
           )}
 
-          <form onSubmit={onSubmit} className="mt-6 space-y-4">
+          <form onSubmit={onSubmit} noValidate className="mt-6 space-y-4">
             <TextField
               label={t('login.email')}
               type="email"
@@ -192,7 +223,7 @@ export default function Login() {
 
             <button
               type="submit"
-              disabled={loading || !email || !password}
+              disabled={loading}
               className="tap w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-church-900 dark:bg-church-700 text-parchment-50 text-sm font-semibold shadow-warm hover:bg-church-800 dark:hover:bg-church-600 transition-colors disabled:opacity-50"
             >
               {loading ? <Loader2 size={15} className="animate-spin" /> : null}
@@ -227,6 +258,21 @@ export default function Login() {
             className="tap-auth font-semibold text-church-700 hover:text-church-900 dark:text-brass-300 dark:hover:text-brass-200 transition-colors"
           >
             {t('login.start')}
+          </Link>
+        </p>
+        <p className="mt-3 text-center text-sm text-ink-500 dark:text-parchment-300/70">
+          <Link
+            to="/contact"
+            className="tap-reach inline-block font-medium text-ink-500 hover:text-church-800 dark:text-parchment-300/70 dark:hover:text-brass-200 transition-colors"
+          >
+            {t('login.contact')}
+          </Link>
+          {' · '}
+          <Link
+            to="/privacy"
+            className="tap-reach inline-block font-medium text-ink-500 hover:text-church-800 dark:text-parchment-300/70 dark:hover:text-brass-200 transition-colors"
+          >
+            {t('privacyPage.link')}
           </Link>
         </p>
 

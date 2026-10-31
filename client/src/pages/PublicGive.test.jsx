@@ -14,7 +14,7 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { LocaleProvider } from '../i18n'
 import { STRINGS } from '../i18n/strings'
-import PublicGive from './PublicGive'
+import PublicGive, { COVER_FEE_DEFAULT_CHECKED } from './PublicGive'
 
 vi.mock('../context/AuthContext', () => ({
   useAuth: () => ({ user: null, token: null, loading: false }),
@@ -52,7 +52,7 @@ const HARD_EN = [
   "we'll send your receipt",
   'In memory of',
   'Processing…',
-  'Powered by OpenChurch',
+  'Powered by ScaffoldLabs',
   'Something went wrong',
 ]
 
@@ -100,12 +100,14 @@ const GIVE_KEYS = [
   'give.processing',
   'give.powered',
   'give.submitFail',
+  'give.coverFee',
 ]
 
 const SAME_IN_BOTH = new Set([
   'give.notFoundAfter',
   'give.repeatsAfter',
   'give.namePh',
+  'give.powered', // brand credit identical EN/ES (ScaffoldLabs)
 ])
 
 function stripComments(src) {
@@ -173,6 +175,9 @@ describe('PublicGive chrome is translated (OC-READY-01-034)', () => {
     expect(screen.getByText(STRINGS.en['give.emailHelp'])).toBeInTheDocument()
     expect(screen.getByPlaceholderText(STRINGS.en['give.notePh'])).toBeInTheDocument()
     expect(screen.getByText(STRINGS.en['give.powered'])).toBeInTheDocument()
+    expect(COVER_FEE_DEFAULT_CHECKED).toBe(false)
+    const coverFeeCheckbox = screen.getByLabelText(STRINGS.en['give.coverFee'])
+    expect(coverFeeCheckbox).not.toBeChecked()
   })
 
   it('SPANISH FORM CHROME IS SPANISH — NOT THE ENGLISH LABELS', async () => {
@@ -198,8 +203,10 @@ describe('PublicGive chrome is translated (OC-READY-01-034)', () => {
     expect(screen.getByPlaceholderText(STRINGS.es['give.emailPh'])).toBeInTheDocument()
     expect(screen.queryByPlaceholderText(STRINGS.en['give.emailPh'])).toBeNull()
     expect(screen.getByPlaceholderText(STRINGS.es['give.notePh'])).toBeInTheDocument()
-    expect(screen.queryByText(STRINGS.en['give.powered'])).toBeNull()
+    // Brand credit matches church.powered (ES: Con tecnología de ScaffoldLabs).
     expect(screen.getByText(STRINGS.es['give.powered'])).toBeInTheDocument()
+    expect(STRINGS.es['give.powered']).toBe(STRINGS.es['church.powered'])
+    expect(STRINGS.es['give.powered']).not.toBe(STRINGS.en['give.powered'])
   })
 
   it('publicLocale from the funds payload is Spanish chrome', async () => {
@@ -307,6 +314,34 @@ describe('PublicGive chrome is translated (OC-READY-01-034)', () => {
       donor_email: 'donor@example.com',
       message: 'in thanks',
       frequency: 'monthly',
+    })
+  })
+
+  it('donor cover processing fee checkbox is unchecked by default (false) and opt-in only', async () => {
+    expect(COVER_FEE_DEFAULT_CHECKED).toBe(false)
+    routes({ '/give': () => ok({ receipt: { amount: 25, fund: 'General Fund' } }) })
+    mount()
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText(STRINGS.en['give.amountPh'])).toBeInTheDocument()
+    })
+    const coverFeeCheckbox = screen.getByLabelText(STRINGS.en['give.coverFee'])
+    expect(coverFeeCheckbox).not.toBeChecked()
+    fireEvent.click(coverFeeCheckbox)
+    expect(coverFeeCheckbox).toBeChecked()
+    await fillAndSubmit(
+      STRINGS.en['give.amountPh'],
+      STRINGS.en['give.namePh'],
+      /give \$|processing/i,
+    )
+    await waitFor(() => {
+      expect(calls.some(c => c.method === 'POST' && c.url.includes('/give'))).toBe(true)
+    })
+    const post = calls.find(c => c.method === 'POST' && c.url.includes('/give'))
+    expect(post.body).toEqual({
+      fund_id: 1,
+      amount: 25,
+      donor_name: 'Test Donor',
+      cover_fee: true,
     })
   })
 

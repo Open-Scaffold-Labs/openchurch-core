@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { X } from 'lucide-react'
 import { initials } from '../utils/format'
+import { useOptionalLocale } from '../i18n'
 
 // Only a positive integer is a person we can open. A missing or garbled
 // id stays text — the chip still names them, and remove still works.
@@ -27,7 +28,9 @@ export function assignedMemberHref(id) {
 //   linkProfiles — when true (Schedule drawer), a chip backed by a real
 //              client id opens /clients/:id. Groups and Events leave this
 //              off. Remove stays a separate control.
-export default function MemberPicker({ members, value, onChange, failed = false, placeholder = 'Search members to assign…', linkProfiles = false }) {
+export default function MemberPicker({ members, value, onChange, failed = false, placeholder, linkProfiles = false, readOnly = false }) {
+  // Optional so the picker still renders in a bare test mount.
+  const { t } = useOptionalLocale()
   const [q, setQ] = useState('')
   const selected = members.filter(m => value.some(id => String(id) === String(m.id)))
   const filtered = members.filter(m =>
@@ -54,58 +57,65 @@ export default function MemberPicker({ members, value, onChange, failed = false,
                     to={href}
                     className="inline-flex items-center gap-1.5 hover:underline"
                   >
-                    <span className="w-5 h-5 rounded-full bg-church-900 dark:bg-church-700 flex items-center justify-center text-parchment-50 text-[9px] font-bold">
+                    <span className="w-5 h-5 rounded-full bg-church-900 dark:bg-church-700 flex items-center justify-center text-parchment-50 text-[11px] font-bold">
                       {initials(m.name)}
                     </span>
                     {m.name}
                   </Link>
                 ) : (
                   <>
-                    <span className="w-5 h-5 rounded-full bg-church-900 dark:bg-church-700 flex items-center justify-center text-parchment-50 text-[9px] font-bold">
+                    <span className="w-5 h-5 rounded-full bg-church-900 dark:bg-church-700 flex items-center justify-center text-parchment-50 text-[11px] font-bold">
                       {initials(m.name)}
                     </span>
                     {m.name}
                   </>
                 )}
-                <button type="button" onClick={() => remove(m.id)} className="text-ink-400 hover:text-rose-500 transition-colors">
-                  <X size={11} />
-                </button>
+                {!readOnly && (
+                  <button type="button" onClick={() => remove(m.id)} aria-label={t('picker.removeNamed', { name: m.name })} className="text-ink-400 hover:text-rose-500 transition-colors">
+                    <X size={11} aria-hidden="true" />
+                  </button>
+                )}
               </span>
             )
           })}
         </div>
       )}
-      <input
-        value={q}
-        onChange={e => setQ(e.target.value)}
-        placeholder={placeholder}
-        className="w-full px-3 py-2 text-sm rounded-lg border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-100 dark:bg-ink-800 text-ink-900 dark:text-parchment-50 focus:outline-none focus:ring-2 focus:ring-church-500"
-      />
-      {q && (
-        <ul className="max-h-40 overflow-y-auto rounded-lg border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-50 dark:bg-ink-900 divide-y divide-parchment-200/60 dark:divide-brass-900/25">
-          {filtered.length === 0 && (
-            <li className={`px-3 py-2 text-xs ${failed ? 'text-amber-700 dark:text-amber-400' : 'text-ink-500 dark:text-parchment-300/70'}`}>
-              {failed ? "The member list didn't load, so there is nothing to search yet." : 'No matching members'}
-            </li>
+      {!readOnly && (
+        <>
+          <input
+            value={q}
+            onChange={e => setQ(e.target.value)}
+            placeholder={placeholder ?? t('picker.searchAssign')}
+            aria-label={placeholder ?? t('picker.searchAssign')}
+            className="w-full px-3 py-2 text-sm rounded-lg border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-100 dark:bg-ink-800 text-ink-900 dark:text-parchment-50 focus:outline-none focus:ring-2 focus:ring-church-500"
+          />
+          {q && (
+            <ul className="max-h-40 overflow-y-auto rounded-lg border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-50 dark:bg-ink-900 divide-y divide-parchment-200/60 dark:divide-brass-900/25">
+              {filtered.length === 0 && (
+                <li className={`px-3 py-2 text-xs ${failed ? 'text-amber-700 dark:text-amber-400' : 'text-ink-500 dark:text-parchment-300/70'}`}>
+                  {failed ? t('picker.listFailed') : t('picker.noMatch')}
+                </li>
+              )}
+              {filtered.map(m => (
+                <li key={m.id}>
+                  <button
+                    type="button"
+                    onClick={() => { add(m.id); setQ('') }}
+                    className="flex items-center gap-3 w-full px-3 py-2 text-left hover:bg-parchment-100 dark:hover:bg-ink-800/60 transition-colors"
+                  >
+                    <div className="w-6 h-6 rounded-full bg-church-900 dark:bg-church-700 flex items-center justify-center text-parchment-50 text-[11px] font-bold shrink-0">
+                      {initials(m.name)}
+                    </div>
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium text-ink-900 dark:text-parchment-50 truncate">{m.name}</p>
+                      <p className="text-xs text-ink-500 dark:text-parchment-300/70">{m.role ?? t('picker.member')}</p>
+                    </div>
+                  </button>
+                </li>
+              ))}
+            </ul>
           )}
-          {filtered.map(m => (
-            <li key={m.id}>
-              <button
-                type="button"
-                onClick={() => { add(m.id); setQ('') }}
-                className="flex items-center gap-3 w-full px-3 py-2 text-left hover:bg-parchment-100 dark:hover:bg-ink-800/60 transition-colors"
-              >
-                <div className="w-6 h-6 rounded-full bg-church-900 dark:bg-church-700 flex items-center justify-center text-parchment-50 text-[9px] font-bold shrink-0">
-                  {initials(m.name)}
-                </div>
-                <div className="min-w-0">
-                  <p className="text-sm font-medium text-ink-900 dark:text-parchment-50 truncate">{m.name}</p>
-                  <p className="text-xs text-ink-500 dark:text-parchment-300/70">{m.role ?? 'Member'}</p>
-                </div>
-              </button>
-            </li>
-          ))}
-        </ul>
+        </>
       )}
     </div>
   )

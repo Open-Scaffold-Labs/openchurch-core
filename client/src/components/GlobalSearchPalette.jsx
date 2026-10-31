@@ -3,11 +3,15 @@ import { useNavigate } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   Search, Users, Calendar, CheckSquare, DollarSign, Heart,
-  Loader2, X, Clock, ArrowRight, History,
+  Loader2, X, Clock, ArrowRight, History, Printer, ListMusic, Church, BookOpen,
 } from 'lucide-react'
 import { apiUrl } from '../api'
 import { useLocale } from '../i18n'
+import { useAuth } from '../context/AuthContext'
 import { scrimCls } from './MobileSheet'
+import { filterAiCommands } from '../native/aiGate'
+import { useNativeAi } from '../native/NativeAiContext'
+import { EASE_SETTLE } from '../utils/motion'
 
 // Global search palette (Sprint G / G.1). Modal overlay opened from
 // the header search button — replaces the inline 320px bar that
@@ -29,12 +33,77 @@ import { scrimCls } from './MobileSheet'
 // see server/src/routes/search.js. We group on the client because
 // the server is deliberately backend-agnostic.
 
+// SP-081. The Sunday Packet is not a member, event, or gift, so ⌘K
+// "sacristy" used to come back empty. These words are search keys, not
+// sentences on screen. Both languages are listed so either session finds
+// the sheet. Staff and admins may open it; a Viewer may not.
+const PACKET_KEYWORDS = [
+  'sacristy',
+  'sacristía',
+  'sacristia',
+  'packet',
+  'paquete',
+  'sunday packet',
+  'paquete dominical',
+  'order of worship',
+  'orden del culto',
+]
+
+// SP-190. Worship, a service plan, and a Mass are pages and records, not
+// only the Sunday Packet. These are search keys, not sentences on screen.
+const WORSHIP_KEYWORDS = [
+  'worship',
+  'liturgy',
+  'liturgia',
+  'service plan',
+  'service plans',
+  'plan de servicio',
+  'planes de servicio',
+  'mass',
+  'masses',
+  'misa',
+  'misas',
+]
+
+// SP-295. Weekly Bulletin is an admin page; ⌘K used to only find the sample task.
+const BULLETIN_KEYWORDS = [
+  'bulletin',
+  'bulletins',
+  'boletín',
+  'boletin',
+  'boletines',
+  'weekly bulletin',
+  'boletín semanal',
+  'boletin semanal',
+]
+
+function foldQuery(value) {
+  return String(value ?? '').trim().toLocaleLowerCase().normalize('NFD').replace(/\p{M}/gu, '')
+}
+
+export function pageCommandsForQuery(query, role) {
+  if (role !== 'admin' && role !== 'staff') return []
+  const q = foldQuery(query)
+  if (q.length < 3) return []
+  const hits = []
+  if (PACKET_KEYWORDS.some(k => foldQuery(k).includes(q))) hits.push({ id: 'sunday-packet', to: '/packet' })
+  if (WORSHIP_KEYWORDS.some(k => foldQuery(k).includes(q))) hits.push({ id: 'worship', to: '/service-planner' })
+  // Bulletin is adminOnly in the sidebar — keep the same gate here.
+  if (role === 'admin' && BULLETIN_KEYWORDS.some(k => foldQuery(k).includes(q))) {
+    hits.push({ id: 'weekly-bulletin', to: '/bulletin' })
+  }
+  return hits
+}
+
 const TYPE_META = {
-  member:   { icon: Users,       path: '/clients' },
-  event:    { icon: Calendar,    path: '/events' },
-  task:     { icon: CheckSquare, path: '/tasks' },
-  staff:    { icon: DollarSign,  path: '/payroll' },
-  donation: { icon: Heart,       path: '/donations' },
+  member:         { icon: Users,       path: '/clients' },
+  event:          { icon: Calendar,    path: '/events' },
+  task:           { icon: CheckSquare, path: '/tasks' },
+  staff:          { icon: DollarSign,  path: '/payroll' },
+  donation:       { icon: Heart,       path: '/donations' },
+  service_plan:   { icon: ListMusic,   path: '/service-planner' },
+  mass:           { icon: Church,      path: '/schedule' },
+  mass_intention: { icon: BookOpen,    path: '/mass-intentions' },
 }
 
 // Static t() calls so the critical-surface harness can see every key.
@@ -45,6 +114,9 @@ function typeLabel(t, type) {
   if (type === 'task') return t('dash.glance.tasks')
   if (type === 'staff') return t('mem.role.Staff')
   if (type === 'donation') return t('nav.Donations')
+  if (type === 'service_plan') return t('nav.Worship')
+  if (type === 'mass') return t('shell.search.masses')
+  if (type === 'mass_intention') return t('nav.Intentions')
   return t('shell.search.unknown')
 }
 
@@ -62,6 +134,19 @@ export function pathForSearchItem(item) {
   if (item.type === 'member' && hasItemId(item)) return `/clients/${item.id}`
   if (item.type === 'donation' && hasItemId(item)) {
     return `/donations?id=${encodeURIComponent(item.id)}`
+  }
+  if (item.type === 'service_plan' && hasItemId(item)) {
+    return `/service-planner?plan=${encodeURIComponent(item.id)}`
+  }
+  if (item.type === 'mass' && hasItemId(item)) {
+    return `/schedule?event=${encodeURIComponent(item.id)}`
+  }
+  // SP-185: open the book with the intention text as the search query so
+  // the same ILIKE path that found the hit also filters the list.
+  if (item.type === 'mass_intention' && hasItemId(item)) {
+    const q = String(item.title || '').trim()
+    if (q) return `/mass-intentions?q=${encodeURIComponent(q)}`
+    return `/mass-intentions`
   }
   return meta.path
 }
@@ -103,10 +188,20 @@ function getTitle(item, t) {
   if (item.type === 'task')     return item.title
   if (item.type === 'staff')    return item.name
   if (item.type === 'donation') return item.donor_name
+  if (item.type === 'mass_intention') return item.title
   return item.name || item.title || t('shell.search.unknown')
 }
 
-function getSubtitle(item) {
+function civilDay(iso, dateLocale) {
+  if (!iso || !/^\d{4}-\d{2}-\d{2}/.test(String(iso))) return ''
+  const [y, m, d] = String(iso).slice(0, 10).split('-').map(Number)
+  if (!y || !m || !d) return ''
+  return new Date(y, m - 1, d).toLocaleDateString(dateLocale, {
+    weekday: 'short', month: 'short', day: 'numeric', year: 'numeric',
+  })
+}
+
+function getSubtitle(item, dateLocale) {
   if (item.type === 'member')   return [item.role, item.email].filter(Boolean).join(' · ')
   if (item.type === 'event')    return [item.service_division, item.location].filter(Boolean).join(' · ')
   if (item.type === 'task')     return [item.category?.replace(/_/g, ' '), item.priority].filter(Boolean).join(' · ')
@@ -114,11 +209,19 @@ function getSubtitle(item) {
   if (item.type === 'donation') {
     return [item.category, item.amount ? `$${Number(item.amount).toFixed(2)}` : ''].filter(Boolean).join(' · ')
   }
+  if (item.type === 'service_plan' || item.type === 'mass') {
+    return [civilDay(item.date, dateLocale), item.start_time].filter(Boolean).join(' · ')
+  }
+  if (item.type === 'mass_intention') {
+    return [civilDay(item.mass_date, dateLocale), item.requested_by, item.status].filter(Boolean).join(' · ')
+  }
   return ''
 }
 
 export default function GlobalSearchPalette({ open, onClose, typeFilter, setTypeFilter }) {
-  const { t } = useLocale()
+  const { t, dateLocale } = useLocale()
+  const { kind: nativeAiKind } = useNativeAi()
+  const { user } = useAuth()
   const [query, setQuery]     = useState('')
   const [results, setResults] = useState([])
   const [searchFailed, setSearchFailed] = useState(false)
@@ -204,7 +307,9 @@ export default function GlobalSearchPalette({ open, onClose, typeFilter, setType
           return
         }
         setSearchFailed(false)
-        setResults(data)
+        // A Viewer may open a Mass on the Schedule. A service plan is staff work.
+        const visible = user?.role === 'viewer' ? data.filter(row => row.type !== 'service_plan') : data
+        setResults(visible)
       } catch {
         // Every abort this effect starts has already set stale. An
         // AbortError with stale still false came from the browser, and
@@ -222,13 +327,20 @@ export default function GlobalSearchPalette({ open, onClose, typeFilter, setType
       controller.abort()
       clearTimeout(debounceRef.current)
     }
-  }, [query, attempt])
+  }, [query, attempt, user?.role])
 
   const selectItem = useCallback((item) => {
     pushRecent(query)
     setRecents(readRecents())
     const path = pathForSearchItem(item)
     if (path) navigate(path)
+    onClose()
+  }, [query, navigate, onClose])
+
+  const openPage = useCallback((cmd) => {
+    pushRecent(query)
+    setRecents(readRecents())
+    if (cmd?.to) navigate(cmd.to)
     onClose()
   }, [query, navigate, onClose])
 
@@ -289,25 +401,27 @@ export default function GlobalSearchPalette({ open, onClose, typeFilter, setType
 
   const hasQuery   = query.trim().length >= 2
   const hasResults = filtered.length > 0
+  // A type chip narrows the parish records. The packet is a page, so it
+  // stays with All. It does not wait on /api/search: a failed member
+  // search must not hide the sheet.
+  const pageHits = typeFilter ? [] : filterAiCommands(pageCommandsForQuery(query, user?.role), nativeAiKind)
 
   return (
     <AnimatePresence>
       {open && (
         <motion.div
           initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-          transition={{ duration: 0.12 }}
+          animate={{ opacity: 1, transition: { duration: 0.2, ease: 'easeOut' } }}
+          exit={{ opacity: 0, transition: { duration: 0.12 } }}
           className={`${scrimCls} z-50 flex items-start justify-center pt-[12vh] px-4`}
           onClick={(e) => { if (e.target === e.currentTarget) onClose() }}
         >
           <motion.div
             role="dialog"
             aria-label={t('shell.searchShort')}
-            initial={{ opacity: 0, y: -8, scale: 0.98 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: -4, scale: 0.98 }}
-            transition={{ duration: 0.15, ease: [0.25, 0.1, 0.25, 1] }}
+            initial={{ opacity: 0, y: -8, scale: 0.985 }}
+            animate={{ opacity: 1, y: 0, scale: 1, transition: { duration: 0.24, ease: EASE_SETTLE } }}
+            exit={{ opacity: 0, y: -4, transition: { duration: 0.12, ease: 'easeIn' } }}
             className="w-full max-w-xl bg-parchment-50 dark:bg-ink-900 border border-parchment-300/60 dark:border-brass-900/30 rounded-2xl shadow-warm-lg overflow-hidden"
           >
             {/* Input row */}
@@ -317,6 +431,16 @@ export default function GlobalSearchPalette({ open, onClose, typeFilter, setType
                 ref={setInputEl}
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  // SP-318: Enter opens the only result (parish hit or page command).
+                  if (e.key !== 'Enter' || e.nativeEvent.isComposing) return
+                  if (loading || searchFailed) return
+                  const total = filtered.length + pageHits.length
+                  if (total !== 1) return
+                  e.preventDefault()
+                  if (filtered.length === 1) selectItem(filtered[0])
+                  else openPage(pageHits[0])
+                }}
                 placeholder={t('shell.search.placeholder')}
                 aria-label={t('shell.search.query')}
                 className="w-full pl-11 pr-12 py-3.5 text-sm bg-transparent text-ink-900 dark:text-parchment-50 placeholder-ink-400 dark:placeholder-parchment-400/50 focus:outline-none"
@@ -338,7 +462,12 @@ export default function GlobalSearchPalette({ open, onClose, typeFilter, setType
               <FilterChip active={!typeFilter} onClick={() => setTypeFilter(null)}>
                 {t('shell.search.all')}
               </FilterChip>
-              {Object.entries(TYPE_META).map(([key, meta]) => (
+              {Object.entries(TYPE_META).filter(([key]) => {
+                if (key === 'service_plan' || key === 'mass_intention') {
+                  return user?.role === 'admin' || user?.role === 'staff'
+                }
+                return true
+              }).map(([key, meta]) => (
                 <FilterChip
                   key={key}
                   active={typeFilter === key}
@@ -354,14 +483,14 @@ export default function GlobalSearchPalette({ open, onClose, typeFilter, setType
               {/* Empty query → recents (if any) */}
               {!hasQuery && recents.length > 0 && (
                 <div>
-                  <div className="flex items-center justify-between px-4 py-2 text-[10px] font-semibold uppercase tracking-wider text-ink-500 dark:text-parchment-300/70 bg-parchment-100/60 dark:bg-ink-800/40">
+                  <div className="flex items-center justify-between px-4 py-2 text-[11px] font-semibold uppercase tracking-wider text-ink-500 dark:text-parchment-300/70 bg-parchment-100/60 dark:bg-ink-800/40">
                     <span className="flex items-center gap-1.5">
                       <History size={11} /> {t('shell.search.recent')}
                     </span>
                     <button
                       type="button"
                       onClick={() => { clearRecents(); setRecents([]) }}
-                      className="text-[10px] font-medium normal-case tracking-normal text-ink-500 dark:text-parchment-300/70 hover:text-ink-700 dark:hover:text-parchment-100 transition-colors"
+                      className="text-[11px] font-medium normal-case tracking-normal text-ink-500 dark:text-parchment-300/70 hover:text-ink-700 dark:hover:text-parchment-100 transition-colors"
                     >
                       {t('shell.search.clear')}
                     </button>
@@ -400,8 +529,8 @@ export default function GlobalSearchPalette({ open, onClose, typeFilter, setType
                 </p>
               )}
 
-              {/* Has query but no results */}
-              {hasQuery && !loading && !searchFailed && !hasResults && (
+              {/* Has query but no parish records and no page */}
+              {hasQuery && !loading && !searchFailed && !hasResults && pageHits.length === 0 && (
                 <p className="px-4 py-10 text-center text-sm text-ink-500 dark:text-parchment-300/70">
                   {t('shell.search.noneBefore')} <span className="font-semibold text-ink-700 dark:text-parchment-100">"{query}"</span>
                   {typeFilter && (
@@ -413,19 +542,59 @@ export default function GlobalSearchPalette({ open, onClose, typeFilter, setType
                 </p>
               )}
 
+              {hasQuery && pageHits.length > 0 && (
+                <div>
+                  <p className="px-4 py-2 text-[11px] font-semibold uppercase tracking-wider text-ink-500 dark:text-parchment-300/70 bg-parchment-100/60 dark:bg-ink-800/40">
+                    {t('shell.search.pages')}
+                  </p>
+                  <ul>
+                    {pageHits.map(cmd => (
+                      <li key={cmd.id}>
+                        <button
+                          type="button"
+                          onClick={() => openPage(cmd)}
+                          className="w-full flex items-center gap-3 px-4 py-2.5 text-left hover:bg-parchment-100 dark:hover:bg-ink-800/60 transition-colors"
+                        >
+                          <div className="w-8 h-8 rounded-lg bg-church-50 dark:bg-church-900/40 text-church-800 dark:text-brass-300 flex items-center justify-center shrink-0">
+                            {cmd.id === 'worship' ? <ListMusic size={14} /> : <Printer size={14} />}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            {cmd.id === 'worship' ? (
+                              <>
+                                <p className="text-sm font-semibold text-ink-900 dark:text-parchment-50 truncate">{t('nav.Worship')}</p>
+                                <p className="text-xs text-ink-500 dark:text-parchment-300/70 truncate">{t('shell.cmd.worshipHint')}</p>
+                              </>
+                            ) : (
+                              <>
+                                <p className="text-sm font-semibold text-ink-900 dark:text-parchment-50 truncate">{t('shell.cmd.packet')}</p>
+                                <p className="text-xs text-ink-500 dark:text-parchment-300/70 truncate">{t('shell.cmd.packetHint')}</p>
+                              </>
+                            )}
+                          </div>
+                          <ArrowRight size={12} className="text-ink-400 dark:text-parchment-400/60 shrink-0" />
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
               {/* Has results — grouped by type */}
-              {hasQuery && hasResults && Object.entries(grouped).map(([type, items]) => {
+              {/* Results arrive one after another, 30ms apart, the first time
+                  each appears (V1.5, study #12). Rows that survive a keystroke
+                  keep their key, so they never re-animate. */}
+              {(() => { let order = 0; return hasQuery && hasResults && Object.entries(grouped).map(([type, items]) => {
                 const meta = TYPE_META[type]
                 if (!meta) return null
                 const Icon = meta.icon
                 return (
                   <div key={type}>
-                    <p className="px-4 py-2 text-[10px] font-semibold uppercase tracking-wider text-ink-500 dark:text-parchment-300/70 bg-parchment-100/60 dark:bg-ink-800/40">
+                    <p className="px-4 py-2 text-[11px] font-semibold uppercase tracking-wider text-ink-500 dark:text-parchment-300/70 bg-parchment-100/60 dark:bg-ink-800/40">
                       {typeLabel(t, type)}
                     </p>
                     <ul>
                       {items.map(item => (
-                        <li key={`${type}-${item.id}`}>
+                        <li key={`${type}-${item.id}`} className="row-arrive" style={{ animationDelay: `${Math.min(order++, 8) * 30}ms` }}>
                           <button
                             type="button"
                             onClick={() => selectItem(item)}
@@ -436,7 +605,7 @@ export default function GlobalSearchPalette({ open, onClose, typeFilter, setType
                             </div>
                             <div className="flex-1 min-w-0">
                               <p className="text-sm font-semibold text-ink-900 dark:text-parchment-50 truncate">{getTitle(item, t)}</p>
-                              <p className="text-xs text-ink-500 dark:text-parchment-300/70 truncate">{getSubtitle(item)}</p>
+                              <p className="text-xs text-ink-500 dark:text-parchment-300/70 truncate">{getSubtitle(item, dateLocale)}</p>
                             </div>
                             <ArrowRight size={12} className="text-ink-400 dark:text-parchment-400/60 shrink-0" />
                           </button>
@@ -445,14 +614,14 @@ export default function GlobalSearchPalette({ open, onClose, typeFilter, setType
                     </ul>
                   </div>
                 )
-              })}
+              }) })()}
             </div>
 
             {/* Footer hint */}
-            <div className="px-4 py-2 border-t border-parchment-300/50 dark:border-brass-900/20 bg-parchment-100/40 dark:bg-ink-800/20 text-[10px] font-medium uppercase tracking-wider text-ink-500 dark:text-parchment-300/70 flex items-center justify-between">
+            <div className="px-4 py-2 border-t border-parchment-300/50 dark:border-brass-900/20 bg-parchment-100/40 dark:bg-ink-800/20 text-[11px] font-medium uppercase tracking-wider text-ink-500 dark:text-parchment-300/70 flex items-center justify-between">
               <span>{t('shell.search.footer')}</span>
               <span className="hidden sm:inline">
-                <kbd className="px-1.5 py-0.5 rounded border border-parchment-300 dark:border-brass-900/40 bg-parchment-50 dark:bg-ink-900 font-mono text-[10px] normal-case">⌘K</kbd> {t('shell.search.reopen')}
+                <kbd className="px-1.5 py-0.5 rounded border border-parchment-300 dark:border-brass-900/40 bg-parchment-50 dark:bg-ink-900 font-mono text-[11px] normal-case">⌘K</kbd> {t('shell.search.reopen')}
               </span>
             </div>
           </motion.div>

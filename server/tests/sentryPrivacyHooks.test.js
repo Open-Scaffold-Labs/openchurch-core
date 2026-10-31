@@ -118,8 +118,7 @@ describe('Sentry privacy hooks', () => {
     expect(event.request.headers.host).toBe('127.0.0.1')
     expect(event.request.headers['content-type']).toBe('application/json')
     expect(event.request.headers.referer).toBeUndefined()
-    expect(event.user.ip_address).toBeUndefined()
-    expect(event.user.id).toBe('staff')
+    expect(event.user).toBeUndefined()
     expect(event.transaction).toBe('GET /api/kiosk/:token/members')
     expect(event.message).toContain('question? kept')
     expect(event.message).toBe('question? kept http://parish.test/reset')
@@ -139,10 +138,8 @@ describe('Sentry privacy hooks', () => {
     expect(transaction.contexts.trace.data['http.url']).toBe('http://127.0.0.1/api/kiosk/:token')
     expect(transaction.contexts.trace.description).toBe('GET /api/kiosk/:token')
 
-    expect(crumb.message).toContain('question? kept')
-    expect(crumb.message).not.toContain(INVITE)
-    expect(crumb.data.arguments[0]).toBe('question? kept')
-    expect(crumb.data.arguments[1]).toBe('http://parish.test/accept-invite')
-    expect(crumb.data.arguments[2].url).toBe('/api/swap/by-token/:token')
+    // Console breadcrumbs keep only that a console line happened (#397).
+    expect(crumb.message).toBe('[console]')
+    expect(crumb.data).toBeUndefined()
   })
 })

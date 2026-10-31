@@ -202,6 +202,9 @@ describe('POST /api/mass-intentions/:id/assign (MI.4)', () => {
     expect(packet.body.intentions.some(r =>
       r.formatted_intention?.includes(`Open ${RUN_ID}`) || r.intention?.includes(`Open ${RUN_ID}`)
     )).toBe(true)
+    // SP-071: the packet carries the assignment so it can mark unassigned rows.
+    const pktRow = packet.body.intentions.find(r => r.formatted_intention?.includes(`Open ${RUN_ID}`))
+    expect(pktRow.calendar_event_id).toBe(massTue)
   })
 
   it('the same Mass twice is idempotent', async () => {
@@ -294,11 +297,12 @@ describe('POST /api/mass-intentions/:id/assign (MI.4)', () => {
     expect(still.body.calendar_event_id).toBeNull()
   })
 
-  // SP-014..022: intentions are not in the Viewer's role table.
-  it('viewers can neither read awaiting nor assign', async () => {
+  // José Oct 28 2026: Viewers may READ intentions; writes stay 403.
+  it('viewers may read awaiting but cannot assign', async () => {
     const read = await request(server).get('/api/mass-intentions/awaiting?date=2027-06-08')
       .set('Authorization', `Bearer ${viewerToken}`)
-    expect(read.status).toBe(403)
+    expect(read.status).toBe(200)
+    expect(Array.isArray(read.body.intentions)).toBe(true)
     const write = await request(server).post(`/api/mass-intentions/${datedId}/assign`)
       .set('Authorization', `Bearer ${viewerToken}`)
       .send({ calendar_event_id: massTue })
@@ -893,9 +897,9 @@ describe('linked Mass date and a typed day', () => {
         WHERE id = $1 AND organization_id = $2`,
       [created.body.id, orgAId],
     )
-    const noted = await request(server).patch(`/api/mass-intentions/${created.body.id}`)
+    const noted = await request(server).post(`/api/mass-intentions/${created.body.id}/correct`)
       .set('Authorization', `Bearer ${tokenA}`)
-      .send({ note: 'older book', mass_date: null, calendar_event_id: mass.body.id })
+      .send({ reason: 'Recorded in error', changes: { note: 'older book', mass_date: null, calendar_event_id: mass.body.id } })
     expect(noted.status).toBe(200)
     expect(noted.body.note).toBe('older book')
     expect(noted.body.status).toBe('fulfilled')
@@ -942,13 +946,13 @@ describe('linked Mass date and a typed day', () => {
         assigned_to: [],
       })
     expect(moved.status).toBe(200)
-    const noted = await request(server).patch(`/api/mass-intentions/${created.body.id}`)
+    const noted = await request(server).post(`/api/mass-intentions/${created.body.id}/correct`)
       .set('Authorization', `Bearer ${tokenA}`)
-      .send({
+      .send({ reason: 'Recorded in error', changes: {
         note: 'after the move',
         mass_date: '2031-09-14',
         calendar_event_id: mass.body.id,
-      })
+      } })
     expect(noted.status).toBe(200)
     expect(noted.body.note).toBe('after the move')
     expect(noted.body.mass_date).toBe('2031-09-14')
@@ -1013,9 +1017,9 @@ describe('linked Mass date and a typed day', () => {
     expect(before.rows[0].mass_date).toBe('2032-10-06')
     expect(before.rows[0].fulfilled_mass_date).toBe('2032-10-06')
 
-    const reopened = await request(server).patch(`/api/mass-intentions/${created.body.id}`)
+    const reopened = await request(server).post(`/api/mass-intentions/${created.body.id}/correct`)
       .set('Authorization', `Bearer ${tokenA}`)
-      .send({ status: 'open' })
+      .send({ reason: 'Recorded in error', changes: { status: 'open' } })
     expect(reopened.status).toBe(200)
     expect(reopened.body.status).toBe('scheduled')
     expect(reopened.body.calendar_event_id).toBe(mass.body.id)
@@ -1032,9 +1036,9 @@ describe('linked Mass date and a typed day', () => {
     expect(stored.rows[0].mass_date).toBe('2032-10-08')
     expect(stored.rows[0].fulfilled_mass_date).toBe('2032-10-06')
 
-    const namedOpen = await request(server).patch(`/api/mass-intentions/${named.body.id}`)
+    const namedOpen = await request(server).post(`/api/mass-intentions/${named.body.id}/correct`)
       .set('Authorization', `Bearer ${tokenA}`)
-      .send({ status: 'open', calendar_event_id: mass.body.id })
+      .send({ reason: 'Recorded in error', changes: { status: 'open', calendar_event_id: mass.body.id } })
     expect(namedOpen.status).toBe(200)
     expect(namedOpen.body.status).toBe('scheduled')
     expect(namedOpen.body.mass_date).toBe('2032-10-08')
@@ -1075,9 +1079,9 @@ describe('linked Mass date and a typed day', () => {
       })
     expect(moved.status).toBe(200)
 
-    const cancelled = await request(server).patch(`/api/mass-intentions/${created.body.id}`)
+    const cancelled = await request(server).post(`/api/mass-intentions/${created.body.id}/correct`)
       .set('Authorization', `Bearer ${tokenA}`)
-      .send({ status: 'cancelled' })
+      .send({ reason: 'Recorded in error', changes: { status: 'cancelled' } })
     expect(cancelled.status).toBe(200)
     expect(cancelled.body.status).toBe('cancelled')
     expect(cancelled.body.calendar_event_id).toBe(mass.body.id)
@@ -1124,9 +1128,9 @@ describe('linked Mass date and a typed day', () => {
       [mass.body.id, orgAId],
     )
 
-    const reopened = await request(server).patch(`/api/mass-intentions/${created.body.id}`)
+    const reopened = await request(server).post(`/api/mass-intentions/${created.body.id}/correct`)
       .set('Authorization', `Bearer ${tokenA}`)
-      .send({ status: 'open' })
+      .send({ reason: 'Recorded in error', changes: { status: 'open' } })
     expect(reopened.status).toBe(200)
     expect(reopened.body.status).toBe('scheduled')
     expect(reopened.body.calendar_event_id).toBe(mass.body.id)

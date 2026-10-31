@@ -20,6 +20,12 @@ import { holdOrganization } from '../auth/organizationHold.js'
 import { markStewardship } from '../middleware/auditLog.js'
 import { clearSessionCookie } from '../auth/sessionCookie.js'
 import { requireRole } from '../middleware/auth.js'
+import { isSafeHttpsLogoUrl, isSafeAccentHex } from '../public/branding.js'
+import {
+  saveDraft, updateLookOnly, publishDraft, unpublishSite, revertPublished,
+  adminSitePayload, getSiteRow, listPublishHistory, parseExpectedRevision, requireSiteConfirm,
+} from '../website/repo.js'
+import { libraryCatalog } from '../website/siteDocument.js'
 
 const router = Router()
 
@@ -72,6 +78,11 @@ const PATCHABLE = new Set([
   // IANA timezone (CHK.7) — the church's local day, used by the kiosk's
   // "today" filters. Validated against the host's tz database.
   'timezone',
+  // OC-WEB-1 PR-B — public branding. Validated with the same helpers the
+  // public resolver uses (https logo, #RRGGBB accent); empty clears to NULL.
+  'public_display_name',
+  'public_logo_url',
+  'public_accent_hex',
 ])
 
 // Keys that are booleans, not strings — handled separately in the
@@ -101,6 +112,9 @@ const MAX_LEN = {
   tagline:               200,
   about:                 4000,
   service_times:         1000,
+  public_display_name:   120,
+  public_logo_url:       500,
+  public_accent_hex:     7,
 }
 
 router.get('/', async (req, res) => {
@@ -109,6 +123,7 @@ router.get('/', async (req, res) => {
       `SELECT id, name, slug, address, tax_id,
               signatory_name, signatory_title, statement_letterhead,
               tagline, about, service_times, page_published,
+              public_display_name, public_logo_url, public_accent_hex,
               reminder_lead_hours, timezone, tradition, locale,
               created_at
          FROM ochr_organizations
@@ -214,6 +229,57 @@ router.patch('/', async (req, res) => {
       continue
     }
 
+    // Public branding (OC-WEB-1 PR-B). Empty clears. Logo must be https
+    // without userinfo; accent must be #RRGGBB (stored uppercased). Same
+    // rules as resolvePublicBranding so admin write and public read agree.
+    if (k === 'public_logo_url') {
+      let v = req.body[k]
+      if (typeof v === 'string') v = v.trim()
+      if (v === '' || v == null) { updates[k] = null; continue }
+      if (typeof v !== 'string') {
+        return res.status(400).json({ error: 'public_logo_url must be a string' })
+      }
+      if (!isSafeHttpsLogoUrl(v)) {
+        return res.status(400).json({
+          error: 'public_logo_url must be an https URL without credentials',
+        })
+      }
+      updates[k] = v
+      continue
+    }
+    if (k === 'public_accent_hex') {
+      let v = req.body[k]
+      if (typeof v === 'string') v = v.trim()
+      if (v === '' || v == null) { updates[k] = null; continue }
+      if (typeof v !== 'string' || !isSafeAccentHex(v)) {
+        return res.status(400).json({
+          error: 'public_accent_hex must be a #RRGGBB hex color',
+        })
+      }
+      updates[k] = v.toUpperCase()
+      continue
+    }
+
+    // Argus N452-3 — strip C0 controls + DEL from the public display
+    // name so titles/document.title stay printable. Empty after strip → NULL.
+    if (k === 'public_display_name') {
+      let v = req.body[k]
+      if (typeof v === 'string') {
+        v = v.replace(/[\u0000-\u001F\u007F]/g, '').trim()
+      }
+      if (v === '' || v == null) { updates[k] = null; continue }
+      if (typeof v !== 'string') {
+        return res.status(400).json({ error: 'public_display_name must be a string' })
+      }
+      if (v.length > MAX_LEN.public_display_name) {
+        return res.status(400).json({
+          error: `public_display_name exceeds max length (${MAX_LEN.public_display_name})`,
+        })
+      }
+      updates[k] = v
+      continue
+    }
+
     let v = req.body[k]
     if (typeof v === 'string') v = v.trim()
     if (v === '' || v == null) {
@@ -248,6 +314,7 @@ router.patch('/', async (req, res) => {
         RETURNING id, name, slug, address, tax_id,
                   signatory_name, signatory_title, statement_letterhead,
                   tagline, about, service_times, page_published,
+                  public_display_name, public_logo_url, public_accent_hex,
                   reminder_lead_hours, timezone, tradition, locale, locale,
                   created_at`,
       params
@@ -262,6 +329,17 @@ router.patch('/', async (req, res) => {
     }
     res.json(rows[0])
   } catch (err) {
+    // N451-1 CHECKs — surface as 400 rather than a bare 500 so the admin
+    // UI can show the same message the route validators already use.
+    if (err?.code === '23514') {
+      const c = err.constraint || ''
+      if (c.includes('public_accent_hex')) {
+        return res.status(400).json({ error: 'public_accent_hex must be a #RRGGBB hex color' })
+      }
+      if (c.includes('public_logo_url')) {
+        return res.status(400).json({ error: 'public_logo_url must be an https URL without credentials' })
+      }
+    }
     console.error('organization.patch failed:', err)
     res.status(500).json({ error: 'Failed to save organization' })
   }
@@ -287,5 +365,173 @@ router.get('/export', async (req, res) => {
     res.status(500).json({ error: 'Export failed' })
   }
 })
+
+// ── OC-WEB-1 PR-C/D: site document ──────────────────────────────────────────
+// Tenant-scoped via req.organizationId. Anonymous visitors never see draft_doc.
+// Publish copies the stored draft; it does not accept a document in the body.
+
+async function loadHeldOrg(organizationId) {
+  const { rows } = await pool.query(
+    `SELECT slug, page_published
+       FROM ochr_organizations
+      WHERE id = $1 AND held_at IS NULL
+      LIMIT 1`,
+    [organizationId],
+  )
+  return rows[0] ?? null
+}
+
+function actorUserId(req) {
+  const id = req.user?.id
+  if (typeof id !== 'number' || !Number.isSafeInteger(id) || id <= 0) {
+    const err = new Error('Reload the page before saving. Nothing was changed.')
+    err.status = 400
+    err.code = 'site_actor_invalid'
+    throw err
+  }
+  return id
+}
+
+function respondSiteError(res, err, logLabel) {
+  if (err?.status === 400 || err?.status === 409) {
+    return res.status(err.status).json({
+      error: err.message,
+      ...(err.code ? { code: err.code } : {}),
+    })
+  }
+  if (err?.code === '23514') {
+    return res.status(400).json({ error: 'Invalid look or reserved field', code: 'site_doc_invalid' })
+  }
+  if (err?.code === '23503') {
+    return res.status(400).json({
+      error: 'This login cannot change the parish page. Nothing was changed.',
+      code: 'site_actor_invalid',
+    })
+  }
+  console.error(`${logLabel} failed:`, err)
+  monitor.error(logLabel, err, { orgId: res.req?.organizationId })
+  return res.status(500).json({ error: 'Failed to save site document' })
+}
+
+async function siteResponse(organizationId, row, org) {
+  const history = row ? await listPublishHistory(organizationId) : []
+  return adminSitePayload(row, {
+    slug: org.slug,
+    pagePublished: org.page_published === true,
+    history,
+  })
+}
+
+router.get('/site', async (req, res) => {
+  try {
+    const org = await loadHeldOrg(req.organizationId)
+    const row = await getSiteRow(req.organizationId)
+    const history = row ? await listPublishHistory(req.organizationId) : []
+    res.json({
+      site: adminSitePayload(row, {
+        slug: org?.slug,
+        pagePublished: org?.page_published === true,
+        history,
+      }),
+      catalog: libraryCatalog(),
+    })
+  } catch (err) {
+    console.error('organization.site.get failed:', err)
+    monitor.error('organization.site.get', err, { orgId: req.organizationId })
+    res.status(500).json({ error: 'Failed to load site document' })
+  }
+})
+
+router.put('/site', async (req, res) => {
+  try {
+    const body = req.body && typeof req.body === 'object' ? req.body : {}
+    const org = await loadHeldOrg(req.organizationId)
+    if (!org) return res.status(404).json({ error: 'Organization not found' })
+    // Publish is its own confirmed action. This route only saves the draft.
+    if ('published' in body || 'published_doc' in body || body.publish === true) {
+      return res.status(400).json({
+        error: 'Publishing is a separate confirmed action',
+      })
+    }
+    if ('custom_domain' in body && body.custom_domain != null) {
+      return res.status(400).json({
+        error: 'Custom domains are not enabled (reserved for a later release)',
+      })
+    }
+    // Atlas P1 / Argus N460-1 — never fall back to whole body as draftDoc.
+    // look-only updates must not wipe pages; empty body is 400.
+    const hasDraft = Object.prototype.hasOwnProperty.call(body, 'draft')
+      || Object.prototype.hasOwnProperty.call(body, 'doc')
+    const lookId = body.look_id ?? body.lookId
+    const hasLook = lookId != null && String(lookId).trim() !== ''
+    if (!hasDraft && !hasLook) {
+      return res.status(400).json({ error: 'Provide draft, doc, or look_id' })
+    }
+    const expectedRevision = parseExpectedRevision(body)
+    let row
+    if (hasDraft) {
+      const draftDoc = Object.prototype.hasOwnProperty.call(body, 'draft')
+        ? body.draft
+        : body.doc
+      row = await saveDraft({
+        organizationId: req.organizationId,
+        draftDoc,
+        lookId: hasLook ? lookId : null,
+        slug: org.slug,
+        expectedRevision,
+      })
+    } else {
+      row = await updateLookOnly({
+        organizationId: req.organizationId,
+        lookId,
+        expectedRevision,
+      })
+    }
+    res.json({ site: await siteResponse(req.organizationId, row, org) })
+  } catch (err) {
+    respondSiteError(res, err, 'organization.site.put')
+  }
+})
+
+async function runPublishAction(req, res, logLabel, fn) {
+  try {
+    const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {}
+    const org = await loadHeldOrg(req.organizationId)
+    if (!org) return res.status(404).json({ error: 'Organization not found' })
+    if ('custom_domain' in body && body.custom_domain != null) {
+      return res.status(400).json({
+        error: 'Custom domains are not enabled (reserved for a later release)',
+      })
+    }
+    requireSiteConfirm(body)
+    const expectedRevision = parseExpectedRevision(body)
+    const actor = actorUserId(req)
+    const row = await fn({
+      organizationId: req.organizationId,
+      actorUserId: actor,
+      expectedRevision,
+      slug: org.slug,
+    })
+    // SP-307: unpublish clears page_published; reload so the admin payload
+    // matches the row visitors will see (stale org would still say true).
+    const orgFresh = await loadHeldOrg(req.organizationId)
+    res.json({ site: await siteResponse(req.organizationId, row, orgFresh || org) })
+  } catch (err) {
+    respondSiteError(res, err, logLabel)
+  }
+}
+
+router.post('/site/publish', (req, res) => (
+  runPublishAction(req, res, 'organization.site.publish', publishDraft)
+))
+
+router.post('/site/unpublish', (req, res) => (
+  runPublishAction(req, res, 'organization.site.unpublish', unpublishSite)
+))
+
+router.post('/site/revert', (req, res) => (
+  runPublishAction(req, res, 'organization.site.revert', revertPublished)
+))
+
 
 export default router

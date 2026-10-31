@@ -44,6 +44,29 @@ async function planIdFor(orgId) {
   return rows[0]?.plan || 'free'
 }
 
+// José 2026-10-23: a parish running AI on its OWN key has no monthly
+// limit — it pays its own provider and lives under its provider's rate
+// limits. The plan's ai_generations_per_month applies only to AI the
+// platform pays for. Usage rows are still recorded either way. A provider
+// chosen with no stored key is not "own key" (the gate refuses it anyway).
+async function hasOwnKey(orgId) {
+  const { rows } = await pool.query(
+    `SELECT (ai_provider IS NOT NULL AND ai_api_key_enc IS NOT NULL) AS own
+       FROM ochr_organizations WHERE id = $1`,
+    [orgId]
+  )
+  return rows[0]?.own === true
+}
+
+// The limit that actually applies: null (none) for own-key parishes.
+async function effectiveLimit(orgId) {
+  const planId = await planIdFor(orgId)
+  const plan   = getPlan(planId)
+  const ownKey = await hasOwnKey(orgId)
+  const limit  = ownKey ? null : (plan.limits?.ai_generations_per_month ?? null)
+  return { planId, ownKey, limit }
+}
+
 // Count successful AI calls for the org within the current period.
 async function currentUsage(orgId) {
   const { rows } = await pool.query(
@@ -59,9 +82,7 @@ async function currentUsage(orgId) {
 // Public: full quota snapshot for an org. Used by the gate AND the
 // GET /api/ai/quota endpoint (UI meter).
 export async function quotaFor(orgId) {
-  const planId = await planIdFor(orgId)
-  const plan   = getPlan(planId)
-  const limit  = plan.limits?.ai_generations_per_month ?? null
+  const { planId, ownKey, limit } = await effectiveLimit(orgId)
   const used   = await currentUsage(orgId)
 
   const exceeded  = limit !== null && used >= limit
@@ -73,6 +94,7 @@ export async function quotaFor(orgId) {
     limit,             // null = unlimited
     remaining,         // null = unlimited
     exceeded,
+    own_key:      ownKey,  // true = parish's own key; no monthly limit
     period_start: periodStart().toISOString(),
     period_end:   periodEnd().toISOString(),
   }
@@ -104,11 +126,9 @@ export async function recordUsage(orgId, { endpoint, type, userId, provider, mod
 //   { reserved: false, quota }             — at/over limit; caller 429s
 // Throws on DB error so the caller can FAIL CLOSED (never silently proceed).
 export async function reserveSlot(orgId, { endpoint, type, userId, provider, model }) {
-  const planId = await planIdFor(orgId)
-  const plan   = getPlan(planId)
-  const limit  = plan.limits?.ai_generations_per_month ?? null
+  const { planId, ownKey, limit } = await effectiveLimit(orgId)
 
-  // Unlimited plan — no counting or reservation needed, but we still
+  // Own key or unlimited plan — no counting or reservation needed, but we still
   // record a usage row so analytics/reporting (ochr_ai_usage) sees
   // unlimited-org activity. Return its id so provider/model can be
   // filled in after the LLM call and so a failed call can refund it.
@@ -158,6 +178,7 @@ export async function reserveSlot(orgId, { endpoint, type, userId, provider, mod
           limit,
           remaining:    Math.max(limit - priorUsed, 0),
           exceeded:     true,
+          own_key:      ownKey,
           period_start: periodStart().toISOString(),
           period_end:   periodEnd().toISOString(),
         },

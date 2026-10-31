@@ -36,10 +36,10 @@ app.use('/api/assistant', assistantRouter)
 beforeEach(() => { cap.stopped = false; cap.sdk = 0; cap.inserts = 0 })
 
 describe('grounded requests through the real gate, keys unset', () => {
-  it('no platform key: 503 ai_unavailable, zero SDK constructions, nothing logged', async () => {
+  it('no parish key, no platform key: 409 ai_key_required (D-01), zero SDK constructions, nothing logged', async () => {
     const r = await request(app).post('/api/assistant').send({ question: 'Synthetic?', page_route: '/register', help_key: 'register' })
-    expect(r.status).toBe(503)
-    expect(r.body).toEqual({ code: 'ai_unavailable', error: 'AI is not available right now.' })
+    expect(r.status).toBe(409)
+    expect(r.body).toEqual({ code: 'ai_key_required', error: "Your parish hasn't added an AI key yet. An admin can add your parish's Anthropic or OpenAI API key in Settings." })
     expect(cap.sdk).toBe(0)
     expect(cap.inserts).toBe(0)
   })
@@ -52,9 +52,9 @@ describe('grounded requests through the real gate, keys unset', () => {
     expect(cap.sdk).toBe(0)
   })
 
-  it('status is an explicit available:false with no key', async () => {
+  it('status is an explicit available:false with no key, and says why (ai_key_required)', async () => {
     const r = await request(app).get('/api/assistant/status')
     expect(r.status).toBe(200)
-    expect(r.body).toEqual({ available: false })
+    expect(r.body).toEqual({ available: false, code: 'ai_key_required' })
   })
 })

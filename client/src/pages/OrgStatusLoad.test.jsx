@@ -61,7 +61,8 @@ function mount() {
 }
 
 const INDEPENDENT = /This parish is independent/i
-const BUILTIN = /Using OpenChurch's built-in AI/i
+// D-01: with no parish key the card says so; there is no built-in AI.
+const BUILTIN = /No AI key yet\. OpenChurch does not supply one/i
 
 beforeEach(() => {
   vi.unstubAllGlobals()
@@ -118,11 +119,12 @@ describe('parish status when a settings read is refused', () => {
     expect(screen.queryByText(BUILTIN)).not.toBeInTheDocument()
   })
 
-  it('still says when the parish is on the built-in assistant', async () => {
+  it('still says when the parish has no AI key of its own (D-01: no built-in AI)', async () => {
     const en = STRINGS.en
     stub()
     mount()
     expect(await screen.findByText(BUILTIN)).toBeInTheDocument()
+    expect(screen.queryByText(/built-in AI/i)).not.toBeInTheDocument()
     expect(screen.queryByText(en['org.aiUnread'])).not.toBeInTheDocument()
   })
 

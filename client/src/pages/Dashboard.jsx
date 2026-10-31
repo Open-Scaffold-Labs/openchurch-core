@@ -9,7 +9,7 @@ import {
   CircleCheck, CircleDot, Circle, AlertTriangle, Flame,
   Info, Loader2, X, Church, Printer, RotateCcw,
 } from 'lucide-react'
-import PageWrapper from '../components/PageWrapper'
+import PageWrapper, { PageHeader } from '../components/PageWrapper'
 import EmptyState from '../components/EmptyState'
 import DailyVerseCard from '../components/DailyVerseCard'
 import NextOnCalendar from '../components/NextOnCalendar'
@@ -18,6 +18,7 @@ import LiturgicalDayDetail from '../components/LiturgicalDayDetail'
 import LiturgicalWidget from '../components/LiturgicalWidget'
 import GettingSettledCard from '../components/GettingSettledCard'
 import DailyChecklists from '../components/DailyChecklists'
+import AfterMassIntentionsPrompt from '../components/AfterMassIntentionsPrompt'
 import { useAuth } from '../context/AuthContext'
 import { useConfirm } from '../components/ConfirmProvider'
 import { useToast } from '../components/ToastProvider'
@@ -28,20 +29,11 @@ import { todayLocalISO, parseStoredDate, parseLocalDate } from '../utils/dates'
 const VIEWER_EVENTS_TASKS = viewerMayRead('/api/events') && viewerMayRead('/api/tasks')
 import { initials, loadList, memberRosterUnreadable } from '../utils/format'
 
-// Due copy for a task DATE. `now` is injectable so a US-evening test
-// can prove the label is the stored day, not UTC midnight.
-export function dueLabelFor(due_date, now = new Date()) {
-  if (!due_date) return null
-  const today = new Date(now)
-  today.setHours(0, 0, 0, 0)
-  const d = parseStoredDate(due_date) ?? parseLocalDate(due_date)
-  d.setHours(0, 0, 0, 0)
-  const diff = Math.round((d - today) / 86400000)
-  if (diff < 0)  return { text: `${Math.abs(diff)}d overdue`, cls: 'text-rose-500 dark:text-rose-400' }
-  if (diff === 0) return { text: 'Due today',                  cls: 'text-amber-700 dark:text-amber-400' }
-  if (diff === 1) return { text: 'Due tomorrow',               cls: 'text-amber-700 dark:text-amber-300' }
-  return { text: `Due in ${diff}d`, cls: 'text-ink-500 dark:text-parchment-300/70' }
-}
+// Due copy for a task DATE lives in utils/taskDue so the Tasks page
+// (SP-153) and the Dashboard share one source.
+export { dueLabelFor } from '../utils/taskDue'
+import { dueLabelFor, isTaskOverdue } from '../utils/taskDue'
+import { unfoldMotion, glideTransition } from '../utils/motion'
 
 // Upcoming is the event's civil day on or after local today. A DATE
 // parsed with new Date() is the previous evening west of UTC, so a
@@ -132,13 +124,18 @@ const CATEGORY_COLORS = {
   SERVICE_PREP: CATEGORY_CHIP,
   MAINTENANCE:  CATEGORY_CHIP,
 }
-const CATEGORY_LABELS = {
-  OPENING: 'Opening', CLOSING: 'Closing', DAILY_OPS: 'Daily Ops',
-  CLEANING: 'Cleaning', SERVICE_PREP: 'Service Prep', MAINTENANCE: 'Maintenance',
+// Task categories are stored tokens (OPENING, SERVICE_PREP…); only the
+// chip text follows the language. An unknown token reads as itself.
+export function taskCategoryLabel(tr, cat) {
+  if (!cat) return ''
+  const key = `dash.cat.${cat}`
+  const s = tr(key)
+  return s === key ? String(cat).replace(/_/g, ' ') : s
 }
 
-function UrgentTasks({ tasks }) {
+export function UrgentTasks({ tasks }) {
   const { t } = useLocale()
+  const tr = t // the task rows below shadow `t`
   const toast = useToast()
   const [doneIds, setDoneIds] = useState(new Set())
   // Collapse state — persisted under the ochr_ key prefix so the
@@ -158,7 +155,9 @@ function UrgentTasks({ tasks }) {
   today.setHours(0, 0, 0, 0)
 
   const urgent = (tasks ?? [])
-    .filter(t => t.priority === 'HIGH' && t.status !== 'COMPLETED' && !doneIds.has(t.id))
+    // SP-156: Help promises "urgent and overdue tasks"; an overdue MEDIUM
+    // or LOW task used to be dropped here. Urgent = HIGH or past due.
+    .filter(t => (t.priority === 'HIGH' || isTaskOverdue(t, today)) && t.status !== 'COMPLETED' && !doneIds.has(t.id))
     .slice()
     .sort((a, b) => {
       if (!a.due_date && !b.due_date) return 0
@@ -185,7 +184,7 @@ function UrgentTasks({ tasks }) {
     } catch { ok = false }
     if (!ok) {
       setDoneIds(prev => { const next = new Set(prev); next.delete(id); return next })
-      toast.error("That didn't save — the task is still open.")
+      toast.error(t('dash.taskStillOpen'))
     }
   }
 
@@ -206,13 +205,13 @@ function UrgentTasks({ tasks }) {
         type="button"
         onClick={toggleCollapsed}
         aria-expanded={!collapsed}
-        aria-label={collapsed ? 'Show urgent tasks' : 'Hide urgent tasks'}
+        aria-label={collapsed ? t('dash.urgent.show') : t('dash.urgent.hide')}
         className={`flex items-center gap-2 w-full text-left ${collapsed ? '' : 'mb-3'}`}
       >
         <Flame size={15} className="text-rose-500" />
         <span className="text-sm font-bold text-rose-700 dark:text-rose-400">{t('dash.urgent')}</span>
         <span className="ml-auto text-xs text-rose-400 dark:text-rose-500 font-medium">
-          {urgent.length > 0 ? t('dash.urgentCount', { n: urgent.length }) : t('dash.allClear')}
+          {urgent.length > 0 ? t('dash.urgentOpen', { n: urgent.length }) : t('dash.allClear')}
         </span>
         {collapsed
           ? <ChevronDown size={15} className="text-rose-400 dark:text-rose-500" />
@@ -223,10 +222,7 @@ function UrgentTasks({ tasks }) {
         {!collapsed && (
           <motion.div
             key="urgent-body"
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: 'auto', opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.2, ease: 'easeOut' }}
+            {...unfoldMotion}
             className="overflow-hidden"
           >
             <AnimatePresence mode="popLayout">
@@ -254,14 +250,14 @@ function UrgentTasks({ tasks }) {
                         >
                           <button
                             onClick={() => complete(t.id)}
-                            title="Mark complete"
+                            title={tr('dash.markComplete')}
                             className="shrink-0 w-5 h-5 box-content p-0.5 -m-0.5 rounded-full border-2 border-rose-300 dark:border-rose-700 hover:border-brass-500 hover:bg-brass-50 dark:hover:bg-brass-900/30 transition-colors flex items-center justify-center group"
                           >
                             <CircleCheck size={12} className="text-transparent group-hover:text-brass-600 transition-colors" />
                           </button>
                           <span className="flex-1 text-sm font-medium text-ink-900 dark:text-parchment-50 truncate">{t.title}</span>
-                          <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full shrink-0 ${CATEGORY_COLORS[t.category] ?? 'bg-parchment-200 text-ink-600'}`}>
-                            {CATEGORY_LABELS[t.category] ?? t.category}
+                          <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full shrink-0 ${CATEGORY_COLORS[t.category] ?? 'bg-parchment-200 text-ink-600'}`}>
+                            {taskCategoryLabel(tr, t.category)}
                           </span>
                           {due && <span className={`text-xs font-semibold shrink-0 ${due.cls}`}>{due.text}</span>}
                         </motion.li>
@@ -281,6 +277,7 @@ function UrgentTasks({ tasks }) {
 // ── Daily Briefing ────────────────────────────────────────────
 export function DailyBriefing({ data }) {
   const { t, dateLocale } = useLocale()
+  const tr = t // the task rows below shadow `t`
   const today   = new Date()
   // Local day key — toISOString() gives the UTC day, which misclassifies
   // "today's events" near midnight (1.1).
@@ -318,7 +315,7 @@ export function DailyBriefing({ data }) {
       status: data.tasksFailed ? 'warn' : highTasks.length > 0 ? 'warn' : pendingTasks.length > 0 ? 'active' : 'clear',
       items: pendingTasks.slice(0, 3).map(t => ({
         label: t.title,
-        sub: t.category.replace(/_/g, ' '),
+        sub: taskCategoryLabel(tr, t.category),
         dot: t.priority === 'HIGH' ? 'bg-rose-500' : t.priority === 'MEDIUM' ? 'bg-amber-400' : 'bg-ink-300',
       })),
     },
@@ -436,7 +433,7 @@ export function DailyBriefing({ data }) {
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center justify-between gap-3 flex-wrap">
                     <p className="text-sm font-semibold text-ink-900 dark:text-parchment-50">{row.label}</p>
-                    <span className={`flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full border shrink-0 ${statusBadge[row.status]}`}>
+                    <span className={`flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-full border shrink-0 ${statusBadge[row.status]}`}>
                       <SIcon size={9} /> {statusLabel[row.status]}
                     </span>
                   </div>
@@ -448,7 +445,7 @@ export function DailyBriefing({ data }) {
                       {row.items.map((item, j) => (
                         <div key={j} className="flex items-center gap-2">
                           {item.avatar ? (
-                            <div className={`w-4 h-4 rounded-full flex items-center justify-center text-parchment-50 text-[8px] font-bold shrink-0 ${item.avatarColor}`}>
+                            <div className={`w-4 h-4 rounded-full flex items-center justify-center text-parchment-50 text-[11px] font-bold shrink-0 ${item.avatarColor}`}>
                               {item.avatar}
                             </div>
                           ) : (
@@ -608,15 +605,15 @@ export function MembersTab({ data }) {
           className="lg:col-span-2 bg-parchment-50 dark:bg-ink-900/90 rounded-2xl border border-parchment-300/50 dark:border-brass-900/30 shadow-warm-md overflow-hidden"
         >
           <div className="flex items-center justify-between px-5 py-4 border-b border-parchment-300/50 dark:border-brass-900/25">
-            <h3 className="font-display text-lg font-semibold text-ink-900 dark:text-parchment-50">Recently Added</h3>
+            <h3 className="font-display text-lg font-semibold text-ink-900 dark:text-parchment-50">{t('dash.recentlyAdded')}</h3>
             <Link to="/clients" className="text-xs font-semibold text-church-700 hover:text-church-900 dark:text-brass-300 dark:hover:text-brass-200 flex items-center gap-1">
-              View all <ChevronRight size={12} />
+              {t('dash.view_all')} <ChevronRight size={12} />
             </Link>
           </div>
           {rosterUnreadable ? (
             <p role="status" className="px-5 py-10 text-center text-sm text-amber-700 dark:text-amber-400">{t('mem.listFailed')}</p>
           ) : members.length === 0 ? (
-            <div className="px-5 py-10 text-center text-sm text-ink-500 dark:text-parchment-300/70">No members yet.</div>
+            <div className="px-5 py-10 text-center text-sm text-ink-500 dark:text-parchment-300/70">{t('dash.noMembersYet')}</div>
           ) : (
             <div className="divide-y divide-parchment-200/50 dark:divide-brass-900/20">
               {members.map((m, i) => {
@@ -656,11 +653,11 @@ export function MembersTab({ data }) {
         <motion.div variants={fadeUp(5)} initial="hidden" animate="show"
           className="bg-parchment-50 dark:bg-ink-900/90 rounded-2xl border border-parchment-300/50 dark:border-brass-900/30 shadow-warm-md p-5"
         >
-          <h3 className="font-display text-lg font-semibold text-ink-900 dark:text-parchment-50 mb-4">By Role</h3>
+          <h3 className="font-display text-lg font-semibold text-ink-900 dark:text-parchment-50 mb-4">{t('dash.byRole')}</h3>
           {rosterUnreadable ? (
             <p role="status" className="text-xs text-amber-700 dark:text-amber-400">{t('mem.listFailed')}</p>
           ) : Object.entries(roles).length === 0 ? (
-            <p className="text-xs text-ink-500 dark:text-parchment-300/70">No data yet.</p>
+            <p className="text-xs text-ink-500 dark:text-parchment-300/70">{t('dash.noDataYet')}</p>
           ) : (
             <div className="space-y-3">
               {Object.entries(roles).sort(([, a], [, b]) => b - a).map(([role, count]) => (
@@ -714,15 +711,15 @@ function EventsTab({ data }) {
           className="bg-parchment-50 dark:bg-ink-900/90 rounded-2xl border border-parchment-300/50 dark:border-brass-900/30 shadow-warm-md overflow-hidden"
         >
           <div className="flex items-center justify-between px-5 py-4 border-b border-parchment-300/50 dark:border-brass-900/25">
-            <h3 className="font-display text-lg font-semibold text-ink-900 dark:text-parchment-50">Upcoming Events</h3>
+            <h3 className="font-display text-lg font-semibold text-ink-900 dark:text-parchment-50">{t('dash.upcomingEvents')}</h3>
             <Link to="/events" className="text-xs font-semibold text-church-700 hover:text-church-900 dark:text-brass-300 dark:hover:text-brass-200 flex items-center gap-1">
-              Manage <ChevronRight size={12} />
+              {t('dash.manage')} <ChevronRight size={12} />
             </Link>
           </div>
           {data.eventsFailed ? (
             <p role="status" className="px-5 py-10 text-center text-sm text-amber-800 dark:text-amber-300">{t('dash.upcomingUnread')}</p>
           ) : upcoming.length === 0 ? (
-            <div className="px-5 py-10 text-center text-sm text-ink-500 dark:text-parchment-300/70">No upcoming events.</div>
+            <div className="px-5 py-10 text-center text-sm text-ink-500 dark:text-parchment-300/70">{t('dash.noUpcoming')}</div>
           ) : (
             <div className="divide-y divide-parchment-200/50 dark:divide-brass-900/20">
               {upcoming.map((e, i) => (
@@ -754,15 +751,15 @@ function EventsTab({ data }) {
           className="bg-parchment-50 dark:bg-ink-900/90 rounded-2xl border border-parchment-300/50 dark:border-brass-900/30 shadow-warm-md overflow-hidden"
         >
           <div className="flex items-center justify-between px-5 py-4 border-b border-parchment-300/50 dark:border-brass-900/25">
-            <h3 className="font-display text-lg font-semibold text-ink-900 dark:text-parchment-50">Weekly Schedule</h3>
+            <h3 className="font-display text-lg font-semibold text-ink-900 dark:text-parchment-50">{t('dash.weeklySchedule')}</h3>
             <Link to="/schedule" className="text-xs font-semibold text-church-700 hover:text-church-900 dark:text-brass-300 dark:hover:text-brass-200 flex items-center gap-1">
-              Open calendar <ChevronRight size={12} />
+              {t('dash.open_calendar')} <ChevronRight size={12} />
             </Link>
           </div>
           {weekFailed && scheduleRows.length === 0 ? (
             <p role="status" className="px-5 py-10 text-center text-sm text-amber-800 dark:text-amber-300">{t('dash.weekUnread')}</p>
           ) : scheduleRows.length === 0 && calendarRows.length === 0 ? (
-            <div className="px-5 py-10 text-center text-sm text-ink-500 dark:text-parchment-300/70">No schedule entries yet.</div>
+            <div className="px-5 py-10 text-center text-sm text-ink-500 dark:text-parchment-300/70">{t('dash.noSchedule')}</div>
           ) : (
             <div className="divide-y divide-parchment-200/50 dark:divide-brass-900/20">
               {scheduleRows.slice(0, 6).map((s, i) => (
@@ -825,7 +822,17 @@ function weekWindow() { return dayWindow(6) }
 const NEXT_ON_CALENDAR_DAYS = 365
 const NEXT_ON_CALENDAR_LIMIT = 3
 
+export function sampleParts(t, counts = {}) {
+  const { members, events, tasks } = counts
+  return [
+    members && t(members === 1 ? 'dash.sample.memberOne' : 'dash.sample.memberMany', { n: members }),
+    events  && t(events === 1 ? 'dash.sample.eventOne' : 'dash.sample.eventMany', { n: events }),
+    tasks   && t(tasks === 1 ? 'dash.sample.taskOne' : 'dash.sample.taskMany', { n: tasks }),
+  ].filter(Boolean)
+}
+
 function SampleDataBanner({ onCleared }) {
+  const { t } = useLocale()
   const ask = useConfirm()
   const [status,  setStatus]  = useState(null)   // { hasSamples, counts } | null
   const [clearing, setClearing] = useState(false)
@@ -850,17 +857,13 @@ function SampleDataBanner({ onCleared }) {
     // schedule with no way back. The counts are named in the body because
     // "clear sample data" undersells what is about to go.
     const { members, events, tasks } = status.counts
-    const tally = [
-      members && `${members} member${members === 1 ? '' : 's'}`,
-      events  && `${events} event${events === 1 ? '' : 's'}`,
-      tasks   && `${tasks} task${tasks === 1 ? '' : 's'}`,
-    ].filter(Boolean).join(', ')
+    const tally = sampleParts(t, status.counts).join(', ')
     if (!(await ask({
-      title: 'Clear the sample data?',
+      title: t('dash.sample.confirmTitle'),
       body: tally
-        ? `This deletes ${tally}, along with any sample donations, staff and schedule. It cannot be undone. Nothing you have added yourself is touched.`
-        : 'This deletes every [Sample] row in your workspace. It cannot be undone. Nothing you have added yourself is touched.',
-      confirmLabel: 'Clear sample data',
+        ? t('dash.sample.confirmBody', { tally })
+        : t('dash.sample.confirmBodyAll'),
+      confirmLabel: t('dash.sample.clear'),
     }))) return
 
     setClearing(true)
@@ -871,18 +874,13 @@ function SampleDataBanner({ onCleared }) {
       setStatus({ hasSamples: false, counts: { members: 0, events: 0, tasks: 0 } })
       onCleared?.()
     } catch (err) {
-      setError(err.message || 'Failed to clear sample data')
+      setError(t('dash.sample.failed'))
     } finally {
       setClearing(false)
     }
   }
 
-  const { members, events, tasks } = status.counts
-  const parts = [
-    members && `${members} member${members === 1 ? '' : 's'}`,
-    events  && `${events} event${events === 1 ? '' : 's'}`,
-    tasks   && `${tasks} task${tasks === 1 ? '' : 's'}`,
-  ].filter(Boolean).join(' · ')
+  const parts = sampleParts(t, status.counts).join(' · ')
 
   // The copy shifts once the admin has clearly transitioned to real
   // data (Sprint O / O.1). Pre-transition: "we added samples so the
@@ -906,13 +904,13 @@ function SampleDataBanner({ onCleared }) {
       <div className="flex-1 min-w-0">
         <p className="text-sm font-semibold text-ink-800 dark:text-parchment-100">
           {hasTransitioned
-            ? 'You\'ve added real data — ready to clear the samples?'
-            : 'Your workspace has sample data'}
+            ? t('dash.sample.readyTitle')
+            : t('dash.sample.hasTitle')}
         </p>
         <p className="text-xs text-ink-500 dark:text-parchment-300/70 mt-0.5 leading-relaxed">
           {hasTransitioned
-            ? <>The {parts} marked <span className="font-mono">[Sample]</span> are still in your workspace. Clearing them leaves your real data untouched.</>
-            : <>We added {parts} so the pages aren't empty. Every sample row starts with <span className="font-mono">[Sample]</span>. Clear them whenever you're ready to start fresh.</>
+            ? <>{t('dash.sample.readyBefore', { parts })} <span className="font-mono">[Sample]</span> {t('dash.sample.readyAfter')}</>
+            : <>{t('dash.sample.hasBefore', { parts })} <span className="font-mono">[Sample]</span>. {t('dash.sample.hasAfter')}</>
           }
         </p>
         {error && (
@@ -926,7 +924,7 @@ function SampleDataBanner({ onCleared }) {
         className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-church-900 dark:bg-church-700 text-parchment-50 text-xs font-semibold shadow-warm hover:bg-church-800 dark:hover:bg-church-600 transition-colors disabled:opacity-50"
       >
         {clearing ? <Loader2 size={13} className="animate-spin" /> : <X size={13} />}
-        {clearing ? 'Clearing…' : 'Clear sample data'}
+        {clearing ? t('dash.sample.clearing') : t('dash.sample.clear')}
       </button>
     </motion.div>
   )
@@ -1027,7 +1025,7 @@ export default function Dashboard() {
   useEffect(() => { load() }, [load])
 
   return (
-    <PageWrapper>
+    <PageWrapper type="list">
       <div className="space-y-6">
 
         {/* First-run checklist — admin-only, hides when all items
@@ -1043,10 +1041,10 @@ export default function Dashboard() {
             <AlertCircle size={18} className="shrink-0 mt-0.5 text-amber-700 dark:text-amber-400" aria-hidden="true" />
             <div className="flex-1 min-w-0">
               <p className="text-sm font-semibold text-ink-900 dark:text-parchment-50">
-                Some of today's information didn't load.
+                {t('dash.some_of_today_s_information')}
               </p>
               <p className="text-sm text-ink-600 dark:text-parchment-300/80 mt-0.5">
-                Nothing was lost — this is a connection problem, not your parish's data.
+                {t('dash.nothing_was_lost_this_is')}
               </p>
             </div>
             <button
@@ -1064,6 +1062,9 @@ export default function Dashboard() {
 
         {!isViewer && <SampleDataBanner onCleared={load} />}
 
+        {/* SP-185: calm after-Mass prompt (admin and secretary only). */}
+        <AfterMassIntentionsPrompt />
+
         {/* Page header */}
         <motion.div variants={fadeUp(0)} initial="hidden" animate="show" className="flex items-center justify-between">
           <div>
@@ -1073,7 +1074,7 @@ export default function Dashboard() {
                 <span className="text-xs font-semibold text-brass-700 dark:text-brass-300 uppercase tracking-widest">{parishName}</span>
               </div>
             )}
-            <h1 className="font-display text-4xl font-semibold text-ink-900 dark:text-parchment-50 tracking-tight">{t('dash.title')}</h1>
+            <PageHeader title={t('dash.title')} />
           </div>
         </motion.div>
 
@@ -1094,7 +1095,7 @@ export default function Dashboard() {
                   <motion.div
                     layoutId="tab-pill"
                     className="absolute inset-0 bg-parchment-50 dark:bg-ink-800 rounded-lg shadow-warm"
-                    transition={{ type: 'spring', bounce: 0.2, duration: 0.4 }}
+                    transition={glideTransition}
                   />
                 )}
                 <Icon size={14} className={`relative z-10 transition-colors ${isActive ? 'text-ink-900 dark:text-parchment-50' : 'text-ink-500 dark:text-parchment-300/70'}`} />
@@ -1133,7 +1134,7 @@ export function MemberOutreachUnbuilt() {
   const { t } = useLocale()
   const navigate = useNavigate()
   return (
-    <PageWrapper>
+    <PageWrapper type="list">
       <div className="max-w-lg mx-auto py-16">
         <EmptyState
           icon={MessageSquare}

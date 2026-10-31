@@ -6,6 +6,7 @@
 // R313-2: the past-scheduled empty state narrowed by search/status says only
 // that nothing MATCHES; it never claims no past scheduled intention exists.
 import { ToastProvider } from '../components/ToastProvider'
+import { ConfirmProvider } from '../components/ConfirmProvider'
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
@@ -53,7 +54,7 @@ const req = match => waitFor(() => {
   r.used = true; return r
 }, { timeout: 2000 })
 const settle = async (r, body, status) => { await act(async () => { r.settle(body, status); await Promise.resolve() }); await act(async () => {}) }
-const book = () => render(<MemoryRouter initialEntries={['/mass-intentions']}><LocaleProvider><ToastProvider><Routes><Route path="/mass-intentions" element={<MassIntentions />} /></Routes></ToastProvider></LocaleProvider></MemoryRouter>)
+const book = () => render(<MemoryRouter initialEntries={['/mass-intentions']}><LocaleProvider><ToastProvider><Routes><Route path="/mass-intentions" element={<ConfirmProvider><MassIntentions /></ConfirmProvider>} /></Routes></ToastProvider></LocaleProvider></MemoryRouter>)
 const loadMoreBtn = () => screen.queryByRole('button', { name: en['mi.loadMore'] })
 async function firstUnfilteredPage() {
   book()

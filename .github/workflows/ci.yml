@@ -82,7 +82,7 @@ jobs:
       # DOCS-ONLY SKIP, and why it is narrow. Docs are not inert here:
       # client tests read docs/*.md and README.md, and the
       # support route reads docs/SUPPORT-CONTEXT.md. So a PR skips the work
-      # below only when EVERY changed path is docs/** or a top-level *.md AND no changed
+      # below only when EVERY changed path is docs/**, .cursor/** or a top-level *.md AND no changed
       # file's name appears anywhere in code, tests, scripts or workflows.
       # Anything else — including any failure to compute the list — runs
       # everything. Pushes to main and manual runs always run everything.
@@ -98,7 +98,7 @@ jobs:
         # if the guard's own tests fail, the job fails rather than trusting
         # it to choose a scope.
         run: |
-          node --test scripts/ci-scope.test.mjs
+          node --test scripts/ci-scope.test.mjs scripts/backup-export/lib.test.mjs
           bash scripts/ci-scope.sh
 
       - name: Set up Node
@@ -151,7 +151,7 @@ jobs:
       # dependencies.
       - name: Honest failure (no screen invents an answer)
         if: steps.scope.outputs.run == 'true'
-        run: npm run lint:honest && node --test scripts/honest-failure.test.mjs
+        run: npm run lint:honest && node --test scripts/honest-failure.test.mjs scripts/withheld-read-scan.test.mjs scripts/withheld-read-scan-shell.test.mjs scripts/export-boundary.test.mjs
 
       # A database row is not an API response. ochr_donations carries a
       # GENERATED tsvector — the stemmed tokens of donor_name, category and

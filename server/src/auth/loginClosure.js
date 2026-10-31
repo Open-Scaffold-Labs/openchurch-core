@@ -10,10 +10,11 @@ import crypto from 'node:crypto'
 import bcrypt from 'bcryptjs'
 import { closureReviewReport } from './closureReview.js'
 import { sqlEmailSha256 } from '../utils/emailNorm.js'
+import { RECORD_ADDRESSED_TYPES } from '../notifications/transport.js'
 import {
   withLoginTransaction,
   lockLoginForAdminCount,
-  countOtherActiveAdmins,
+  countOtherUsableAdmins,
   cancelPendingNotificationsForLogin,
 } from './loginDeactivation.js'
 
@@ -117,7 +118,7 @@ export function closeLogin({ organizationId, targetId, closedBy }) {
     if (target.closed_at) {
       return { status: 200, body: { ...await readReceipt(client, organizationId, targetId), ...await closureReviewReport(client, organizationId, targetId) } }
     }
-    if (target.role === 'admin' && countOtherActiveAdmins(rows, targetId) === 0) {
+    if (target.role === 'admin' && countOtherUsableAdmins(rows, targetId) === 0) {
       return { status: 409, body: { error: ONLY_ACTIVE_ADMIN_CLOSE } }
     }
 
@@ -157,7 +158,12 @@ export function closeLogin({ organizationId, targetId, closedBy }) {
     )
     // F-06: a closed login must not keep receiving mail queued before
     // closure. Match on id AND the pre-closure address, this org only.
-    await cancelPendingNotificationsForLogin(client, organizationId, targetId, target.email, 'login closed')
+    // CAROLINA-423-R2: closure is not member removal, so the address match
+    // skips record-addressed types (a donation receipt to a member or donor
+    // record that shares the address), the same filter deletion uses. Rows
+    // addressed to this login's id are still cancelled whatever their type.
+    await cancelPendingNotificationsForLogin(client, organizationId, targetId, target.email, 'login closed',
+      { skipRecordAddressedTypes: RECORD_ADDRESSED_TYPES })
     // ARG-V2-1 (PR6): closure tombstones the address, so mail queued LATER
     // by address only can no longer be matched to this login. Remember an
     // unsalted SHA-256 of the former address (same normalisation as every
@@ -322,7 +328,7 @@ export function closeLogin({ organizationId, targetId, closedBy }) {
 // is left as written and counted for review. The row, its action, actor,
 // entity, time, and every other metadata key stay. Older rows written
 // against a zero-padded id ("007") are matched on the canonical id.
-async function minimizeSubjectCopies(client, organizationId, targetId, currentName) {
+export async function minimizeSubjectCopies(client, organizationId, targetId, currentName) {
   const id = String(targetId)
   const name = typeof currentName === 'string' && currentName.trim() ? currentName : null
   const scope = `organization_id = $1 AND entity_type = 'user'

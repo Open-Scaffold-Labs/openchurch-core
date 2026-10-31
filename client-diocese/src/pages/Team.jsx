@@ -230,7 +230,7 @@ export default function Team() {
               <option value="admin">Administrator</option>
               <option value="viewer">Viewer</option>
             </select>
-            <p className="mt-1 text-[11.5px] text-ink-500 leading-relaxed">{ROLE_MEANS[form.role]}</p>
+            <p className="mt-1 text-[11px] text-ink-500 leading-relaxed">{ROLE_MEANS[form.role]}</p>
           </div>
 
           {/* A separate question from the role, on purpose. */}
@@ -240,7 +240,7 @@ export default function Team() {
                 onChange={e => setForm(f => ({ ...f, pastoral_lead: e.target.checked }))} />
               <span>
                 Pastoral leadership
-                <span className="block text-[11.5px] text-ink-500 leading-relaxed mt-0.5">
+                <span className="block text-[11px] text-ink-500 leading-relaxed mt-0.5">
                   May read the office’s internal notes about a parish, and print a brief
                   carrying contact details. Give this to the people who actually sit with
                   parishes — it is not a seniority marker, and it is not the same as
@@ -254,7 +254,7 @@ export default function Team() {
             className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-church-600 text-parchment-50 text-sm font-semibold hover:bg-church-700 disabled:opacity-60">
             <Send size={14} /> Send the invitation
           </button>
-          <p className="text-[11.5px] text-ink-400 leading-relaxed">
+          <p className="text-[11px] text-ink-400 leading-relaxed">
             They choose their own password. You will never see it.
           </p>
         </form>
@@ -294,7 +294,7 @@ export default function Team() {
             {users.map(u => (
               <li key={u.id} className="bg-parchment-50 px-4 py-3 flex flex-wrap items-start justify-between gap-3">
                 <div className="min-w-0">
-                  <p className="text-[13.5px] font-medium text-ink-900">
+                  <p className="text-sm font-medium text-ink-900">
                     {u.closed ? t('team.formerOperator') : u.name}
                     {u.closed && (
                       <span className="ml-2 inline-block px-2 py-0.5 rounded-full text-[11px] font-semibold bg-parchment-200/80 text-ink-600">

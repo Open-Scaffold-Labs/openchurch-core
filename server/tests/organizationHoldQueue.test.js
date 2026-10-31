@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 const { query, notify } = vi.hoisted(() => ({ query: vi.fn(), notify: vi.fn() }))
 vi.mock('../src/db.js', () => ({ default: { query } }))
-vi.mock('../src/notifications/transport.js', () => ({ notify }))
+vi.mock('../src/notifications/transport.js', () => ({ notify, RECORD_ADDRESSED_TYPES: new Set(['donation_receipt']) }))
 import { processDueNotifications, scheduleNotification } from '../src/notifications/scheduler.js'
 beforeEach(() => { query.mockReset(); notify.mockReset() })
 describe('organization HOLD queue preservation', () => {

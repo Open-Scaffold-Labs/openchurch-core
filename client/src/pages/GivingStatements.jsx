@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback } from 'react'
 import { Link } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import { FileText, Mail, User as UserIcon, AlertTriangle } from 'lucide-react'
-import PageWrapper from '../components/PageWrapper'
+import PageWrapper, { PageHeader } from '../components/PageWrapper'
 import EmptyState from '../components/EmptyState'
 import { SkeletonRowList } from '../components/Skeleton'
 import { apiUrl } from '../api'
@@ -124,14 +124,14 @@ export default function GivingStatements() {
   // is the defense-in-depth render for someone who typed the URL.
   if (!isAdmin || err === 'admin-only') {
     return (
-      <PageWrapper>
+      <PageWrapper type="list">
         <div className="max-w-2xl mx-auto py-16">
           {/* No stmt.* key names this gate. ins.adminOnly and np.adminsOnly
               speak about insights and notifications, so the sentence stays. */}
           <EmptyState
             icon={AlertTriangle}
-            title="Admins only"
-            body="Year-end giving statements are restricted to admins. Ask an admin in your church to generate statements for you."
+            title={t('gs.adminsOnly')}
+            body={t('gs.adminsOnlyBody')}
           />
         </div>
       </PageWrapper>
@@ -139,7 +139,7 @@ export default function GivingStatements() {
   }
 
   return (
-    <PageWrapper>
+    <PageWrapper type="list">
       <div className="max-w-4xl mx-auto space-y-6">
         {/* Header */}
         <motion.div
@@ -149,12 +149,9 @@ export default function GivingStatements() {
           className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4"
         >
           <div>
-            <h1 className="font-display text-3xl font-semibold text-ink-900 dark:text-parchment-50 tracking-tight">
-              Giving statements
-            </h1>
+            <PageHeader title={t('gs.title')} />
             <p className="text-sm text-ink-500 dark:text-parchment-300/70 mt-1">
-              Year-end donor receipts. Pick a tax year, then open any donor to
-              preview and print their statement.
+              {t('gs.subtitle')}
             </p>
             <p data-testid="statement-list-not-sent" className="text-sm text-ink-500 dark:text-parchment-300/70 mt-1">
               {t('stmt.listHonesty')}
@@ -172,13 +169,13 @@ export default function GivingStatements() {
             className="rounded-2xl border border-parchment-300/60 dark:border-brass-900/30 bg-parchment-50 dark:bg-ink-900 shadow-warm p-5 grid grid-cols-2 gap-4 sm:max-w-md"
           >
             <div>
-              <p className="text-[11px] font-semibold uppercase tracking-wider text-brass-700 dark:text-brass-300">Donors</p>
+              <p className="text-[11px] font-semibold uppercase tracking-wider text-brass-700 dark:text-brass-300">{t('gs.donors')}</p>
               <p className="font-display text-2xl font-semibold text-ink-900 dark:text-parchment-50 mt-1">
                 {data.total_donors}
               </p>
             </div>
             <div>
-              <p className="text-[11px] font-semibold uppercase tracking-wider text-brass-700 dark:text-brass-300">Total given</p>
+              <p className="text-[11px] font-semibold uppercase tracking-wider text-brass-700 dark:text-brass-300">{t('gs.totalGiven')}</p>
               <p className="font-display text-2xl font-semibold text-ink-900 dark:text-parchment-50 mt-1">
                 {fmtCurrency(data.total_amount)}
               </p>
@@ -244,7 +241,7 @@ export default function GivingStatements() {
           <EmptyState
             icon={FileText}
             title={`No donations in ${year}`}
-            body="Statements appear once gifts are logged in the Donations page for that tax year."
+            body={t('gs.emptyBody')}
           />
         ) : (
           <motion.div
@@ -274,14 +271,14 @@ export default function GivingStatements() {
                     </div>
                     {/* Gift count */}
                     <div className="hidden sm:block text-right shrink-0">
-                      <p className="text-[10px] font-semibold uppercase tracking-wider text-ink-500 dark:text-parchment-300/70">Gifts</p>
+                      <p className="text-[11px] font-semibold uppercase tracking-wider text-ink-500 dark:text-parchment-300/70">{t('gs.gifts')}</p>
                       <p className="text-sm font-semibold text-ink-700 dark:text-parchment-200">
                         {d.gift_count}
                       </p>
                     </div>
                     {/* Total — the load-bearing number */}
                     <div className="text-right shrink-0">
-                      <p className="text-[10px] font-semibold uppercase tracking-wider text-ink-500 dark:text-parchment-300/70">Total</p>
+                      <p className="text-[11px] font-semibold uppercase tracking-wider text-ink-500 dark:text-parchment-300/70">{t('gs.total')}</p>
                       <p className="font-display text-lg font-semibold text-church-900 dark:text-brass-200">
                         {fmtCurrency(d.total)}
                       </p>
@@ -296,9 +293,7 @@ export default function GivingStatements() {
         {/* Footnote */}
         {!loading && data && data.total_donors > 0 && (
           <p className="text-xs text-ink-500 dark:text-parchment-300/70 px-1">
-            Donors with an email on file group by email; the rest group by
-            donor name. Click a row to open the printable statement for that
-            donor.
+            {t('gs.groupHint')}
           </p>
         )}
       </div>

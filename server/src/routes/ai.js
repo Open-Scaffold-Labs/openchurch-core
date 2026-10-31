@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import { dispatch, refusalBody } from '../ai/gate.js'
+import { isNativeShellRequest, nativeAiCeilingFromRequest } from '../ai/nativeAiMode.js'
 import pool from '../db.js'
 import { requireIntParam } from '../utils/params.js'
 import { quotaFor, reserveSlot, releaseSlot, updateSlotProvider } from '../billing/aiQuota.js'
@@ -25,9 +26,11 @@ const ALLOWED_TYPES = new Set(Object.keys(SYSTEM_PROMPTS))
 
 // Every model call goes through ai/gate.js dispatch: platform stop,
 // explicit routing (no silent managed fallback), data classes, input bound.
-async function runLLM({ systemPrompt, userPrompt, maxTokens, orgId, capability }) {
+async function runLLM({ systemPrompt, userPrompt, maxTokens, orgId, capability, nativeShell, actorUserId, nativeCeiling }) {
   return dispatch({ orgId, capabilityId: capability, system: systemPrompt,
-    messages: [{ role: 'user', content: userPrompt }], maxTokens })
+    messages: [{ role: 'user', content: userPrompt }], maxTokens,
+    nativeShell: nativeShell === true, actorUserId: actorUserId ?? null,
+    nativeCeiling: nativeShell === true ? nativeCeiling : 'excluded' })
 }
 
 function sendAiFailure(res, err) {
@@ -87,7 +90,7 @@ router.post('/enhance', async (req, res) => {
   const userPrompt   = `Context: ${context || 'General church notes'}\n\nText: ${text}`
 
   try {
-    const { text: result, provider, model } = await runLLM({ systemPrompt, userPrompt, orgId: req.organizationId, capability: 'parish_text_enhance_v1' })
+    const { text: result, provider, model } = await runLLM({ systemPrompt, userPrompt, orgId: req.organizationId, capability: 'parish_text_enhance_v1', nativeShell: isNativeShellRequest(req), actorUserId: req.user.id, nativeCeiling: nativeAiCeilingFromRequest(req) })
     // Backfill the provider/model onto the reserved usage row now that we
     // know which provider served the call. Best-effort — never fails the request.
     updateSlotProvider(slotId, { provider, model }).catch(uErr => monitor.error('ai-quota.update', uErr, { orgId: req.organizationId, endpoint: 'enhance' }))
@@ -172,6 +175,9 @@ router.post('/generate', async (req, res) => {
       orgId: req.organizationId,
       maxTokens: 1500,
       capability: CAPABILITY_FOR_TYPE[type],
+      nativeShell: isNativeShellRequest(req),
+      actorUserId: req.user.id,
+      nativeCeiling: nativeAiCeilingFromRequest(req),
     })
 
     // Backfill the provider/model onto the reserved usage row now that we

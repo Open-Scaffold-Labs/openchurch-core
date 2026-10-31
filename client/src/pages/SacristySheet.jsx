@@ -29,7 +29,23 @@ import { useAuth } from '../context/AuthContext'
 import { useLocale } from '../i18n'
 import { seasonLabel, colorLabel } from '../i18n/liturgical'
 import { priorFulfilmentText } from '../utils/priorFulfilment'
+import { isUnassigned } from '../utils/intentionAssignment'
+import { feastLabelForDay } from '../utils/feastLabel'
+export { feastLabelForDay }
 import { canonicalIsoDate, orgTodayIso, sheetWeekEnd, sheetWeekStart, vigilWeekStart } from '../../../server/src/utils/sheetWeek.js'
+
+// SP-087: the book flags a scheduled intention whose Mass date is before
+// the parish's today as "Past scheduled — fulfilment not recorded". The
+// sheet used to print only the offering for that row. Same rule as the
+// server's pastScheduledSql (status scheduled, mass_date before today on
+// the parish clock); a server-sent past_scheduled flag is honoured too.
+// A reminder only: never "missed", never "said".
+export function sheetPastScheduled(r, todayIso) {
+  if (r?.past_scheduled === true) return true
+  if (r?.status !== 'scheduled') return false
+  const day = canonicalIsoDate(r?.mass_date)
+  return Boolean(day && todayIso && day < todayIso)
+}
 
 const pad = (n) => String(n).padStart(2, '0')
 const iso = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
@@ -41,6 +57,8 @@ function localDate(s) {
   const [y, m, d] = s.split('-').map(Number)
   return new Date(y, m - 1, d)
 }
+
+
 
 // As-offered date groups the sheet. Fulfilled rows with NULL stamps have
 // no offered date — unknown, not empty. Never hand null to localDate.
@@ -87,17 +105,32 @@ export function listingDate(row) {
 
 // Closest dated, non-cancelled book row outside [start, end]. Undated
 // rows have no week to jump to; cancelled rows are not on the sheet.
+// R369-2: civil-day ordinal of a YYYY-MM-DD string, computed in UTC so no
+// browser timezone or DST change can shift it. Differences equal
+// PostgreSQL DATE subtraction on the server.
+function civilDay(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso))
+  if (!m) return NaN
+  return Date.UTC(+m[1], +m[2] - 1, +m[3]) / 86400000
+}
+
 export function nearestOutOfWindowDate(bookRows, start, end) {
   if (!start || !end) return null
   let best = null
   let bestDist = Infinity
-  const mid = Date.parse(`${start}T00:00:00`)
+  // SP-100: distance is measured from the nearer window edge, so a row two
+  // days after the week is not beaten by one six days before it. Ties go
+  // to the earlier date, as the server's ORDER BY does.
+  const startDay = civilDay(start)
+  const endDay = civilDay(end)
   for (const row of bookRows ?? []) {
     if (row?.status === 'cancelled') continue
     const date = listingDate(row)
     if (!date) continue
     if (date >= start && date <= end) continue
-    const dist = Math.abs(Date.parse(`${date}T00:00:00`) - mid)
+    const day = civilDay(date)
+    if (!Number.isFinite(day)) continue
+    const dist = day < startDay ? startDay - day : day - endDay
     if (dist < bestDist || (dist === bestDist && date < best)) {
       best = date
       bestDist = dist
@@ -191,9 +224,10 @@ export default function SacristySheet() {
   const canonicalStart = canonicalIsoDate(requested)
   const requestedEnd = canonicalStart ? sheetWeekEnd(canonicalStart) : null
   const ignoredStart = Boolean(requested) && !requestedEnd
-  const start = requestedEnd
-    ? canonicalStart
-    : vigilWeekStart(orgTodayIso(new Date(), user?.organization?.timezone))
+  // SP-070: the parish's default week (the coming weekend), the target
+  // of the "This week" button.
+  const defaultStart = vigilWeekStart(orgTodayIso(new Date(), user?.organization?.timezone))
+  const start = requestedEnd ? canonicalStart : defaultStart
   const end = sheetWeekEnd(start)
   const canStepWeek = (delta) => {
     const next = addDays(start, delta)
@@ -207,6 +241,9 @@ export default function SacristySheet() {
   // week is loading so the previous count cannot sit under a spinner.
   const [generatedAt, setGeneratedAt] = useState(null)
   const [orgTimeZone, setOrgTimeZone] = useState(null)
+  // SP-087: parish today for the past-scheduled marker. The response's
+  // zone once loaded, else the signed-in organization's.
+  const sheetTodayIso = orgTodayIso(new Date(), orgTimeZone || user?.organization?.timezone)
   // The stamp counts the week, not only the rows that fit under the cap.
   const [intentionTotal, setIntentionTotal] = useState(null)
   const [truncated, setTruncated] = useState(false)
@@ -220,6 +257,9 @@ export default function SacristySheet() {
   // from the Sunday inside the range (the day that names the week),
   // falling back to the range start. Quietly absent if the fetch fails.
   const [liturgical, setLiturgical] = useState(null)
+  // SP-315: per-day feast labels (All Souls on Monday, etc.). null = range
+  // unread (UNKNOWN); {} after a successful empty week is fine.
+  const [litByDate, setLitByDate] = useState(null)
   useEffect(() => {
     let cancelled = false
     let anchor = start
@@ -227,12 +267,17 @@ export default function SacristySheet() {
       const d = addDays(start, i)
       if (localDate(d).getDay() === 0) { anchor = d; break }
     }
+    setLitByDate(null)
     fetch(apiUrl(`/api/liturgical?date=${anchor}`))
       .then(r => (r.ok ? r.json() : null))
       .then(d => { if (!cancelled) setLiturgical(d) })
       .catch(() => { if (!cancelled) setLiturgical(null) })
+    fetch(apiUrl(`/api/liturgical/range?start=${start}&end=${end}`))
+      .then(r => { if (!r.ok) throw new Error(`${r.status}`); return r.json() })
+      .then(map => { if (!cancelled && map && typeof map === 'object') setLitByDate(map) })
+      .catch(() => { if (!cancelled) setLitByDate(null) })
     return () => { cancelled = true }
-  }, [start])
+  }, [start, end])
 
   useEffect(() => {
     let cancelled = false
@@ -342,6 +387,15 @@ export default function SacristySheet() {
               className="shrink-0 p-2 rounded-lg border border-parchment-300/70 dark:border-brass-900/40 text-ink-600 dark:text-parchment-200 hover:bg-parchment-100 dark:hover:bg-ink-800 disabled:opacity-40"
               aria-label={t('sheet.nextWeek')}
             ><ChevronRight size={16} /></button>
+            {/* SP-070 (MIN-34): back to the default week in one tap. */}
+            <button
+              type="button"
+              data-testid="sheet-this-week"
+              onClick={() => setParams({})}
+              disabled={start === defaultStart}
+              aria-current={start === defaultStart ? 'date' : undefined}
+              className="shrink-0 px-3 py-2 rounded-lg border border-parchment-300/70 dark:border-brass-900/40 text-sm text-ink-600 dark:text-parchment-200 hover:bg-parchment-100 dark:hover:bg-ink-800 disabled:opacity-40"
+            >{t('sheet.thisWeek')}</button>
           </div>
           {!error && !loading && (
             <button
@@ -423,20 +477,39 @@ export default function SacristySheet() {
               <h2 className="font-display text-xl font-semibold border-b border-parchment-300 pb-1 mb-2">
                 {date == null
                   ? t('sheet.massUnknown')
-                  : localDate(date).toLocaleDateString(dateLocale, { weekday: 'long', month: 'long', day: 'numeric' })}
+                  : (
+                    <>
+                      {localDate(date).toLocaleDateString(dateLocale, { weekday: 'long', month: 'long', day: 'numeric' })}
+                      {feastLabelForDay(date, litByDate) ? (
+                        <span data-testid="sheet-day-feast" className="font-normal text-ink-600">
+                          {' · '}{feastLabelForDay(date, litByDate)}
+                          {litByDate?.[String(date).slice(0, 10)]?.color
+                            ? ` · ${colorLabel(t, litByDate[String(date).slice(0, 10)].color)}`
+                            : ''}
+                        </span>
+                      ) : null}
+                    </>
+                  )}
               </h2>
               <ul>
                 {list.map((r) => {
                   const stipendLabel = fmtSheetStipend(r.stipend)
+                  const dayFeast = feastLabelForDay(date, litByDate)
+                  const massLine = r.status === 'fulfilled' && !r.mass_title && !r.mass_time
+                    ? t('sheet.massUnknown')
+                    : (r.mass_title
+                      ? `${r.mass_title}${dayFeast && !String(r.mass_title).toLocaleLowerCase().includes(dayFeast.toLocaleLowerCase()) ? ` · ${dayFeast}` : ''}${r.mass_time ? `, ${fmtTime(r.mass_time, dateLocale)}` : ''}`
+                      : (r.mass_time ? fmtTime(r.mass_time, dateLocale) : null))
                   return (
                     <li key={r.id} className="py-2 flex items-baseline justify-between gap-6 border-b border-dotted border-parchment-300/70 last:border-0">
                       <div className="min-w-0">
                         <p className="font-display text-lg leading-snug">{displayIntention(r.formatted_intention)}</p>
+                        {r.note && String(r.note).trim() && (
+                          <p data-testid="sheet-intention-note" className="text-sm text-ink-700 mt-0.5 whitespace-pre-wrap">{String(r.note).trim()}</p>
+                        )}
                         <p className="text-xs text-ink-500 mt-0.5">
                           {[
-                            r.status === 'fulfilled' && !r.mass_title && !r.mass_time
-                              ? t('sheet.massUnknown')
-                              : (r.mass_title ? `${r.mass_title}${r.mass_time ? `, ${fmtTime(r.mass_time, dateLocale)}` : ''}` : (r.mass_time ? fmtTime(r.mass_time, dateLocale) : null)),
+                            massLine,
                             (r.requester_name || r.requested_by) ? `${t('sheet.requestedBy')} ${r.requester_name || r.requested_by}` : null,
                           ].filter(Boolean).join(' · ') || ' '}
                         </p>
@@ -447,6 +520,14 @@ export default function SacristySheet() {
                             ink-500. Name a darker ink on screen and in print so
                             the same word, in the same place, clears WCAG AA on
                             the white sheet. */}
+                        {/* SP-071 (MIN-35): dated but no Mass yet. Still printed,
+                            so the sacristan sees it needs a Mass. */}
+                        {isUnassigned(r) && (
+                          <p data-testid="sheet-unassigned" className="font-semibold text-amber-900 print:text-ink-900">{t('sheet.unassigned')}</p>
+                        )}
+                        {sheetPastScheduled(r, sheetTodayIso) && (
+                          <p data-testid="sheet-past-scheduled" className="font-semibold text-amber-900 print:text-ink-900">{t('mi.pastScheduled')}</p>
+                        )}
                         {r.status === 'fulfilled' && (
                           <p data-testid="sheet-fulfilled" className="italic text-ink-800 print:text-ink-900">{t('sheet.fulfilled')}</p>
                         )}

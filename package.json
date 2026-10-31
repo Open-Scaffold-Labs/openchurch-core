@@ -2,19 +2,21 @@
   "name": "openchurch",
   "version": "1.0.0",
   "private": true,
-  "description": "OpenChurch — a warm, native-auth SaaS for church operations. Deployed as a monorepo on Vercel (client build + api serverless).",
+  "description": "OpenChurch \u2014 a warm, native-auth SaaS for church operations. Deployed as a monorepo on Vercel (client build + api serverless).",
   "type": "module",
   "engines": {
     "node": "22.x"
   },
   "scripts": {
-    "dev": "echo 'Run `npm run dev` separately in client/ and server/ — this root package is for Vercel only.' && exit 1",
+    "dev": "echo 'Run `npm run dev` separately in client/ and server/ \u2014 this root package is for Vercel only.' && exit 1",
     "build": "cd client && npm install && npm run build",
     "install:all": "npm install && cd client && npm install && cd ../server && npm install",
     "migrate": "node --env-file-if-exists=server/.env server/src/migrate-cli.js",
     "lint:operator": "node scripts/operator-lint.mjs",
     "lint:operator:list": "node scripts/operator-lint.mjs --list",
     "lint:operator:baseline": "node scripts/operator-lint.mjs --baseline",
+    "lint:typescale": "node scripts/typescale-lint.mjs",
+    "lint:typescale:list": "node scripts/typescale-lint.mjs --list",
     "lint:honest": "node scripts/honest-failure.mjs",
     "lint:honest:list": "node scripts/honest-failure.mjs --list",
     "lint:honest:baseline": "node scripts/honest-failure.mjs --baseline",

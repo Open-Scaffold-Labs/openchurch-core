@@ -58,7 +58,7 @@ function makeMass(token, body) {
     title: body.title,
     date: body.date,
     start_time: body.start_time || '09:00',
-    end_time: body.end_time || '10:00',
+    end_time: body.end_time || '23:00', // SP-106: end must be after any fixture start
     type: 'service',
   })
 }
@@ -371,13 +371,15 @@ describe('INT-01 — fulfilled Mass stamps', () => {
       .send({ mass_date: '2031-12-25' })
     expect(dateEdit.status).toBe(409)
 
-    const sneak = await request(server).patch(`/api/mass-intentions/${id}`)
+    // Decision 8: a note on a fulfilled row is an admin correction with a
+    // reason. Even then, fulfilled_mass_* in the body is ignored.
+    const sneak = await request(server).post(`/api/mass-intentions/${id}/correct`)
       .set(auth(tokenA))
-      .send({
+      .send({ reason: 'Office note added', changes: {
         status: 'fulfilled',
         fulfilled_mass_title: 'Invented title',
         note: 'office note',
-      })
+      } })
     expect(sneak.status).toBe(200)
     expect(sneak.body.note).toBe('office note')
     expect(sneak.body.mass_title).toBe(`Correction hold ${RUN_ID}`)
@@ -398,15 +400,16 @@ describe('INT-01 — fulfilled Mass stamps', () => {
     })
     const { id } = await offerThenFulfill(tokenA, `† Same day ${RUN_ID}`, mass.body)
 
-    const demote = await request(server).patch(`/api/mass-intentions/${id}`)
+    const demote = await request(server).post(`/api/mass-intentions/${id}/correct`)
       .set(auth(tokenA))
-      .send({ status: 'scheduled' })
+      .send({ reason: 'Recorded in error', changes: { status: 'scheduled' } })
     expect(demote.status).toBe(200)
     expect(demote.body.status).toBe('scheduled')
 
-    const again = await request(server).patch(`/api/mass-intentions/${id}`)
+    // R339-1: the row stays history after reopen, so re-fulfil is a reasoned correction.
+    const again = await request(server).post(`/api/mass-intentions/${id}/correct`)
       .set(auth(tokenA))
-      .send({ status: 'fulfilled' })
+      .send({ reason: 'Fulfilled after all', changes: { status: 'fulfilled' } })
     expect(again.status).toBe(200)
     expect(again.body.status).toBe('fulfilled')
     expect(again.body.mass_title).toBe(`Same day again ${RUN_ID}`)
@@ -427,9 +430,9 @@ describe('INT-01 — fulfilled Mass stamps', () => {
     })
     const { id } = await offerThenFulfill(tokenA, `† Write once ${RUN_ID}`, mass.body)
 
-    const demote = await request(server).patch(`/api/mass-intentions/${id}`)
+    const demote = await request(server).post(`/api/mass-intentions/${id}/correct`)
       .set(auth(tokenA))
-      .send({ status: 'scheduled' })
+      .send({ reason: 'Recorded in error', changes: { status: 'scheduled' } })
     expect(demote.status).toBe(200)
     expect(demote.body.status).toBe('scheduled')
     expect(demote.body.mass_title).toBe(`First offered ${RUN_ID}`)

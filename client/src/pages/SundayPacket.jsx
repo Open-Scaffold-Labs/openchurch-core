@@ -20,6 +20,9 @@ import { apiUrl } from '../api'
 import { useLocale } from '../i18n'
 import { seasonLabel, colorLabel } from '../i18n/liturgical'
 import { priorFulfilmentText } from '../utils/priorFulfilment'
+import { isUnassigned } from '../utils/intentionAssignment'
+import { feastLabelForDay } from '../utils/feastLabel'
+import { sheetWeekEnd, sheetWeekStart } from '../../../server/src/utils/sheetWeek.js'
 
 const pad = (n) => String(n).padStart(2, '0')
 const iso = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
@@ -102,31 +105,83 @@ export function groupPacketIntentions(rows) {
   return days
 }
 
+// R346-2. The API's confirmed "no plan for this date" is plan: null.
+// A plan is an object with an elements array, and an empty array is a
+// plan that has no parts yet. Omitted, primitive, or malformed plan
+// data was not read — that is the unread error, not a missing plan.
+export function packetPlanState(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return 'unread'
+  if (!Object.hasOwn(body, 'plan')) return 'unread'
+  const plan = body.plan
+  if (plan === null) return 'none'
+  if (typeof plan !== 'object' || Array.isArray(plan)) return 'unread'
+  if (!Object.hasOwn(plan, 'elements') || !Array.isArray(plan.elements)) return 'unread'
+  return 'plan'
+}
+
 export default function SundayPacket() {
   const { t, dateLocale, tradition } = useLocale()
   const [params, setParams] = useSearchParams()
   const dateParam = params.get('date') && /^\d{4}-\d{2}-\d{2}$/.test(params.get('date'))
     ? params.get('date') : null
   const fromParam = params.get('from')
+  // SP-188: the packet opened from one plan shows that plan, by id.
+  const planParam = /^[1-9]\d{0,9}$/.test(params.get('plan') ?? '') ? params.get('plan') : null
   const home = packetReturnHome(fromParam)
 
   const [packet, setPacket] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
+  // SP-315: per-day feast on intention day headings (All Souls on Mon Nov 2).
+  // null = range unread (UNKNOWN), not an empty week.
+  const [litByDate, setLitByDate] = useState(null)
+
+  useEffect(() => {
+    if (!packet?.date) { setLitByDate(null); return }
+    let cancelled = false
+    const weekStart = sheetWeekStart(packet.date) || packet.date
+    const weekEnd = sheetWeekEnd(weekStart) || addDays(packet.date, 6)
+    setLitByDate(null)
+    fetch(apiUrl(`/api/liturgical/range?start=${weekStart}&end=${weekEnd}`))
+      .then(r => { if (!r.ok) throw new Error(`${r.status}`); return r.json() })
+      .then(map => { if (!cancelled && map && typeof map === 'object') setLitByDate(map) })
+      .catch(() => { if (!cancelled) setLitByDate(null) })
+    return () => { cancelled = true }
+  }, [packet?.date])
 
   useEffect(() => {
     let cancelled = false
     setLoading(true); setError(null)
-    fetch(apiUrl(`/api/packet${dateParam ? `?date=${dateParam}` : ''}`))
+    const q = new URLSearchParams()
+    if (dateParam) q.set('date', dateParam)
+    if (planParam) q.set('plan_id', planParam)
+    const qs = q.toString()
+    fetch(apiUrl(`/api/packet${qs ? `?${qs}` : ''}`))
       .then(r => { if (!r.ok) throw new Error(t('pkt.loadError')); return r.json() })
-      .then(d => { if (!cancelled) setPacket(d) })
+      .then(d => {
+        if (cancelled) return
+        // A 200 with an omitted or malformed plan is not plan:null.
+        // Refuse the sheet rather than claim there is no order of worship.
+        if (packetPlanState(d) === 'unread') {
+          setError(t('pkt.loadError'))
+          return
+        }
+        setPacket(d)
+      })
       .catch(err => { if (!cancelled) setError(err.message) })
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
-  }, [dateParam]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [dateParam, planParam]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const date = packet?.date ?? dateParam
   const intentionDays = groupPacketIntentions(packet?.intentions)
+  // SP-108: a Sunday with nothing at all prints one empty line (pkt.empty,
+  // which already names intentions), not that plus "No intention booked".
+  // Every plan for the date prints (SP-188); a plan-scoped packet prints
+  // its one plan and offers the rest rather than dropping them unsaid.
+  const dayPlans = !packet ? [] : Array.isArray(packet.plans) ? packet.plans : (packet.plan ? [packet.plan] : [])
+  const shownPlans = planParam ? (packet?.plan ? [packet.plan] : []) : dayPlans
+  const packetEmpty = !!packet && !shownPlans.some(p => p?.elements?.length) && !packet.serving?.length && intentionDays.length === 0 && !packet.bulletin
 
   const litLine = packet && [
     packet.lectionary?.designation,
@@ -153,24 +208,28 @@ export default function SundayPacket() {
         <Link to={home.to} className="inline-flex items-center gap-1.5 text-sm text-church-700 dark:text-brass-300 hover:underline">
           <ArrowLeft size={15} /> {t(home.labelKey)}
         </Link>
-        <div className="flex items-center gap-2">
+        {/* SP-080 (repeat of SP-060). Phone 390: a non-wrapping row plus
+            min-w-[11rem] overflowed the column and clipped Print to "Prin".
+            Wrap the cluster; let the date shrink; never shrink Print.
+            sm: keeps the desktop date's 11rem floor. */}
+        <div data-testid="packet-week-chrome" className="flex flex-wrap items-center justify-end gap-2 min-w-0 max-w-full">
           {date && (
-            <>
+            <div className="flex items-center gap-2 min-w-0">
               <button onClick={() => setParams(packetWeekParams(addDays(date, -7), fromParam))} aria-label={t('pkt.prevWeek')}
                 className="tap shrink-0 inline-flex items-center justify-center p-2 rounded-lg border border-parchment-300/70 dark:border-brass-900/40 text-ink-600 dark:text-parchment-200 hover:bg-parchment-100 dark:hover:bg-ink-800">
                 <ChevronLeft size={16} />
               </button>
-              <span className="text-sm text-ink-600 dark:text-parchment-300/80 min-w-[11rem] text-center">
+              <span data-testid="packet-week-range" className="text-sm text-ink-600 dark:text-parchment-300/80 min-w-0 sm:min-w-[11rem] text-center">
                 {localDate(date).toLocaleDateString(dateLocale, { weekday: 'long', month: 'long', day: 'numeric' })}
               </span>
               <button onClick={() => setParams(packetWeekParams(addDays(date, 7), fromParam))} aria-label={t('pkt.nextWeek')}
                 className="tap shrink-0 inline-flex items-center justify-center p-2 rounded-lg border border-parchment-300/70 dark:border-brass-900/40 text-ink-600 dark:text-parchment-200 hover:bg-parchment-100 dark:hover:bg-ink-800">
                 <ChevronRight size={16} />
               </button>
-            </>
+            </div>
           )}
           <button onClick={() => window.print()}
-            className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg bg-church-800 text-parchment-50 text-sm font-medium hover:bg-church-900">
+            className="inline-flex shrink-0 items-center gap-2 px-3.5 py-2 rounded-lg bg-church-800 text-parchment-50 text-sm font-medium hover:bg-church-900">
             <Printer size={15} /> {t('pkt.print')}
           </button>
         </div>
@@ -201,14 +260,33 @@ export default function SundayPacket() {
               {seasonLine && <p className="mt-0.5 text-sm text-ink-500">{seasonLine}</p>}
             </header>
 
-            {/* Order of worship */}
-            {packet.plan?.elements?.length > 0 && (
-              <section className="mb-7 break-inside-avoid">
-                <SectionTitle>{t('pkt.order')}{packet.plan.title ? ` — ${packet.plan.title}` : ''}</SectionTitle>
+            {/* Order of worship. No plan for this date used to omit the
+                section with no word said (SP-082). Only explicit null is
+                that fact (R346-2). A plan with no parts is not missing,
+                and an unreadable plan never reaches this sheet. */}
+            {dayPlans.length > 1 && (planParam ? (
+              <p data-testid="pkt-one-of" className="mb-4 text-sm text-ink-600 print:hidden">
+                {t('pkt.onePlanOf', { n: dayPlans.length })}{' '}
+                <Link
+                  data-testid="pkt-show-all"
+                  to={`/packet?date=${packet.date}${fromParam ? `&from=${encodeURIComponent(fromParam)}` : ''}`}
+                  className="font-semibold text-church-800 underline"
+                >
+                  {t('pkt.showAll')}
+                </Link>
+              </p>
+            ) : (
+              <p data-testid="pkt-multi-plan" className="mb-4 text-sm text-ink-600">{t('pkt.multiPlan', { n: dayPlans.length })}</p>
+            ))}
+            {/* R406-1: every shown plan renders, empty ones included. */}
+            {shownPlans.length > 0 ? shownPlans.map(pl => (
+              <section key={pl.id ?? pl.title} data-testid="pkt-plan" className="mb-7 break-inside-avoid">
+                <SectionTitle>{t('pkt.order')}{pl.title ? ` — ${pl.title}` : ''}</SectionTitle>
+                {!pl.elements?.length && <p className="text-sm text-ink-600 italic">{t('pkt.planEmpty')}</p>}
                 <ol>
-                  {packet.plan.elements.map((el, i) => (
+                  {(pl.elements ?? []).map((el, i) => (
                     <li key={i} className="py-1.5 flex items-baseline gap-3 border-b border-dotted border-parchment-300/70 last:border-0">
-                      <span className="text-[10px] uppercase tracking-wider text-ink-400 w-20 shrink-0">
+                      <span className="text-[11px] uppercase tracking-wider text-ink-400 w-20 shrink-0">
                         {el.kind === 'other' ? '' : t(`kind.${el.kind}`)}
                       </span>
                       <span className="font-display text-base leading-snug flex-1 min-w-0">
@@ -220,7 +298,22 @@ export default function SundayPacket() {
                   ))}
                 </ol>
               </section>
-            )}
+            ))
+            : packet.plan === null ? (
+              <section data-testid="pkt-no-plan" className="mb-7 break-inside-avoid">
+                <SectionTitle>{t('pkt.order')}</SectionTitle>
+                <p className="text-sm text-ink-600 italic">{t('pkt.noPlan')}</p>
+                <Link
+                  to={/^\d{4}-\d{2}-\d{2}$/.test(packet.date || '')
+                    ? `/service-planner?date=${packet.date}`
+                    : '/service-planner'}
+                  data-testid="pkt-create-plan"
+                  className="print:hidden mt-2 inline-flex text-sm font-semibold text-church-800 underline"
+                >
+                  {t('pkt.createPlan')}
+                </Link>
+              </section>
+            ) : null}
 
             {/* Serving schedule */}
             {packet.serving?.length > 0 && (
@@ -274,13 +367,28 @@ export default function SundayPacket() {
                     <h3 className="font-display text-base font-semibold text-ink-800 mb-1">
                       {d == null
                         ? t('pkt.massUnknown')
-                        : localDate(d).toLocaleDateString(dateLocale, { weekday: 'long', month: 'long', day: 'numeric' })}
+                        : (
+                          <>
+                            {localDate(d).toLocaleDateString(dateLocale, { weekday: 'long', month: 'long', day: 'numeric' })}
+                            {feastLabelForDay(d, litByDate) ? (
+                              <span data-testid="pkt-day-feast" className="font-normal text-ink-600">
+                                {' · '}{feastLabelForDay(d, litByDate)}
+                                {litByDate?.[String(d).slice(0, 10)]?.color
+                                  ? ` · ${colorLabel(t, litByDate[String(d).slice(0, 10)].color)}`
+                                  : ''}
+                              </span>
+                            ) : null}
+                          </>
+                        )}
                     </h3>
                     <ul>
                       {list.map((r, i) => (
                         <li key={i} className="py-1 pl-3 flex items-baseline justify-between gap-4">
                           <span className="font-display text-base leading-snug">
                             {r.formatted_intention}
+                            {r.note && String(r.note).trim() ? (
+                              <span data-testid="pkt-intention-note" className="block text-sm font-sans font-normal text-ink-700 whitespace-pre-wrap mt-0.5">{String(r.note).trim()}</span>
+                            ) : null}
                             {r.status === 'fulfilled' && !r.mass_title && !r.mass_time ? (
                               <span className="text-xs italic text-ink-400"> — {t('pkt.massUnknown')}</span>
                             ) : (r.mass_title || r.mass_time) ? (
@@ -292,6 +400,8 @@ export default function SundayPacket() {
                               <span className="text-xs text-ink-500"> — {t('pkt.requestedBy')} {r.requester_name || r.requested_by}</span>
                             )}
                           </span>
+                          {/* SP-071 (MIN-35): dated, no Mass assigned yet. */}
+                          {isUnassigned(r) && <span data-testid="pkt-unassigned" className="text-xs font-semibold text-amber-900 print:text-ink-900">{t('pkt.intentionUnassigned')}</span>}
                           {r.status === 'fulfilled' && <span className="text-xs italic text-ink-400">{t('pkt.fulfilled')}</span>}
                           {priorFulfilmentText(t, r, 'pkt.previouslyRecorded') && (
                             <span className="text-xs italic text-ink-400">{priorFulfilmentText(t, r, 'pkt.previouslyRecorded')}</span>
@@ -304,10 +414,26 @@ export default function SundayPacket() {
               </section>
             )}
 
+            {/* SP-100: a read that came back with zero intentions says so,
+                rather than dropping the section and leaving the sacristan to
+                wonder whether the list is missing. A missing/unread list
+                (not an array) stays silent — never claim "none" we did not read. */}
+            {intentionDays.length === 0 && Array.isArray(packet.intentions) && !packetEmpty && (
+              <section className="mb-7 break-inside-avoid" data-testid="pkt-no-intentions">
+                <SectionTitle>{t('pkt.intentions')}</SectionTitle>
+                <p className="pl-3 text-sm italic text-ink-500">{t('pkt.noIntentions')}</p>
+              </section>
+            )}
+
             {/* Announcements */}
             {(packet.bulletin?.announcements || packet.bulletin?.pastor_note) && (
               <section className="mb-7 break-inside-avoid">
                 <SectionTitle>{t('pkt.announcements')}</SectionTitle>
+                {packet.bulletin.published === false && (
+                  <p data-testid="pkt-bulletin-draft" className="mb-2 text-xs font-semibold uppercase tracking-wider text-amber-900 print:text-ink-900">
+                    {t('pkt.bulletinDraft')}
+                  </p>
+                )}
                 {packet.bulletin.announcements && (
                   <p className="text-sm leading-relaxed whitespace-pre-wrap">{packet.bulletin.announcements}</p>
                 )}
@@ -318,7 +444,7 @@ export default function SundayPacket() {
             )}
 
             {/* Nothing at all yet — say so kindly, never a blank page. */}
-            {!packet.plan?.elements?.length && !packet.serving?.length && intentionDays.length === 0 && !packet.bulletin && (
+            {packetEmpty && (
               <p className="text-sm text-ink-500 text-center py-10 italic">{t('pkt.empty')}</p>
             )}
 

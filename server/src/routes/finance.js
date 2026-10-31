@@ -3,11 +3,16 @@
 //
 //   GET  /api/finance/coa               → effective chart of accounts
 //   GET  /api/finance/mappings          → this org's category → account mappings
-//   PUT  /api/finance/mappings          → replace/upsert mappings (admin/staff)
+//   PUT  /api/finance/mappings          → append a mapping effective today (admin/staff)
 //   GET  /api/finance/ledger?start&end  → ledger rows (paginated)
 //   POST /api/finance/ledger            → manual entry
-//   POST /api/finance/ledger/import     → trial-balance CSV import
+//   POST /api/finance/ledger/import     → balanced trial-balance CSV import
 //   GET  /api/finance/summary?start&end → totals by rollup group + assessable base
+//   POST /api/finance/parallel-check    → old-system TB vs live totals (read-only)
+//   POST /api/finance/cutover/scoreboard → five-line weekly scoreboard (read-only)
+//   POST /api/finance/cutover/export    → scoreboard + trial balance CSV
+//   GET|POST /api/finance/cutover/signoffs → append-only accountant sign-off
+//   GET  /api/finance/cutover/template → Day-1 CSV, every active account at 0.00
 //   GET  /api/finance/diocese           → this parish's view of its diocese
 //
 // The "effective" chart of accounts is the standard template
@@ -25,11 +30,23 @@ import pool from '../db.js'
 import { parsePagination } from '../utils/params.js'
 import { parseCSVToObjects } from '../utils/csv.js'
 import { monitor } from '../monitoring/index.js'
-import { computePeriodTotals } from '../finance/periodTotals.js'
+import { computePeriodTotals, unmappedDonationLines } from '../finance/periodTotals.js'
+import { parseOldTrialBalance, compareAccounts, buildScoreboard, scoreboardCsv, templateCsv } from '../finance/cutover.js'
+import { acquireSignoffLocks } from '../finance/locks.js'
 import { giftAssessableAtFreeze } from '../finance/giftAssessableFreeze.js'
 import { EFFECTIVE_COA } from '../finance/effectiveCoa.js'
 import { findOverlappingSubmission, overlapMessage, overlapRemedy } from '../finance/fiscalPeriod.js'
 import { PERIOD_ADJUSTMENT_LIST_COLS, PERIOD_ADJUSTMENT_LIST_JOINS } from '../finance/periodAdjustmentRollup.js'
+import {
+  DEPOSIT_ADJUSTMENTS_PENDING, periodHasPendingDepositAdjustments,
+  lockSubmissionsForDepositCheck, isDepositLockBusy, DEPOSIT_LOCK_BUSY,
+} from '../finance/depositAdjustmentGuard.js'
+import { periodHasOpenStipendDispositions, OPEN_STIPEND_DISPOSITIONS_PENDING } from '../finance/stipends.js'
+import { applyMappingList, lockParishBooks, MappingRejected } from '../finance/mappingWrite.js'
+import {
+  dollarsToCents, centsToDollarString, naturalCentsFromSides, sidesFromNatural,
+  trialBalanceSides, isOpeningBalanceEquityName, trialBalanceIdempotencyKey,
+} from '../finance/trialBalance.js'
 
 const router = Router()
 
@@ -42,6 +59,14 @@ async function effectiveCodes(orgId) {
     `SELECT code FROM (${EFFECTIVE_COA}) c WHERE c.active`, [orgId]
   )
   return new Set(rows.map(r => r.code))
+}
+
+async function chartByCode(orgId) {
+  const { rows } = await pool.query(
+    `SELECT code, name, acct_type, assessable FROM (${EFFECTIVE_COA}) c WHERE c.active`,
+    [orgId]
+  )
+  return new Map(rows.map(r => [r.code, r]))
 }
 
 // GET /api/finance/coa
@@ -62,10 +87,14 @@ router.get('/coa', async (req, res) => {
 router.get('/mappings', async (req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT id, source_type, source_key, account_code
+      `SELECT id, source_type, source_key, account_code, set_by,
+              CASE WHEN effective_from = '-infinity'::date THEN '-infinity'
+                   ELSE to_char(effective_from, 'YYYY-MM-DD') END AS effective_from
          FROM ochr_coa_mappings
-        WHERE organization_id = $1
-        ORDER BY source_type, source_key`,
+        WHERE organization_id = $1 AND superseded_on IS NULL
+        -- Byte order, so 'Plate' and 'plate' list the same way on every
+        -- database collation (en_US sorts them the other way round).
+        ORDER BY source_type COLLATE "C", source_key COLLATE "C"`,
       [req.organizationId]
     )
     // Surface the org's distinct donation categories so the mappings UI
@@ -81,21 +110,30 @@ router.get('/mappings', async (req, res) => {
     // how many gifts each fund carries, so the screen can say what is
     // actually at stake in mapping it.
     const { rows: funds } = await pool.query(
-      `SELECT f.id, f.name, f.active,
+      `SELECT f.id, f.name, f.active, f.net_asset_class, f.restriction_nature,
               COUNT(d.id)::int AS gift_count,
               COALESCE(SUM(d.live_amount), 0)::NUMERIC(12,2) AS gift_total
          FROM ochr_funds f
          LEFT JOIN ochr_donation_live d
                 ON d.fund_id = f.id AND d.organization_id = f.organization_id
         WHERE f.organization_id = $1
-        GROUP BY f.id, f.name, f.active
+        GROUP BY f.id, f.name, f.active, f.net_asset_class, f.restriction_nature,
+                 f.sort_order
         ORDER BY f.sort_order, f.name`,
       [req.organizationId]
     )
+    const { rows: [cut] } = await pool.query(
+      `SELECT to_char(cutover_on, 'YYYY-MM-DD') AS c FROM ochr_books_cutover`)
+    const lines = cut
+      ? await unmappedDonationLines(req.organizationId, cut.c, '2999-12-31')
+      : []
     res.json({
       mappings: rows,
       donation_categories: cats.map(c => c.category),
       funds,
+      mapping_prompt: lines.length
+        ? { since: cut.c, lines, total: lines.reduce((s, l) => s + Number(l.amount), 0).toFixed(2) }
+        : null,
     })
   } catch (err) {
     monitor.error('finance.mappings.get', err, { orgId: req.organizationId })
@@ -103,16 +141,21 @@ router.get('/mappings', async (req, res) => {
   }
 })
 
-// PUT /api/finance/mappings — upsert a batch of mappings. Body:
-// { mappings: [{ source_type, source_key, account_code }] }
-// An empty/blank account_code removes the mapping (falls back to default).
+// PUT /api/finance/mappings — append mappings effective on a date.
+// Body: { mappings: [{ source_type, source_key, account_code }], effective_from? }
+// A blank account_code closes the open row. Nothing already posted is rewritten.
 router.put('/mappings', async (req, res) => {
   const list = Array.isArray(req.body?.mappings) ? req.body.mappings : null
   if (!list) return res.status(400).json({ error: 'mappings array is required' })
   if (list.length > 200) return res.status(400).json({ error: 'Too many mappings in one request (max 200)' })
 
   try {
-    const codes = await effectiveCodes(req.organizationId)
+    const requested = req.body?.effective_from
+    if (requested != null && requested !== '' && (typeof requested !== 'string' || !ISO_DATE.test(requested))) {
+      return res.status(400).json({ error: 'effective_from must be YYYY-MM-DD' })
+    }
+
+    const byCode = await chartByCode(req.organizationId)
     for (const m of list) {
       const type = m?.source_type
       const key  = typeof m?.source_key === 'string' ? m.source_key.trim() : ''
@@ -120,7 +163,7 @@ router.put('/mappings', async (req, res) => {
       if (!['donation_category', 'payroll', 'fund'].includes(type) || !key) {
         return res.status(400).json({ error: 'Each mapping needs a valid source_type and source_key' })
       }
-      if (code && !codes.has(code)) {
+      if (code && !byCode.has(code)) {
         return res.status(400).json({ error: `Unknown account code ${code}` })
       }
     }
@@ -128,28 +171,13 @@ router.put('/mappings', async (req, res) => {
     const client = await pool.connect()
     try {
       await client.query('BEGIN')
-      for (const m of list) {
-        const key  = m.source_key.trim()
-        const code = (m.account_code ?? '').trim()
-        if (!code) {
-          await client.query(
-            `DELETE FROM ochr_coa_mappings
-              WHERE organization_id = $1 AND source_type = $2 AND source_key = $3`,
-            [req.organizationId, m.source_type, key]
-          )
-        } else {
-          await client.query(
-            `INSERT INTO ochr_coa_mappings (organization_id, source_type, source_key, account_code)
-             VALUES ($1, $2, $3, $4)
-             ON CONFLICT (organization_id, source_type, source_key)
-             DO UPDATE SET account_code = EXCLUDED.account_code`,
-            [req.organizationId, m.source_type, key, code]
-          )
-        }
-      }
+      await applyMappingList(client, req.organizationId, list, requested || null, byCode)
       await client.query('COMMIT')
     } catch (err) {
       await client.query('ROLLBACK').catch(() => {})
+      if (err instanceof MappingRejected) {
+        return res.status(err.status).json({ error: err.message, code: err.code })
+      }
       throw err
     } finally {
       client.release()
@@ -227,11 +255,12 @@ router.post('/ledger', async (req, res) => {
   }
 })
 
-// POST /api/finance/ledger/import — trial-balance CSV.
-// Body: { csv, as_of } — columns: account_code, amount, memo (optional).
-// The pragmatic wedge: a parish that keeps its books in QuickBooks can be
-// consolidated on one period upload. Amounts are period totals dated as_of.
-const IMPORT_COLUMNS = ['account_code', 'amount', 'memo']
+// POST /api/finance/ledger/import — trial-balance CSV, all or nothing.
+// Body: { csv, as_of }. Columns: account_code plus either amount (natural
+// sign) or debit and credit. A file that does not balance, names Opening
+// Balance Equity with a balance, or lands in a submitted period is refused
+// and nothing is written.
+const IMPORT_COLUMNS = ['account_code', 'amount', 'memo', 'debit', 'credit']
 router.post('/ledger/import', async (req, res) => {
   const { csv, as_of } = req.body ?? {}
   if (typeof csv !== 'string' || !csv.trim()) return res.status(400).json({ error: 'No CSV content provided' })
@@ -240,45 +269,300 @@ router.post('/ledger/import', async (req, res) => {
   try {
     const { headers, rows } = parseCSVToObjects(csv)
     if (!headers.length) return res.status(400).json({ error: 'CSV appears to be empty' })
-    for (const required of ['account_code', 'amount']) {
-      if (!headers.includes(required)) {
-        return res.status(400).json({ error: `CSV must include a "${required}" column. Expected columns: ${IMPORT_COLUMNS.join(', ')}.` })
-      }
+    const useSides = headers.includes('debit') || headers.includes('credit')
+    if (useSides && (!headers.includes('debit') || !headers.includes('credit'))) {
+      return res.status(400).json({ error: 'Debit and credit columns are used together.' })
+    }
+    if (!headers.includes('account_code') || (!useSides && !headers.includes('amount'))) {
+      return res.status(400).json({ error: `CSV must include account_code and either amount or debit and credit. Allowed: ${IMPORT_COLUMNS.join(', ')}.` })
     }
     const unknown = headers.filter(h => !IMPORT_COLUMNS.includes(h))
     if (unknown.length) return res.status(400).json({ error: `Unknown column(s): ${unknown.join(', ')}. Allowed: ${IMPORT_COLUMNS.join(', ')}.` })
     if (!rows.length) return res.status(400).json({ error: 'CSV has a header row but no data rows' })
     if (rows.length > 500) return res.status(400).json({ error: 'Imports are capped at 500 rows per file' })
 
-    const codes = await effectiveCodes(req.organizationId)
-    const batch = crypto.randomUUID()
-    const results = { imported: 0, errors: [], batch }
-
+    const byCode = await chartByCode(req.organizationId)
+    const errors = []
+    const parsed = []
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i]
       const line = i + 2
       const code = (row.account_code ?? '').trim()
-      const amount = Number(row.amount)
-      if (!codes.has(code)) { results.errors.push({ line, error: `Unknown account code "${code}"` }); continue }
-      if (!Number.isFinite(amount) || amount === 0) { results.errors.push({ line, error: `Invalid amount "${row.amount}"` }); continue }
-      if (Math.abs(amount) > 99_999_999) { results.errors.push({ line, error: 'Amount out of range' }); continue }
-
-      try {
-        await pool.query(
-          `INSERT INTO ochr_ledger_entries (organization_id, entry_date, account_code, amount, memo, source_type, import_batch, created_by)
-           VALUES ($1, $2, $3, $4, $5, 'import', $6, $7)`,
-          [req.organizationId, as_of, code, amount, (row.memo ?? '').trim() || null, batch, req.user?.id ?? null]
-        )
-        results.imported++
-      } catch {
-        results.errors.push({ line, error: 'Row failed to save' })
+      const account = byCode.get(code)
+      if (!account) { errors.push({ line, error: `Unknown account code "${code}"` }); continue }
+      let natural = null
+      let debitCents = 0
+      let creditCents = 0
+      if (useSides) {
+        const debitRaw = (row.debit ?? '').trim()
+        const creditRaw = (row.credit ?? '').trim()
+        if ((row.amount ?? '').trim()) {
+          errors.push({ line, error: 'A row uses amount or debit and credit, not both.' })
+          continue
+        }
+        if ((debitRaw === '') === (creditRaw === '')) {
+          errors.push({ line, error: 'A row is a debit or a credit, not both and not neither.' })
+          continue
+        }
+        const cents = dollarsToCents(debitRaw || creditRaw)
+        if (cents == null || cents <= 0) {
+          errors.push({ line, error: `Invalid amount "${debitRaw || creditRaw}"` })
+          continue
+        }
+        debitCents = debitRaw ? cents : 0
+        creditCents = creditRaw ? cents : 0
+        natural = naturalCentsFromSides(account.acct_type, debitCents, creditCents)
+      } else {
+        const cents = dollarsToCents(row.amount)
+        if (cents == null || cents === 0) {
+          errors.push({ line, error: `Invalid amount "${row.amount}"` })
+          continue
+        }
+        natural = cents
+        const sides = sidesFromNatural(account.acct_type, cents)
+        debitCents = sides.debitCents
+        creditCents = sides.creditCents
       }
+      if (isOpeningBalanceEquityName(account.name) && natural !== 0) {
+        errors.push({ line, code: 'opening_balance_equity', error: 'Opening Balance Equity must be zero. Nothing was saved.' })
+        continue
+      }
+      parsed.push({
+        code, natural, debitCents, creditCents,
+        memo: (row.memo ?? '').trim() || null,
+      })
+    }
+    if (errors.length) {
+      const code = errors.find(e => e.code)?.code
+      return res.status(400).json({ imported: 0, errors, ...(code ? { code } : {}) })
+    }
+    const totals = trialBalanceSides(parsed)
+    if (!totals.balanced) {
+      return res.status(400).json({
+        imported: 0,
+        code: 'trial_balance_unbalanced',
+        debit_cents: totals.debitCents,
+        credit_cents: totals.creditCents,
+        errors: [{ line: null, error: 'Debits and credits are not equal. Nothing was saved.' }],
+      })
     }
 
-    res.status(results.imported > 0 ? 201 : 400).json(results)
+    const idempotencyKey = trialBalanceIdempotencyKey(as_of, parsed)
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      await lockParishBooks(client, req.organizationId)
+      const { rows: closed } = await client.query(
+        `SELECT id FROM ochr_report_submissions
+          WHERE organization_id = $1
+            AND status IN ('submitted', 'approved')
+            AND period_start <= $2::date AND period_end >= $2::date
+          FOR UPDATE`,
+        [req.organizationId, as_of])
+      if (closed.length) {
+        await client.query('ROLLBACK')
+        return res.status(409).json({
+          imported: 0,
+          code: 'period_submitted',
+          error: 'That date is inside a period already sent to the diocese. Nothing was saved.',
+        })
+      }
+      const { rows: inserted } = await client.query(
+        `INSERT INTO ochr_ledger_imports (organization_id, idempotency_key, as_of, row_count)
+         VALUES ($1, $2, $3::date, $4)
+         ON CONFLICT (organization_id, idempotency_key) DO NOTHING
+         RETURNING id`,
+        [req.organizationId, idempotencyKey, as_of, parsed.length])
+      if (!inserted.length) {
+        const { rows: [existing] } = await client.query(
+          `SELECT id, row_count FROM ochr_ledger_imports
+            WHERE organization_id = $1 AND idempotency_key = $2`,
+          [req.organizationId, idempotencyKey])
+        await client.query('COMMIT')
+        return res.status(200).json({
+          imported: existing.row_count, errors: [], batch: String(existing.id), idempotent: true,
+        })
+      }
+      const batch = crypto.randomUUID()
+      for (const line of parsed) {
+        await client.query(
+          `INSERT INTO ochr_ledger_entries
+             (organization_id, entry_date, account_code, amount, memo, source_type, import_batch, import_id, created_by)
+           VALUES ($1, $2, $3, $4, $5, 'import', $6, $7, $8)`,
+          [req.organizationId, as_of, line.code, centsToDollarString(line.natural), line.memo,
+            batch, inserted[0].id, req.user?.id ?? null])
+      }
+      await client.query('COMMIT')
+      res.status(201).json({ imported: parsed.length, errors: [], batch })
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {})
+      if (err?.code === '23505') {
+        return res.status(409).json({
+          imported: 0, code: 'import_conflict',
+          error: 'Another import is saving this file. Nothing new was saved.',
+        })
+      }
+      throw err
+    } finally {
+      client.release()
+    }
   } catch (err) {
     monitor.error('finance.ledger.import', err, { orgId: req.organizationId })
-    res.status(500).json({ error: 'Import failed — nothing may have been saved. Please retry.' })
+    res.status(500).json({ error: 'Import failed. Nothing was saved. Please retry.' })
+  }
+})
+
+// POST /api/finance/parallel-check — side-by-side proof (Landscape #5).
+// Body: { csv, start, end } — columns: account_code, amount (old system's
+// period totals). Compares them to the SAME live totals /summary shows and
+// returns per-account variance in integer cents. READ-ONLY: nothing from
+// the old system is written to the ledger. zero_variance is true only when
+// every account matches AND every row was read; a skipped row is never a
+// silent match.
+router.post('/parallel-check', async (req, res) => {
+  const { csv, start, end } = req.body ?? {}
+  if (typeof csv !== 'string' || !csv.trim()) return res.status(400).json({ error: 'No CSV content provided' })
+  if (!ISO_DATE.test(start ?? '') || !ISO_DATE.test(end ?? '')) return res.status(400).json({ error: 'start and end (YYYY-MM-DD) are required' })
+  if (start > end) return res.status(400).json({ error: 'start must be on or before end' })
+  try {
+    const parsed = parseOldTrialBalance(csv)
+    if (parsed.headerError) return res.status(400).json({ error: parsed.headerError })
+    const { old, errors } = parsed
+    const accounts = (await compareAccounts(req.organizationId, old, start, end))
+      // eslint-disable-next-line no-unused-vars
+      .map(({ in_old_file, ...a }) => a)
+    // R413-1: a skipped row means the old side is incomplete, so there is no
+    // honest total. null, never an apparent $0.00; per-account lines stay
+    // as partial detail.
+    const complete = errors.length === 0 && accounts.every(a => a.openchurch_cents !== null)
+    const totalVariance = complete ? accounts.reduce((s, a) => s + a.variance_cents, 0) : null
+    const zero = complete && accounts.every(a => a.variance_cents === 0)
+    res.json({ start, end, basis: 'live', complete, zero_variance: zero, total_variance_cents: totalVariance,
+      mismatched: accounts.filter(a => a.variance_cents !== 0).length, accounts, errors })
+  } catch (err) {
+    monitor.error('finance.parallelCheck', err, { orgId: req.organizationId })
+    res.status(500).json({ error: 'Could not run the check. Nothing was saved. Please retry.' })
+  }
+})
+
+// ── Cutover scoreboard (finance/cutover.js) ─────────────────────────────
+// Five weekly lines — cash, receivables, deposits, payables, trial balance —
+// old system vs OpenChurch as of a date. Read-only except the append-only
+// accountant sign-off, which is refused unless the scoreboard recomputed
+// server-side is cutover_ready. Staff/admin only (writeGate covers POST;
+// the GET checks the role itself).
+const STAFF_ROLES = new Set(['admin', 'staff'])
+function cutoverInput(req, res) {
+  const { csv, as_of } = req.body ?? {}
+  if (typeof csv !== 'string' || !csv.trim()) { res.status(400).json({ error: 'No CSV content provided' }); return null }
+  if (!ISO_DATE.test(as_of ?? '')) { res.status(400).json({ error: 'as_of (YYYY-MM-DD) is required' }); return null }
+  return { csv, as_of }
+}
+
+router.post('/cutover/scoreboard', async (req, res) => {
+  const input = cutoverInput(req, res); if (!input) return
+  try {
+    const sb = await buildScoreboard(req.organizationId, input.csv, input.as_of)
+    if (sb.headerError) return res.status(400).json({ error: sb.headerError })
+    res.json(sb)
+  } catch (err) {
+    monitor.error('finance.cutover.scoreboard', err, { orgId: req.organizationId })
+    res.status(500).json({ error: 'Could not build the scoreboard. Nothing was saved. Please retry.' })
+  }
+})
+
+router.post('/cutover/export', async (req, res) => {
+  const input = cutoverInput(req, res); if (!input) return
+  try {
+    const sb = await buildScoreboard(req.organizationId, input.csv, input.as_of)
+    if (sb.headerError) return res.status(400).json({ error: sb.headerError })
+    const { rows: [org] } = await pool.query('SELECT name FROM ochr_organizations WHERE id = $1', [req.organizationId])
+    res.set('Content-Type', 'text/csv; charset=utf-8')
+    res.set('Content-Disposition', `attachment; filename="cutover-scoreboard-${input.as_of}.csv"`)
+    res.set('Cache-Control', 'no-store')
+    res.send(scoreboardCsv(sb, { orgName: org?.name ?? '' }))
+  } catch (err) {
+    monitor.error('finance.cutover.export', err, { orgId: req.organizationId })
+    res.status(500).json({ error: 'Could not build the export. Please retry.' })
+  }
+})
+
+router.get('/cutover/signoffs', async (req, res) => {
+  if (!STAFF_ROLES.has(req.user?.role)) return res.status(403).json({ error: 'Staff or admin only' })
+  try {
+    const { rows } = await pool.query(
+      `SELECT s.id, s.as_of, s.accountant_name, s.signed_on, s.created_at, u.name AS recorded_by_name
+         FROM ochr_cutover_signoffs s
+         LEFT JOIN ochr_users u ON u.id = s.recorded_by AND u.organization_id = s.organization_id
+        WHERE s.organization_id = $1 ORDER BY s.created_at DESC, s.id DESC LIMIT 100`,
+      [req.organizationId])
+    res.json({ signoffs: rows })
+  } catch (err) {
+    monitor.error('finance.cutover.signoffs', err, { orgId: req.organizationId })
+    res.status(500).json({ error: 'Could not read sign-offs. Please retry.' })
+  }
+})
+
+// R414-1: the readiness recompute and the INSERT run in ONE transaction
+// holding, all-or-nothing and in sorted order, EXCLUSIVE (finance, org) and
+// SHARED (chart, template) + (chart, diocese) — see finance/locks.js. Every
+// write to a table the scoreboard reads (finance data, the parish's own,
+// diocesan and template COA rows, its diocese affiliation) takes the
+// opposite mode via a row trigger (migration 129), so it either commits
+// before the recompute (and is seen) or waits until the sign-off commits.
+// Lock acquisition is bounded (2 s → 503 cutover_busy); lock_timeout and
+// statement_timeout bound everything else. The row records the snapshot.
+router.post('/cutover/signoffs', async (req, res) => {
+  const input = cutoverInput(req, res); if (!input) return
+  // Atlas P1-2: an attestation always names who recorded it.
+  if (!Number.isInteger(req.user?.id)) return res.status(401).json({ error: 'A signed-in staff user is required to record a sign-off' })
+  const name = typeof req.body?.accountant_name === 'string' ? req.body.accountant_name.trim() : ''
+  const signedOn = req.body?.signed_on
+  if (!name || name.length > 200) return res.status(400).json({ error: "The accountant's name is required" })
+  if (!ISO_DATE.test(signedOn ?? '')) return res.status(400).json({ error: 'signed_on (YYYY-MM-DD) is required' })
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    await client.query(`SET LOCAL lock_timeout = '2s'`)
+    await client.query(`SET LOCAL statement_timeout = '30s'`)
+    const locks = await acquireSignoffLocks(client, req.organizationId)
+    if (!locks.ok) {
+      await client.query('ROLLBACK')
+      return res.status(503).json({ code: 'cutover_busy', error: 'The books are being updated right now. Please retry the sign-off in a moment.' })
+    }
+    const { rows: [snap] } = await client.query(`SELECT clock_timestamp() AS at, pg_current_snapshot()::text AS marker`)
+    const sb = await buildScoreboard(req.organizationId, input.csv, input.as_of, client)
+    if (sb.headerError) { await client.query('ROLLBACK'); return res.status(400).json({ error: sb.headerError }) }
+    if (!sb.cutover_ready) {
+      await client.query('ROLLBACK')
+      return res.status(409).json({ code: 'cutover_not_ready', error: 'Every line must match to $0.00 with a complete file before a sign-off can be recorded.', lines: sb.lines })
+    }
+    const { rows: [row] } = await client.query(
+      `INSERT INTO ochr_cutover_signoffs (organization_id, as_of, accountant_name, signed_on, scoreboard, recorded_by, snapshot_at, snapshot_marker)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id, as_of, accountant_name, signed_on, created_at, snapshot_at, snapshot_marker`,
+      [req.organizationId, input.as_of, name, signedOn,
+        JSON.stringify({ lines: sb.lines, accounts: sb.accounts, snapshot: { at: snap.at, marker: snap.marker, diocese_org_id: locks.dioceseOrgId } }),
+        req.user.id, snap.at, snap.marker])
+    await client.query('COMMIT')
+    res.status(201).json(row)
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
+    monitor.error('finance.cutover.signoff', err, { orgId: req.organizationId })
+    res.status(500).json({ error: 'The sign-off was not recorded. Please retry.' })
+  } finally { client.release() }
+})
+
+// GET /api/finance/cutover/template — every active chart account at 0.00.
+router.get('/cutover/template', async (req, res) => {
+  if (!STAFF_ROLES.has(req.user?.role)) return res.status(403).json({ error: 'Staff or admin only' })
+  try {
+    res.set('Content-Type', 'text/csv; charset=utf-8')
+    res.set('Content-Disposition', 'attachment; filename="old-system-trial-balance-template.csv"')
+    res.set('Cache-Control', 'no-store')
+    res.send(await templateCsv(req.organizationId))
+  } catch (err) {
+    monitor.error('finance.cutover.template', err, { orgId: req.organizationId })
+    res.status(500).json({ error: 'Could not build the template. Please retry.' })
   }
 })
 
@@ -293,7 +577,13 @@ router.get('/summary', async (req, res) => {
   const end   = ISO_DATE.test(req.query.end ?? '')   ? req.query.end   : '2999-12-31'
   try {
     const t = await computePeriodTotals(req.organizationId, start, end)
-    res.json({ start, end, basis: 'live', ...t })
+    const lines = await unmappedDonationLines(req.organizationId, start, end)
+    res.json({
+      start, end, basis: 'live', ...t,
+      mapping_prompt: lines.length
+        ? { lines, total: lines.reduce((s, l) => s + Number(l.amount), 0).toFixed(2) }
+        : null,
+    })
   } catch (err) {
     monitor.error('finance.summary', err, { orgId: req.organizationId })
     res.status(500).json({ error: 'Failed to build the summary' })
@@ -363,6 +653,7 @@ router.post('/submissions', async (req, res) => {
   const refuse = async (status, body) => { await client.query('ROLLBACK'); return res.status(status).json(body) }
   try {
     await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ')
+    await lockParishBooks(client, req.organizationId)
 
     const { rows: aff } = await client.query(
       `SELECT diocese_org_id FROM ochr_diocese_affiliations
@@ -390,7 +681,39 @@ router.post('/submissions', async (req, res) => {
       })
     }
 
+    // R418-1: a resubmit would freeze totals that still miss deposit
+    // adjustments the chancery cannot see. Refuse until they are wired in.
+    // R418-2: lock this parish's own row for the period first (same row
+    // lock reversal approval takes), then check under it.
+    await lockSubmissionsForDepositCheck(client,
+      's.organization_id = $1 AND s.diocese_org_id = $2 AND s.period_start = $3::date AND s.period_end = $4::date',
+      [req.organizationId, dioceseId, start, end])
+    if (await periodHasPendingDepositAdjustments(client, {
+      organizationId: req.organizationId, dioceseOrgId: dioceseId, periodStart: start, periodEnd: end,
+    })) {
+      return refuse(DEPOSIT_ADJUSTMENTS_PENDING.status, DEPOSIT_ADJUSTMENTS_PENDING.body)
+    }
+    // SP-250 W1: voided paid intentions without a disposition hold submit.
+    if (await periodHasOpenStipendDispositions(client, {
+      organizationId: req.organizationId, periodStart: start, periodEnd: end,
+    })) {
+      return refuse(OPEN_STIPEND_DISPOSITIONS_PENDING.status, OPEN_STIPEND_DISPOSITIONS_PENDING.body)
+    }
+
     const totals = await computePeriodTotals(req.organizationId, start, end, client)
+    // Held on the gift lines themselves, per category, not on the summed
+    // unmapped bucket: a negative or offsetting line on another unknown
+    // code must not hide a gift, and an unknown non-donation code is not a
+    // gift with no account.
+    const categories = await unmappedDonationLines(req.organizationId, start, end, client)
+    if (categories.length) {
+      return refuse(409, {
+        code: 'unmapped_unknown',
+        error: 'This period has gifts with no account. Map them before sending it. Nothing was frozen.',
+        unmapped_total: categories.reduce((s, l) => s + Number(l.amount), 0).toFixed(2),
+        categories,
+      })
+    }
     // Per-gift assessable facts from THIS snapshot. A later refund
     // stamps assessable_impact from this map — never from live COA.
     totals.gift_assessable = await giftAssessableAtFreeze(
@@ -443,6 +766,7 @@ router.post('/submissions', async (req, res) => {
     // "no overlap" on separate pooled connections and both wrote; the
     // database refused the second. That is the guard working, so it must
     // read as the same 409 the application check produces, not as "we broke".
+    if (isDepositLockBusy(err)) return res.status(DEPOSIT_LOCK_BUSY.status).json(DEPOSIT_LOCK_BUSY.body)
     if (err?.code === '23P01') {
       return res.status(409).json({
         error: "This period overlaps another of this parish's live periods. A parish's periods must not overlap.",

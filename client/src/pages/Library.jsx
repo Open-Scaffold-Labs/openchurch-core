@@ -4,7 +4,7 @@ import {
   BookOpen, MessageCircle, Sun, Megaphone, Search, RotateCcw,
   Loader2, Copy, Check, ChevronDown, ChevronUp,
 } from 'lucide-react'
-import PageWrapper from '../components/PageWrapper'
+import PageWrapper, { PageHeader } from '../components/PageWrapper'
 import EmptyState from '../components/EmptyState'
 import { LibraryIllustration } from '../components/illustrations'
 import { SkeletonCard } from '../components/Skeleton'
@@ -19,18 +19,18 @@ import { startOfLocalDayISO, endOfLocalDayISO } from '../utils/dates'
 // and Load-more pagination.
 
 const TYPE_META = {
-  sermon:       { label: 'Sermon Outline', icon: BookOpen,      accent: 'from-church-600 to-church-800' },
-  message:      { label: 'Church Message', icon: MessageCircle, accent: 'from-ink-600 to-ink-800' },
-  devotional:   { label: 'Devotional',     icon: Sun,           accent: 'from-amber-700 to-amber-900' },
-  announcement: { label: 'Announcement',   icon: Megaphone,     accent: 'from-brass-600 to-brass-800' },
+  sermon:       { labelKey: 'lib.type.sermon',       icon: BookOpen,      accent: 'from-church-600 to-church-800' },
+  message:      { labelKey: 'lib.type.message',      icon: MessageCircle, accent: 'from-ink-600 to-ink-800' },
+  devotional:   { labelKey: 'lib.type.devotional',   icon: Sun,           accent: 'from-amber-700 to-amber-900' },
+  announcement: { labelKey: 'lib.type.announcement', icon: Megaphone,     accent: 'from-brass-600 to-brass-800' },
 }
 
 const TYPE_OPTIONS = [
-  { value: '',             label: 'All types' },
-  { value: 'sermon',       label: 'Sermon Outline' },
-  { value: 'message',      label: 'Church Message' },
-  { value: 'devotional',   label: 'Devotional' },
-  { value: 'announcement', label: 'Announcement' },
+  { value: '',             labelKey: 'lib.allTypes' },
+  { value: 'sermon',       labelKey: 'lib.type.sermon' },
+  { value: 'message',      labelKey: 'lib.type.message' },
+  { value: 'devotional',   labelKey: 'lib.type.devotional' },
+  { value: 'announcement', labelKey: 'lib.type.announcement' },
 ]
 
 const PAGE_SIZE = 25
@@ -48,6 +48,7 @@ function timeAgo(dateStr) {
 }
 
 function GenerationCard({ entry }) {
+  const { t } = useLocale()
   const meta = TYPE_META[entry.type] ?? TYPE_META.sermon
   const Icon = meta.icon
   const [open, setOpen]     = useState(false)
@@ -61,7 +62,7 @@ function GenerationCard({ entry }) {
       setCopied(true)
       setTimeout(() => setCopied(false), 1800)
     } catch {
-      toast.error('Could not copy to clipboard')
+      toast.error(t('lib.copyFailed'))
     }
   }
 
@@ -84,11 +85,11 @@ function GenerationCard({ entry }) {
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-xs font-semibold text-ink-700 dark:text-parchment-100">{meta.label}</span>
+            <span className="text-xs font-semibold text-ink-700 dark:text-parchment-100">{t(meta.labelKey)}</span>
             <span className="text-[11px] text-ink-500 dark:text-parchment-300/70">· {timeAgo(entry.created_at)}</span>
           </div>
           <p className="mt-1 text-sm text-ink-800 dark:text-parchment-100 line-clamp-2 leading-snug">
-            {promptPreview || <span className="italic text-ink-500 dark:text-parchment-300/70">No prompt recorded</span>}
+            {promptPreview || <span className="italic text-ink-500 dark:text-parchment-300/70">{t('lib.noPrompt')}</span>}
           </p>
         </div>
         <div className="shrink-0 self-center text-ink-400 dark:text-parchment-300/70">
@@ -108,13 +109,13 @@ function GenerationCard({ entry }) {
             <div className="px-4 py-3 space-y-3">
               {entry.prompt && (
                 <div>
-                  <p className="text-[10px] font-semibold uppercase tracking-wider text-ink-500 dark:text-parchment-300/70 mb-1">Prompt</p>
+                  <p className="text-[11px] font-semibold uppercase tracking-wider text-ink-500 dark:text-parchment-300/70 mb-1">{t('lib.prompt')}</p>
                   <p className="text-xs text-ink-700 dark:text-parchment-200 whitespace-pre-wrap leading-relaxed">{entry.prompt}</p>
                 </div>
               )}
               <div>
                 <div className="flex items-center justify-between mb-1">
-                  <p className="text-[10px] font-semibold uppercase tracking-wider text-ink-500 dark:text-parchment-300/70">Output</p>
+                  <p className="text-[11px] font-semibold uppercase tracking-wider text-ink-500 dark:text-parchment-300/70">{t('lib.output')}</p>
                   <button
                     type="button"
                     onClick={copyOutput}
@@ -125,11 +126,11 @@ function GenerationCard({ entry }) {
                   </button>
                 </div>
                 <p className="text-sm text-ink-800 dark:text-parchment-100 whitespace-pre-wrap leading-relaxed">
-                  {entry.output || <span className="italic text-ink-500 dark:text-parchment-300/70">Empty output</span>}
+                  {entry.output || <span className="italic text-ink-500 dark:text-parchment-300/70">{t('lib.emptyOutput')}</span>}
                 </p>
               </div>
               {(entry.provider || entry.model) && (
-                <p className="text-[10px] text-ink-500 dark:text-parchment-300/70">
+                <p className="text-[11px] text-ink-500 dark:text-parchment-300/70">
                   {[entry.provider, entry.model].filter(Boolean).join(' · ')}
                 </p>
               )}
@@ -142,6 +143,7 @@ function GenerationCard({ entry }) {
 }
 
 export default function Library() {
+  const { t } = useLocale()
   const [filters,  setFilters]  = useState(EMPTY_FILTERS)
   const [rows,     setRows]     = useState([])
   const [total,    setTotal]    = useState(0)
@@ -154,7 +156,6 @@ export default function Library() {
   const [loadFailed, setLoadFailed] = useState(false)
   const [adminOnly, setAdminOnly] = useState(false)
   const toast = useToast()
-  const { t } = useLocale()
 
   const buildQuery = useCallback((nextOffset) => {
     const params = new URLSearchParams()
@@ -221,12 +222,12 @@ export default function Library() {
   const isFiltered   = !!(filters.type || filters.q || filters.since || filters.until)
 
   return (
-    <PageWrapper>
+    <PageWrapper type="list">
       <div className="max-w-5xl mx-auto space-y-6">
         <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }}>
-          <h1 className="font-display text-3xl font-semibold text-ink-900 dark:text-parchment-50 tracking-tight">Library</h1>
+          <PageHeader title={t('lib.title')} />
           <p className="text-sm text-ink-500 dark:text-parchment-300/70 mt-1">
-            Every sermon outline, message, devotional, and announcement you’ve generated. Search, filter, and copy back into use.
+            {t('lib.subtitle')}
           </p>
         </motion.div>
 
@@ -239,45 +240,45 @@ export default function Library() {
         >
           <div className="flex flex-wrap items-end gap-3">
             <div className="flex-1 min-w-[180px]">
-              <label className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">Search</label>
+              <label className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">{t('lib.search')}</label>
               <div className="relative">
                 <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-ink-400 dark:text-parchment-300/70" />
                 <input
                   type="text"
                   value={filters.q}
                   onChange={updateFilter('q')}
-                  placeholder="Find a phrase from a past prompt or output…" aria-label="Find a phrase from a past prompt or output…"
+                  placeholder={t('lib.searchPh')} aria-label={t('lib.searchPh')}
                   className="w-full pl-9 pr-3 py-2 text-sm rounded-lg border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-100 dark:bg-ink-800 text-ink-900 dark:text-parchment-50 focus:outline-none focus:ring-2 focus:ring-church-500"
                 />
               </div>
             </div>
             <div className="flex-1 min-w-[140px]">
-              <label className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">Type</label>
+              <label className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">{t('lib.type')}</label>
               <select
                 value={filters.type}
-                aria-label="Filter by type"
+                aria-label={t('lib.filterType')}
                 onChange={updateFilter('type')}
                 className="w-full px-3 py-2 text-sm rounded-lg border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-100 dark:bg-ink-800 text-ink-900 dark:text-parchment-50 focus:outline-none focus:ring-2 focus:ring-church-500"
               >
-                {TYPE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                {TYPE_OPTIONS.map(o => <option key={o.value} value={o.value}>{t(o.labelKey)}</option>)}
               </select>
             </div>
             <div className="flex-1 min-w-[140px]">
-              <label className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">Since</label>
+              <label className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">{t('lib.since')}</label>
               <input
                 type="date"
                 value={filters.since}
-                aria-label="Filter from date"
+                aria-label={t('lib.filterFrom')}
                 onChange={updateFilter('since')}
                 className="w-full px-3 py-2 text-sm rounded-lg border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-100 dark:bg-ink-800 text-ink-900 dark:text-parchment-50 focus:outline-none focus:ring-2 focus:ring-church-500"
               />
             </div>
             <div className="flex-1 min-w-[140px]">
-              <label className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">Until</label>
+              <label className="block text-xs font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">{t('lib.until')}</label>
               <input
                 type="date"
                 value={filters.until}
-                aria-label="Filter until date"
+                aria-label={t('lib.filterUntil')}
                 onChange={updateFilter('until')}
                 className="w-full px-3 py-2 text-sm rounded-lg border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-100 dark:bg-ink-800 text-ink-900 dark:text-parchment-50 focus:outline-none focus:ring-2 focus:ring-church-500"
               />
@@ -288,7 +289,7 @@ export default function Library() {
                 onClick={resetFilters}
                 className="inline-flex items-center gap-1.5 text-xs font-semibold text-ink-500 hover:text-ink-900 dark:text-parchment-300/70 dark:hover:text-parchment-50 px-2 py-2 transition-colors"
               >
-                <RotateCcw size={13} /> Reset
+                <RotateCcw size={13} /> {t('lib.reset')}
               </button>
             )}
           </div>
@@ -316,11 +317,9 @@ export default function Library() {
           <EmptyState
             illustration={!isFiltered ? LibraryIllustration : undefined}
             icon={BookOpen}
-            title={isFiltered ? 'No matching generations' : 'Your library is empty'}
-            body={isFiltered
-              ? 'No generations match the current filters. Try a wider date range or a different search term.'
-              : 'Generations from the AI Studio land here. Draft a sermon outline or a devotional and it will be browsable forever.'}
-            action={isFiltered ? { label: 'Clear filters', onClick: resetFilters } : undefined}
+            title={isFiltered ? t('lib.noMatchTitle') : t('lib.emptyTitle')}
+            body={isFiltered ? t('lib.noMatchBody') : t('lib.emptyBody')}
+            action={isFiltered ? { label: t('lib.clearFilters'), onClick: resetFilters } : undefined}
           />
         ) : (
           <>

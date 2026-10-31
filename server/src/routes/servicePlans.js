@@ -163,6 +163,25 @@ async function planInOrg(planId, orgId) {
   return rows.length > 0
 }
 
+// SP-191. The audit middleware labels every write on this router as
+// service_plan and reads the response title. An element response is the
+// element, so the log used to say "Created service_plan: Entrance Hymn".
+// Name the plan and the element from this org only. A missing plan writes
+// nothing here; the 404 path never reaches a 2xx audit row.
+async function noteServicePlanElement(res, orgId, planId, { elementId = null, elementTitle = null, reorder = false } = {}) {
+  const { rows } = await pool.query(
+    'SELECT title FROM ochr_service_plans WHERE id = $1 AND organization_id = $2',
+    [planId, orgId],
+  )
+  if (!rows[0]) return
+  res.locals.servicePlanElement = {
+    planTitle: rows[0].title,
+    elementId,
+    elementTitle,
+    reorder,
+  }
+}
+
 router.post('/:id/elements', async (req, res) => {
   const id = requireIntParam(req, res); if (id === null) return
   if (!(await planInOrg(id, req.organizationId))) return res.status(404).json({ error: 'Plan not found' })
@@ -188,6 +207,10 @@ router.post('/:id/elements', async (req, res) => {
        RETURNING id, position, kind, title, reference, assigned_client_id, notes`,
       [req.organizationId, id, position, kind, title, reference, assigned, notes]
     )
+    await noteServicePlanElement(res, req.organizationId, id, {
+      elementId: rows[0].id,
+      elementTitle: rows[0].title,
+    })
     res.status(201).json(rows[0])
   } catch (err) {
     monitor.error('servicePlans.addElement', err, { orgId: req.organizationId, id })
@@ -223,6 +246,10 @@ router.patch('/:id/elements/:eid', async (req, res) => {
       params
     )
     if (!rows.length) return res.status(404).json({ error: 'Not found' })
+    await noteServicePlanElement(res, req.organizationId, id, {
+      elementId: rows[0].id,
+      elementTitle: rows[0].title,
+    })
     res.json(rows[0])
   } catch (err) {
     monitor.error('servicePlans.updateElement', err, { orgId: req.organizationId, id, eid })
@@ -234,11 +261,22 @@ router.delete('/:id/elements/:eid', async (req, res) => {
   const id = Number(req.params.id), eid = Number(req.params.eid)
   if (!Number.isInteger(id) || !Number.isInteger(eid)) return res.status(400).json({ error: 'Invalid id' })
   try {
+    const { rows: named } = await pool.query(
+      `SELECT e.title AS element_title
+         FROM ochr_service_elements e
+        WHERE e.id = $1 AND e.plan_id = $2 AND e.organization_id = $3`,
+      [eid, id, req.organizationId],
+    )
+    if (!named[0]) return res.status(404).json({ error: 'Not found' })
     const { rowCount } = await pool.query(
       'DELETE FROM ochr_service_elements WHERE id = $1 AND plan_id = $2 AND organization_id = $3',
       [eid, id, req.organizationId]
     )
     if (!rowCount) return res.status(404).json({ error: 'Not found' })
+    await noteServicePlanElement(res, req.organizationId, id, {
+      elementId: eid,
+      elementTitle: named[0].element_title,
+    })
     res.status(204).end()
   } catch (err) {
     monitor.error('servicePlans.deleteElement', err, { orgId: req.organizationId, id, eid })
@@ -279,6 +317,7 @@ router.put('/:id/elements/reorder', async (req, res) => {
       )
     }
     await client.query('COMMIT')
+    await noteServicePlanElement(res, req.organizationId, id, { reorder: true })
     res.status(204).end()
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {})

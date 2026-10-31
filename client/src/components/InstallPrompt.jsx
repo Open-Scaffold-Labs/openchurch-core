@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Download, X, Share } from 'lucide-react'
 import { useLocale } from '../i18n'
+import { isNativeShell } from '../native/nativeShell'
 
 // Install-to-home-screen prompt (Sprint PWA / PWA.1b).
 //
@@ -77,7 +78,9 @@ export default function InstallPrompt() {
   })
 
   useEffect(() => {
-    if (dismissed || isStandalone()) return
+    // The native shell is already the installed app. "Add to Home
+    // Screen" inside it is the wrong instruction.
+    if (dismissed || isStandalone() || isNativeShell()) return
 
     function onBeforeInstall(e) {
       // Prevent the auto banner — we render our own
@@ -101,7 +104,9 @@ export default function InstallPrompt() {
     // first, not an install nag).
     let iosTimer
     if (isIOSSafari()) {
-      iosTimer = setTimeout(() => setShowIOS(true), 4000)
+      iosTimer = setTimeout(() => {
+        if (!isNativeShell()) setShowIOS(true)
+      }, 4000)
     }
 
     return () => {
@@ -132,7 +137,7 @@ export default function InstallPrompt() {
     // 'accepted' path: 'appinstalled' fires separately + clears flag.
   }
 
-  const show = !dismissed && !isStandalone() && (deferredPrompt || showIOS)
+  const show = !dismissed && !isStandalone() && !isNativeShell() && (deferredPrompt || showIOS)
 
   return (
     <AnimatePresence>
@@ -144,7 +149,7 @@ export default function InstallPrompt() {
           transition={{ duration: 0.25, ease: [0.25, 0.1, 0.25, 1] }}
           role="dialog"
           aria-label={t('install.title')}
-          className="safe-mb fixed bottom-4 left-4 right-4 md:left-auto md:right-6 md:bottom-6 md:max-w-sm z-40 rounded-2xl border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-50 dark:bg-ink-900 shadow-warm-lg p-4"
+          className="safe-mb fixed bottom-4 left-4 right-20 md:left-auto md:right-6 md:bottom-6 md:max-w-sm z-40 rounded-2xl border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-50 dark:bg-ink-900 shadow-warm-lg p-4"
         >
           <div className="flex items-start gap-3">
             <div className="shrink-0 w-9 h-9 rounded-xl bg-church-50 dark:bg-church-900/40 flex items-center justify-center text-church-800 dark:text-brass-300">
@@ -175,7 +180,7 @@ export default function InstallPrompt() {
               type="button"
               onClick={dismiss}
               aria-label={t('install.dismiss')}
-              className="shrink-0 -m-2 p-2 text-ink-400 dark:text-parchment-400/60 hover:text-ink-700 dark:hover:text-parchment-100 transition-colors"
+              className="tap shrink-0 inline-flex items-center justify-center min-h-[44px] min-w-[44px] -m-2 p-2 text-ink-400 dark:text-parchment-400/60 hover:text-ink-700 dark:hover:text-parchment-100 transition-colors"
             >
               <X size={14} />
             </button>

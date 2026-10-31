@@ -15,6 +15,34 @@
  * @param {() => (boolean|undefined)} getNavigatorOnline
  *   The worker's own navigator.onLine, or undefined where it cannot be read.
  */
+// AI responses are not an offline cache. A native shell that has AI
+// excluded, or that has not yet agreed, must not be able to read a
+// previously cached generation, status, quota, or key summary. Daily
+// verse and the liturgical calendar are not AI and stay cacheable.
+const AI_API_PREFIXES = ['/api/ai', '/api/assistant']
+
+export function isAiApiPath(pathname) {
+  const p = String(pathname || '')
+  return AI_API_PREFIXES.some(prefix => p === prefix || p.startsWith(prefix + '/'))
+}
+
+// Public parish page / bulletin / groups must never enter ochr-api.
+// Workbox CacheableResponsePlugin keys on status only and ignores
+// Cache-Control: no-store, so a prior 200 would survive takedown offline
+// (N466-1 /page, N469-1 /bulletin, N466-2 defense-in-depth for /groups).
+export function isPublicApiPath(pathname) {
+  const p = String(pathname || '')
+  return p === '/api/public' || p.startsWith('/api/public/')
+}
+
+export function isRuntimeApiCacheable(pathname) {
+  const p = String(pathname || '')
+  if (!p.startsWith('/api/')) return false
+  if (isAiApiPath(p)) return false
+  if (isPublicApiPath(p)) return false
+  return true
+}
+
 export function createCachePolicy(getNavigatorOnline) {
   // Unknown, not `true`. Before any page has spoken, the decision must rest on
   // the worker's own signal — an assumed value here is a value that can be

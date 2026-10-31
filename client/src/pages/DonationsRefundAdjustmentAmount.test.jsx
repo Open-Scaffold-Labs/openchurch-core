@@ -8,6 +8,7 @@ import { render, screen, waitFor, fireEvent, within } from '@testing-library/rea
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { MemoryRouter } from 'react-router-dom'
 import { LocaleProvider } from '../i18n'
+import { STRINGS } from '../i18n/strings'
 import { ToastProvider } from '../components/ToastProvider'
 import { ConfirmProvider } from '../components/ConfirmProvider'
 import Donations from './Donations'
@@ -33,7 +34,7 @@ const stubFetch = (refundBody) => {
   let refunded = false
   vi.stubGlobal('fetch', vi.fn(async (url, opts = {}) => {
     const u = String(url)
-    if (u.includes('/api/donations/501/refund')) { refunded = true; return ok(refundBody) }
+    if (u.includes('/api/donations/501/record-refund')) { refunded = true; return ok(refundBody) }
     if (u.includes('/api/donations/recurring')) return ok({ recurring: [] })
     if (u.includes('/api/donations/summary')) return ok({ summary: null })
     if (u.includes('/api/donations/by-fund')) return ok({ funds: [] })
@@ -50,9 +51,10 @@ const view = () => render(
 )
 
 async function clickRefund() {
-  const btn = await screen.findByLabelText('Refund this gift', {}, { timeout: 4000 })
-  fireEvent.click(btn)
-  const confirm = await screen.findByRole('button', { name: /refund gift/i }, { timeout: 4000 })
+  const row = (await screen.findByText('Frozen Donor')).closest('tr')
+  fireEvent.click(within(row).getByLabelText('Refund this gift'))
+  fireEvent.change(await screen.findByLabelText(STRINGS.en['don.reasonLabel'] || 'Reason'), { target: { value: 'Paid twice' } })
+  const confirm = await screen.findByRole('button', { name: STRINGS.en['don.refundConfirm'] }, { timeout: 4000 })
   fireEvent.click(confirm)
 }
 
@@ -64,6 +66,7 @@ const ADJ = {
 
 let scrollSpy
 beforeEach(() => {
+  localStorage.clear()
   vi.unstubAllGlobals()
   // jsdom has no layout and no scrollIntoView; the page must call it anyway.
   scrollSpy = vi.fn()

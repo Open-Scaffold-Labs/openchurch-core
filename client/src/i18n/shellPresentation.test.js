@@ -73,6 +73,11 @@ const KEYS = [
   'shell.search.footer',
   'shell.search.reopen',
   'shell.search.unknown',
+  'shell.search.pages',
+  'shell.cmd.packet',
+  'shell.cmd.packetHint',
+  'shell.cmd.worshipHint',
+  'shell.search.masses',
   'aist.agoMinOne',
   'aist.agoMin',
   'aist.agoHourOne',
@@ -120,6 +125,9 @@ describe('APPLE-PRESENTATION-L2-01 shell chrome', () => {
     expect(palette).toMatch(/t\('nav\.Members'\)/)
     expect(palette).toMatch(/t\('nav\.Donations'\)/)
     expect(palette).toMatch(/t\('mem\.role\.Staff'\)/)
+    expect(palette).toMatch(/t\('shell\.cmd\.packet'\)/)
+    expect(palette).toMatch(/t\('shell\.cmd\.packetHint'\)/)
+    expect(palette).toMatch(/t\('shell\.search\.pages'\)/)
   })
 
   it('the new keys exist in en and es, and Spanish does not copy English', () => {

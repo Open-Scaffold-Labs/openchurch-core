@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Loader2, Check } from 'lucide-react'
+import { useLocale } from '../i18n'
 
 // useSaveStatus — wraps an async save fn with idle/saving/saved/error
 // states. The 'saved' state auto-resets to 'idle' after holdMs so the
@@ -16,7 +17,7 @@ import { Loader2, Check } from 'lucide-react'
 // error (toast / inline) and reset by calling run() again. We keep the
 // button readable as 'Save' (idle label) on error so the user can
 // retry without confusion.
-export function useSaveStatus(saveFn, { holdMs = 1200, onSuccess } = {}) {
+export function useSaveStatus(saveFn, { holdMs = 1400, onSuccess } = {}) {
   const [status, setStatus] = useState('idle')
   const timeoutRef = useRef(null)
 
@@ -58,13 +59,21 @@ export default function SaveButton({
   className = '',
   onClick,
 }) {
+  const { t } = useLocale()
   const isLocked = disabled || status === 'saving' || status === 'saved'
   return (
     <button
       type={type}
       onClick={onClick}
       disabled={isLocked}
-      className={`relative inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-church-900 dark:bg-church-700 text-parchment-50 text-sm font-semibold shadow-warm hover:bg-church-800 dark:hover:bg-church-600 transition-colors disabled:opacity-60 disabled:cursor-not-allowed ${className}`}
+      // Saved turns the button sage for its hold (V1.4, study #6) and keeps
+      // full strength: it is locked, but it is an answer, not a dead control.
+      // sage-700 under parchment-50 is 7.6:1; sage-600 in dark is 5.4:1.
+      className={`relative inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg text-parchment-50 text-sm font-semibold shadow-warm transition-colors duration-200 disabled:cursor-not-allowed ${
+        status === 'saved'
+          ? 'bg-sage-700 dark:bg-sage-600'
+          : 'bg-church-900 dark:bg-church-700 hover:bg-church-800 dark:hover:bg-church-600 disabled:opacity-60'
+      } ${className}`}
     >
       <AnimatePresence mode="wait" initial={false}>
         {status === 'saving' ? (
@@ -77,19 +86,19 @@ export default function SaveButton({
             className="inline-flex items-center gap-2"
           >
             <Loader2 size={15} className="animate-spin" />
-            Saving…
+            {t('save.saving')}
           </motion.span>
         ) : status === 'saved' ? (
           <motion.span
             key="saved"
-            initial={{ opacity: 0, scale: 0.9 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 0.95 }}
+            initial={{ opacity: 0, y: 4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -4 }}
             transition={{ duration: 0.18 }}
-            className="inline-flex items-center gap-2 text-brass-200"
+            className="inline-flex items-center gap-2"
           >
             <Check size={15} strokeWidth={3} />
-            Saved
+            {t('save.saved')}
           </motion.span>
         ) : (
           <motion.span

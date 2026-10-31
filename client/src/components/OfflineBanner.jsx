@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { WifiOff } from 'lucide-react'
+import { Wifi, WifiOff } from 'lucide-react'
+import { EASE_SETTLE } from '../utils/motion'
 import { useLocale } from '../i18n'
 
 // Offline indicator (Sprint PWA / PWA.3).
@@ -27,6 +28,8 @@ import { useLocale } from '../i18n'
 //     network tests are how you end up with false-positives during
 //     captive-portal redirects.
 
+const BACK_ONLINE_MS = 2000
+
 function getInitialOnline() {
   // SSR-safe default — assume online if window isn't there yet.
   if (typeof navigator === 'undefined') return true
@@ -50,33 +53,56 @@ function tellServiceWorker(online) {
 export default function OfflineBanner() {
   const { t } = useLocale()
   const [online, setOnline] = useState(getInitialOnline)
+  // After an outage the bar turns sage, says so, and leaves on its own
+  // (V1.5, study #13). Only a real offline → online change earns it; a
+  // page that loads online never shows it.
+  const [backOnline, setBackOnline] = useState(false)
+  const wasOfflineRef = useRef(!getInitialOnline())
+  const backTimerRef = useRef(null)
 
   useEffect(() => {
-    function handleOnline()  { setOnline(true);  tellServiceWorker(true) }
-    function handleOffline() { setOnline(false); tellServiceWorker(false) }
+    function handleOnline() {
+      setOnline(true); tellServiceWorker(true)
+      if (wasOfflineRef.current) {
+        wasOfflineRef.current = false
+        setBackOnline(true)
+        clearTimeout(backTimerRef.current)
+        backTimerRef.current = setTimeout(() => setBackOnline(false), BACK_ONLINE_MS)
+      }
+    }
+    function handleOffline() {
+      wasOfflineRef.current = true
+      clearTimeout(backTimerRef.current); setBackOnline(false)
+      setOnline(false); tellServiceWorker(false)
+    }
     window.addEventListener('online',  handleOnline)
     window.addEventListener('offline', handleOffline)
     tellServiceWorker(getInitialOnline())
     return () => {
       window.removeEventListener('online',  handleOnline)
       window.removeEventListener('offline', handleOffline)
+      clearTimeout(backTimerRef.current)
     }
   }, [])
 
   return (
     <AnimatePresence>
-      {!online && (
+      {(!online || backOnline) && (
         <motion.div
+          key="offline-bar"
           role="status"
           aria-live="polite"
           initial={{ opacity: 0, y: -20 }}
-          animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: -20 }}
-          transition={{ duration: 0.25, ease: [0.25, 0.1, 0.25, 1] }}
-          className="safe-pt fixed top-0 left-0 right-0 z-50 flex items-center justify-center gap-2 px-4 py-2 bg-brass-100 dark:bg-brass-900/40 text-brass-900 dark:text-brass-200 text-xs font-semibold border-b border-brass-200/70 dark:border-brass-800/40 shadow-warm-sm"
+          animate={{ opacity: 1, y: 0, transition: { duration: 0.26, ease: EASE_SETTLE } }}
+          exit={{ opacity: 0, y: -20, transition: { duration: 0.2, ease: 'easeIn' } }}
+          className={`safe-pt fixed top-0 left-0 right-0 z-50 flex items-center justify-center gap-2 px-4 py-2 text-xs font-semibold border-b shadow-warm-sm transition-colors duration-300 ${
+            online
+              ? 'bg-sage-50 dark:bg-sage-900/40 text-sage-800 dark:text-sage-200 border-sage-200/70 dark:border-sage-800/40'
+              : 'bg-brass-100 dark:bg-brass-900/40 text-brass-900 dark:text-brass-200 border-brass-200/70 dark:border-brass-800/40'
+          }`}
         >
-          <WifiOff size={13} />
-          <span>{t('offline.banner')}</span>
+          {online ? <Wifi size={13} /> : <WifiOff size={13} />}
+          <span>{online ? t('offline.back') : t('offline.banner')}</span>
         </motion.div>
       )}
     </AnimatePresence>

@@ -1,13 +1,14 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useMemo, useState, useCallback } from 'react'
 import { Link } from 'react-router-dom'
 import { Church, ClipboardPaste, Loader2, Printer, Search } from 'lucide-react'
-import PageWrapper from '../components/PageWrapper'
+import PageWrapper, { PageHeader } from '../components/PageWrapper'
 import EmptyState from '../components/EmptyState'
 import { SkeletonRowList } from '../components/Skeleton'
 import { apiUrl } from '../api'
 import { formatStoredDate } from '../utils/dates'
 import { useLocale } from '../i18n'
 import SacramentAnniversaries from '../components/SacramentAnniversaries'
+import { consumeJustEntered } from '../utils/justEntered'
 
 // Sacramental Register (SAC.2) — the parish-wide book of sacraments, the
 // canonical record a parish secretary keeps. Reads GET /api/sacraments
@@ -16,6 +17,18 @@ import SacramentAnniversaries from '../components/SacramentAnniversaries'
 const SACRAMENT_TYPES = ['baptism', 'reconciliation', 'first_communion', 'confirmation', 'marriage', 'holy_orders', 'anointing', 'burial']
 
 const PAGE_SIZE = 50
+
+// App Review R2 finding 7 (Beacon): at 300% zoom the sticky actions column
+// sat over the Place column and clipped it; at 200-250% (Beacon R3) the
+// table still clipped Place / Member. On a narrow screen (below 1280 CSS
+// px — the `reflow` screen in tailwind.config.js, never in print) the register reflows:
+// each row becomes a stacked card and every cell carries its column name
+// (data-label) so nothing is hidden behind the pinned actions. At 1280px and up
+// it is the same ledger table as before. The actions cell keeps pr-16 so
+// its Certificate link sits left of the floating assistant button instead
+// of under it when a row scrolls past the button (the FAB is right-5 +
+// w-12; the page gutter is p-4/sm:p-6).
+const REFLOW_TD = 'reflow:flex reflow:gap-3 reflow:px-0 reflow:py-0.5 reflow:whitespace-normal reflow:before:w-28 reflow:before:shrink-0 reflow:before:content-[attr(data-label)] reflow:before:pt-0.5 reflow:before:font-sans reflow:before:text-[11px] reflow:before:font-bold reflow:before:uppercase reflow:before:tracking-widest reflow:before:text-brass-700 dark:reflow:before:text-brass-300'
 
 export default function SacramentalRegister() {
   const { t, dateLocale } = useLocale()
@@ -26,6 +39,7 @@ export default function SacramentalRegister() {
   const [more,    setMore]    = useState(false)
   const [done,    setDone]    = useState(false)
   const [error,   setError]   = useState(null)
+  const [retryTick, setRetryTick] = useState(0)
 
   const fetchPage = useCallback(async (offset, currentType, currentQ) => {
     const qs = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(offset) })
@@ -59,7 +73,18 @@ export default function SacramentalRegister() {
         .finally(() => { if (!cancelled) setLoading(false) })
     }, 250)
     return () => { cancelled = true; clearTimeout(timer) }
-  }, [type, q, fetchPage])
+  }, [type, q, fetchPage, retryTick])
+
+  // "Open: Baptism, Maria Ruiz, May 10, 2020" — unique per row, visible
+  // word first. A missing piece is left out rather than read as a dash.
+  const rowActionLabel = (action, r) => t('register.rowAction', {
+    action,
+    entry: [
+      SACRAMENT_TYPES.includes(r.type) ? t(`sac.${r.type}`) : r.type,
+      r.member_name,
+      r.date ? formatStoredDate(r.date, undefined, dateLocale) : null,
+    ].filter(Boolean).join(', '),
+  })
 
   const loadMore = async () => {
     setMore(true); setError(null)
@@ -74,16 +99,16 @@ export default function SacramentalRegister() {
     }
   }
 
+  // A record committed moments ago settles like fresh ink, once (V1.2).
+  const inked = useMemo(
+    () => new Set(records.filter(r => consumeJustEntered(r.id)).map(r => String(r.id))),
+    [records],
+  )
+
   return (
-    <PageWrapper>
+    <PageWrapper type="list">
       <div className="flex items-center justify-between gap-3 mb-5 print:mb-2">
-        <div className="flex items-center gap-2">
-          <Church size={20} className="text-church-700 dark:text-brass-300" />
-          <div>
-            <h1 className="text-2xl font-display font-bold text-ink-900 dark:text-parchment-50">{t('register.title')}</h1>
-            <p className="text-sm text-ink-500 dark:text-parchment-300/70">{t('register.sub')}</p>
-          </div>
-        </div>
+        <PageHeader title={t('register.title')} subtitle={t('register.sub')} leading={<Church size={20} />} />
         <div className="print:hidden flex items-center gap-2">
           <Link
             to="/register/drafts"
@@ -115,7 +140,7 @@ export default function SacramentalRegister() {
       </div>
 
       <div className="mb-4 print:hidden flex flex-wrap items-center gap-2">
-        <label className="sr-only" htmlFor="sac-type">Filter by sacrament</label>
+        <label className="sr-only" htmlFor="sac-type">{t('reg.filterSac')}</label>
         <select
           id="sac-type"
           value={type}
@@ -125,22 +150,31 @@ export default function SacramentalRegister() {
           <option value="">{t('register.allSacraments')}</option>
           {SACRAMENT_TYPES.map(v => <option key={v} value={v}>{t(`sac.${v}`)}</option>)}
         </select>
-        <div className="relative flex-1 min-w-[12rem]">
+        {/* App Review R4 (Beacon): on the narrow `reflow` screen the search
+            takes its own full row instead of sharing it with the select, so
+            the placeholder is not cut off at 250-300% zoom. */}
+        <div className="relative flex-1 min-w-[12rem] reflow:basis-full">
           <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-ink-400" />
           <input
             type="search"
             value={q}
             onChange={e => setQ(e.target.value)}
-            placeholder={t('register.search')}
+            placeholder={t('register.searchPlaceholder')}
             aria-label={t('register.search')}
             className="w-full pl-9 pr-3 py-2 text-sm rounded-lg border border-parchment-300/70 dark:border-brass-900/40 bg-parchment-100 dark:bg-ink-800 text-ink-900 dark:text-parchment-50 focus:outline-none focus:ring-2 focus:ring-church-500"
           />
         </div>
       </div>
 
-      {error && (
+      {/* A failed first read is already said, once, by the empty-state card
+          below. This line is only for a failure while rows are on screen
+          (Load more), and it never shows a status code (OPERATOR P1). */}
+      {error && records.length > 0 && (
         <p role="status" className="mb-3 text-sm text-amber-700 dark:text-amber-400">
-          {t('register.loadFailedBody')} <span className="text-ink-500 dark:text-parchment-300/70">({error})</span>
+          {t('register.loadFailedBody')}{' '}
+          <button type="button" onClick={() => setRetryTick(n => n + 1)} className="underline font-medium">
+            {t('error.tryAgain')}
+          </button>
         </p>
       )}
 
@@ -159,6 +193,7 @@ export default function SacramentalRegister() {
           icon={Church}
           title={t('register.loadFailedTitle')}
           body={t('register.loadFailedBody')}
+          action={{ label: t('error.tryAgain'), onClick: () => setRetryTick(n => n + 1) }}
         />
       ) : records.length === 0 ? (
         <EmptyState
@@ -184,8 +219,8 @@ export default function SacramentalRegister() {
           role="region"
           aria-label={t('register.title')}
         >
-          <table className="w-full text-sm">
-            <thead>
+          <table className="w-full text-sm reflow:block">
+            <thead className="reflow:sr-only">
               {/* brass-700, not -600: at 11px on parchment-100 the -600 step measures
                 4.47:1 and misses AA by 0.03. -700 is 6.20:1 and still
                 unmistakably brass. The brand token itself is untouched. */}
@@ -196,19 +231,23 @@ export default function SacramentalRegister() {
                 <th className="px-4 py-3 font-bold">{t('register.minister')}</th>
                 <th className="px-4 py-3 font-bold">{t('register.place')}</th>
                 <th className="px-4 py-3 font-bold">{t('register.certNo')}</th>
-                <th className="px-4 py-3 font-bold print:hidden"><span className="sr-only">{t('register.certificate')}</span></th>
+                {/* Actions stay pinned to the right edge of the scroller. At 200%
+                    zoom or a narrow window the table scrolls sideways and the
+                    Open / Certificate links sat off-screen or under the
+                    assistant button (App Review finding 7). */}
+                <th className="sticky right-0 pl-4 pr-16 py-3 font-bold print:hidden bg-parchment-100 dark:bg-ink-800"><span className="sr-only">{t('register.actions')}</span></th>
               </tr>
             </thead>
-            <tbody>
+            <tbody className="reflow:block">
               {records.map(r => (
-                <tr key={r.id} className="border-t border-parchment-300/50 dark:border-brass-900/25 text-ink-800 dark:text-parchment-100">
+                <tr key={r.id} className={`border-t border-parchment-300/50 dark:border-brass-900/25 text-ink-800 dark:text-parchment-100 reflow:block reflow:px-4 reflow:py-3 reflow:first:border-t-0${inked.has(String(r.id)) ? ' ink-settle' : ''}`}>
                   {/* Ledger typography — dates and names in the display
                       serif, rows given room. This is the parish's book,
                       not a data grid; it should read like the sibling of
                       its own certificates. */}
-                  <td className="px-4 py-3.5 whitespace-nowrap font-display text-[15px]">{r.date ? formatStoredDate(r.date, undefined, dateLocale) : '—'}</td>
-                  <td className="px-4 py-3.5 font-medium">{SACRAMENT_TYPES.includes(r.type) ? t(`sac.${r.type}`) : r.type}</td>
-                  <td className="px-4 py-3.5 font-display text-[15px]">
+                  <td data-label={t('register.date')} className={`px-4 py-3.5 whitespace-nowrap font-display text-[15px] ${REFLOW_TD}`}>{r.date ? formatStoredDate(r.date, undefined, dateLocale) : '—'}</td>
+                  <td data-label={t('register.sacrament')} className={`px-4 py-3.5 font-medium ${REFLOW_TD}`}>{SACRAMENT_TYPES.includes(r.type) ? t(`sac.${r.type}`) : r.type}</td>
+                  <td data-label={t('register.member')} className={`px-4 py-3.5 font-display text-[15px] ${REFLOW_TD}`}>
                     {r.client_id && r.member_name ? (
                       <Link to={`/clients/${r.client_id}`} className="text-church-700 dark:text-brass-300 hover:underline print:no-underline print:text-inherit">
                         {r.member_name}
@@ -220,14 +259,25 @@ export default function SacramentalRegister() {
                       <span>{r.member_name || '—'}</span>
                     )}
                   </td>
-                  <td className="px-4 py-3.5">{r.minister || '—'}</td>
-                  <td className="px-4 py-3.5">{r.place || '—'}</td>
-                  <td className="px-4 py-3.5 whitespace-nowrap">{r.certificate_no || '—'}</td>
-                  <td className="px-4 py-3.5 whitespace-nowrap print:hidden">
-                    <Link to={`/register/${r.id}`} className="tap text-church-700 dark:text-brass-300 hover:underline text-[13px] font-semibold mr-3">
+                  <td data-label={t('register.minister')} className={`px-4 py-3.5 ${REFLOW_TD}`}>{r.minister || '—'}</td>
+                  <td data-label={t('register.place')} className={`px-4 py-3.5 break-words ${REFLOW_TD}`}>{r.place || '—'}</td>
+                  <td data-label={t('register.certNo')} className={`px-4 py-3.5 whitespace-nowrap ${REFLOW_TD}`}>{r.certificate_no || '—'}</td>
+                  <td className="sticky right-0 pl-4 pr-16 py-3.5 whitespace-nowrap print:hidden bg-parchment-50 dark:bg-ink-950 shadow-[-6px_0_6px_-6px_rgba(0,0,0,0.15)] reflow:static reflow:block reflow:px-0 reflow:pt-2 reflow:pb-0 reflow:bg-transparent reflow:shadow-none reflow:dark:bg-transparent">
+                    {/* Every row used to say just "Open" and "Certificate" to a
+                        screen reader. The name keeps the visible word first
+                        (label-in-name) and adds which entry it opens. */}
+                    <Link
+                      to={`/register/${r.id}`}
+                      aria-label={rowActionLabel(t('register.open'), r)}
+                      className="tap text-church-700 dark:text-brass-300 hover:underline text-[13px] font-semibold mr-3"
+                    >
                       {t('register.open')}
                     </Link>
-                    <Link to={`/register/${r.id}/certificate`} className="tap text-church-700 dark:text-brass-300 hover:underline text-[13px] font-semibold">
+                    <Link
+                      to={`/register/${r.id}/certificate`}
+                      aria-label={rowActionLabel(t('register.certificate'), r)}
+                      className="tap text-church-700 dark:text-brass-300 hover:underline text-[13px] font-semibold"
+                    >
                       {t('register.certificate')}
                     </Link>
                   </td>

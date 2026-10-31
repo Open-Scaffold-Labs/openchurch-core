@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import { Loader2, ArrowRight, Check, LifeBuoy, FileText, Church } from 'lucide-react'
-import PageWrapper, { itemVariants } from '../components/PageWrapper'
+import PageWrapper, { PageHeader, itemVariants } from '../components/PageWrapper'
 import { useToast } from '../components/ToastProvider'
 import { useAuth } from '../context/AuthContext'
 import { useLocale } from '../i18n'
@@ -132,7 +132,7 @@ export default function GettingSettled() {
 
   if (!data) {
     return (
-      <PageWrapper title={t('settled.title')}>
+      <PageWrapper type="list" title={t('settled.title')}>
         <div className="flex justify-center py-20"><Loader2 size={22} className="animate-spin text-brass-600" /></div>
       </PageWrapper>
     )
@@ -144,7 +144,7 @@ export default function GettingSettled() {
   // four hundred members.
   if (data.error) {
     return (
-      <PageWrapper title={t('settled.title')}>
+      <PageWrapper type="list" title={t('settled.title')}>
         <motion.div variants={itemVariants} className="max-w-xl">
           <p className="text-[15px] text-ink-600 dark:text-parchment-300/85">{t('settled.loadFailed')}</p>
           <Link to="/" className="mt-4 inline-flex items-center gap-1.5 text-[14px] font-semibold text-church-800 dark:text-brass-200 hover:underline">
@@ -159,7 +159,7 @@ export default function GettingSettled() {
   const arrived = data.import_context
 
   return (
-    <PageWrapper title={t('settled.title')}>
+    <PageWrapper type="list" title={t('settled.title')}>
       {/* Welcome. A sentence, not a banner — and no name for how far
           along anyone is. */}
       <motion.section variants={itemVariants} className="max-w-2xl">
@@ -270,7 +270,7 @@ export default function GettingSettled() {
                         {t(base)}
                         <ArrowRight size={14} className="opacity-60 group-hover:translate-x-0.5 transition-transform" aria-hidden="true" />
                       </Link>
-                      <p className="mt-1 text-[13.5px] leading-relaxed text-ink-600 dark:text-parchment-300/80">
+                      <p className="mt-1 text-sm leading-relaxed text-ink-600 dark:text-parchment-300/80">
                         {item.count != null
                           ? plural(t, `${base}Body`, item.count)
                           : t(`${base}Body`)}
@@ -287,7 +287,7 @@ export default function GettingSettled() {
                         type="button"
                         onClick={() => leaveForLater(item.key)}
                         disabled={busy === item.key}
-                        className="tap-reach shrink-0 text-[12.5px] font-medium text-ink-500 dark:text-parchment-300/70 hover:text-church-700 dark:hover:text-brass-300 disabled:opacity-50 transition-colors"
+                        className="tap-reach shrink-0 text-xs font-medium text-ink-500 dark:text-parchment-300/70 hover:text-church-700 dark:hover:text-brass-300 disabled:opacity-50 transition-colors"
                       >
                         {t('settled.later')}
                       </button>
@@ -320,7 +320,7 @@ export default function GettingSettled() {
                     {t(d.item_key.replace('setup.begin.', 'settled.begin.'))}
                   </p>
                   {d.noted_by && (
-                    <p className="text-[12.5px] text-ink-500 dark:text-parchment-300/70">
+                    <p className="text-xs text-ink-500 dark:text-parchment-300/70">
                       {t('settled.deferredBy', { name: d.noted_by, date: day(d.noted_at) })}
                     </p>
                   )}
@@ -330,7 +330,7 @@ export default function GettingSettled() {
                     type="button"
                     onClick={() => bringBack(d.item_key)}
                     disabled={busy === d.item_key}
-                    className="tap-reach shrink-0 text-[12.5px] font-medium text-ink-500 dark:text-parchment-300/70 hover:text-church-700 dark:hover:text-brass-300 disabled:opacity-50 transition-colors"
+                    className="tap-reach shrink-0 text-xs font-medium text-ink-500 dark:text-parchment-300/70 hover:text-church-700 dark:hover:text-brass-300 disabled:opacity-50 transition-colors"
                   >
                     {t('settled.laterUndo')}
                   </button>

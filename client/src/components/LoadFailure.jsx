@@ -14,6 +14,9 @@ import { useLocale } from '../i18n'
 //
 // Voice: name the failure, say what it is NOT, offer the retry. Never
 // apologise for the person's data — their data is fine.
+//
+// Status codes and raw causes stay behind a collapsed Details disclosure
+// for support (OPERATOR.md: never surface status codes in the plain words).
 export default function LoadFailure({
   variant = 'block',
   title,
@@ -44,10 +47,17 @@ export default function LoadFailure({
         </p>
         <p className="text-sm text-ink-600 dark:text-parchment-300 mt-0.5">
           {body || t(strip ? 'load.partialBody' : 'load.failedBody')}
-          {cause && (
-            <span className="text-ink-500 dark:text-parchment-300/70"> ({cause})</span>
-          )}
         </p>
+        {cause ? (
+          <details className={`${strip ? 'text-left' : 'text-left mx-auto'} mt-2 max-w-full`}>
+            <summary className="cursor-pointer list-outside text-xs font-semibold text-ink-500 dark:text-parchment-300/80 hover:text-ink-700 dark:hover:text-parchment-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-brass-400 rounded">
+              {t('load.details')}
+            </summary>
+            <p className="mt-1 text-xs text-ink-500 dark:text-parchment-300/70 break-words font-mono">
+              {cause}
+            </p>
+          </details>
+        ) : null}
       </div>
       {onRetry && (
         <button

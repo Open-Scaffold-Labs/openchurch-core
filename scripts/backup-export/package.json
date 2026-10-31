@@ -1,0 +1,9 @@
+{
+  "name": "openchurch-backup-export",
+  "private": true,
+  "type": "module",
+  "description": "X-6 scheduled encrypted database export to a private Vercel Blob store. Installed only by .github/workflows/db-backup-export.yml and the restore rehearsal; not part of the app bundle.",
+  "dependencies": {
+    "@vercel/blob": "2.8.2"
+  }
+}

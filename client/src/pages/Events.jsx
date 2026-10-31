@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Search, Plus, X, Pencil, Trash2, Feather, CheckCircle2, Clock, Circle, Link2, Users, Upload, AlertCircle, Loader2 } from 'lucide-react'
-import PageWrapper, { itemVariants } from '../components/PageWrapper'
+import PageWrapper, { PageHeader, itemVariants } from '../components/PageWrapper'
 import AnimatedButton from '../components/AnimatedButton'
 import EmptyState from '../components/EmptyState'
 import { EventsIllustration } from '../components/illustrations'
@@ -13,6 +13,7 @@ import MemberPicker from '../components/MemberPicker'
 import { useAuth } from '../context/AuthContext'
 import { useToast } from '../components/ToastProvider'
 import { useLocale } from '../i18n'
+import { seasonLabel } from '../i18n/liturgical'
 import { mutate, loadList } from '../utils/format'
 import { apiUrl } from '../api'
 import { celebrateFirstAction } from '../utils/firstActionToast'
@@ -20,6 +21,7 @@ import { initials } from '../utils/format'
 import { formatStoredDate } from '../utils/dates'
 import { LIT_COLOR_DOT as COLOR_DOT, LIT_COLOR_TEXT as COLOR_TEXT, LIT_COLOR_STRIPE as COLOR_STRIPE, LIT_COLOR_DOT_NONE } from '../utils/liturgicalColors'
 import { useConfirm } from '../components/ConfirmProvider'
+import { dialogMotionNow } from '../utils/motion'
 
 const empty = {
   title: '',
@@ -42,14 +44,33 @@ const STATUS_ICON = {
   PENDING:     <Circle size={14} className="text-ink-400 shrink-0" />,
 }
 
+// The liturgical day for a date, or null when the lookup failed. A failed
+// lookup is not "no season": it used to come back as empty strings (an error
+// response) or as nothing at all (a network error), and the form then saved
+// either a blank season or the previous date's season against the new date.
+// R340-1: a 200 is not an answer until its shape is. Season and color must be
+// non-empty text (any parish-defined wording is fine); feast must be text or
+// null, and null is a known "no feast", saved as such; a MISSING feast_name is
+// unknown, not "no feast" (R340-1). Anything else ({}, an
+// array, numbers, objects) is unusable: null, so the three stay out of the
+// request and the server stamps them from the date.
+function liturgicalFromResponse(data) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return null
+  const text = (v) => typeof v === 'string' && v.trim() !== ''
+  if (!text(data.season) || !text(data.color)) return null
+  const feast = data.feast_name
+  if (feast !== null && typeof feast !== 'string') return null
+  return { liturgical_season: data.season, liturgical_color: data.color, feast_name: feast ?? '' }
+}
+
 async function enrichEventWithLiturgical(eventDate) {
-  if (!eventDate) return {}
+  if (!eventDate) return null
   try {
     const res = await fetch(apiUrl(`/api/liturgical?date=${eventDate}`))
-    const data = await res.json()
-    return { liturgical_season: data.season ?? '', liturgical_color: data.color ?? '', feast_name: data.feast_name ?? '' }
+    if (!res.ok) return null
+    return liturgicalFromResponse(await res.json())
   } catch {
-    return {}
+    return null
   }
 }
 
@@ -74,7 +95,7 @@ function LinkedTasks({ eventId }) {
   }, [eventId])
 
   if (tasks === null) {
-    return <p className="text-xs text-ink-500 dark:text-parchment-300/70">Loading linked tasks…</p>
+    return <p className="text-xs text-ink-500 dark:text-parchment-300/70">{t('events.loadingTasks')}</p>
   }
   if (tasksFailed) {
     // Without this branch a failed lookup rendered "No tasks are assigned",
@@ -90,7 +111,7 @@ function LinkedTasks({ eventId }) {
   if (tasks.length === 0) {
     return (
       <p className="text-xs text-ink-500 dark:text-parchment-300/70">
-        No tasks are assigned to the members on this event yet.
+        {t('events.no_tasks_are_assigned_to')}
       </p>
     )
   }
@@ -103,7 +124,7 @@ function LinkedTasks({ eventId }) {
             <p className={`text-xs font-medium truncate ${task.status === 'COMPLETED' ? 'line-through text-ink-500 dark:text-parchment-300/70' : 'text-ink-800 dark:text-parchment-100'}`}>
               {task.title}
             </p>
-            <p className="text-[10px] text-ink-500 dark:text-parchment-300/70 truncate">
+            <p className="text-[11px] text-ink-500 dark:text-parchment-300/70 truncate">
               {task.assigned_member_name ?? 'Unassigned'}
               {task.due_date ? ` · due ${formatStoredDate(task.due_date, { month: 'numeric', day: 'numeric', year: 'numeric' })}` : ''}
               {task.priority ? ` · ${task.priority}` : ''}
@@ -145,6 +166,15 @@ export default function Events() {
   // first-event toast reads this, never `events.length`.
   const [unfilteredCount, setUnfilteredCount] = useState(null)
   const fetchGen = useRef(0)
+  // R340-3: one generation per form session and per date change. A lookup
+  // applies only if its generation is still current, so a dismissed form's
+  // late answer can never land in the next form, even on the same date.
+  const litGen = useRef(0)
+  useEffect(() => () => { litGen.current++ }, [])
+  function closeForm() {
+    litGen.current++
+    setShowForm(false)
+  }
   const { canWrite } = useAuth()
   const toast = useToast()
   const ask = useConfirm()
@@ -221,6 +251,7 @@ export default function Events() {
   }, [search])
 
   function openAdd() {
+    litGen.current++
     setEditing(null)
     setForm(empty)
     setSaveError('')
@@ -241,6 +272,7 @@ export default function Events() {
   }, [])
 
   function openEdit(event) {
+    litGen.current++
     setEditing(event.id)
     setForm({
       title: event.title,
@@ -261,9 +293,25 @@ export default function Events() {
   function field(key) {
     return (e) => {
       const val = e.target.value
-      setForm(f => ({ ...f, [key]: val }))
-      if (key === 'date' && val) {
-        enrichEventWithLiturgical(val).then(lit => setForm(f => ({ ...f, ...lit })))
+      if (key !== 'date') {
+        setForm(f => ({ ...f, [key]: val }))
+        return
+      }
+      // Season, color and feast belong to the date. Drop the old date's
+      // values at once so they can never be saved against the new date.
+      // Undefined fields are left out of the request, and the server then
+      // stamps them from the date itself — so a slow or failed lookup here
+      // costs only the preview chip, never the saved record.
+      const gen = ++litGen.current
+      setForm(f => ({ ...f, date: val, liturgical_season: undefined, liturgical_color: undefined, feast_name: undefined }))
+      if (val) {
+        enrichEventWithLiturgical(val).then(lit => {
+          // Ignore a failed lookup, a late answer for a date the admin has
+          // changed again, and any answer from a form session since closed
+          // or replaced (generation), keeping the date check as well.
+          if (!lit || gen !== litGen.current) return
+          setForm(f => (f.date === val ? { ...f, ...lit } : f))
+        })
       }
     }
   }
@@ -283,7 +331,7 @@ export default function Events() {
       })
     } catch (err) {
       setLoading(false)
-      setSaveError("That didn't save — nothing was lost. Please check your connection and try again.")
+      setSaveError(t('events.saveConnError'))
       return
     }
     if (!res.ok) {
@@ -293,13 +341,13 @@ export default function Events() {
       return
     }
     setLoading(false)
-    setShowForm(false)
+    closeForm()
     fetchEvents()
     if (!editing) celebrateFirstAction('event', toast, unfilteredCount)
   }
 
   async function remove(id) {
-    if (!(await ask({ title: 'Remove this event?', confirmLabel: 'Remove event' }))) return
+    if (!(await ask({ title: t('events.removeTitle'), confirmLabel: t('events.removeConfirm') }))) return
     const { ok, error } = await mutate(apiUrl(`/api/events/${id}`), { method: 'DELETE' })
     if (!ok) { toast.error(error); return }
     fetchEvents()
@@ -308,11 +356,10 @@ export default function Events() {
   const inputCls = 'w-full border border-parchment-300/70 dark:border-brass-900/40 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-church-500 bg-parchment-50 dark:bg-ink-800 text-ink-900 dark:text-parchment-50 placeholder-ink-400 dark:placeholder-parchment-400/50'
 
   return (
-    <PageWrapper>
+    <PageWrapper type="list">
       <motion.div variants={itemVariants} className="flex items-center justify-between gap-3 flex-wrap mb-6">
         <div>
-          <h1 className="font-display text-3xl font-semibold text-ink-900 dark:text-parchment-50 tracking-tight">Events</h1>
-          <p className="text-sm text-ink-500 dark:text-parchment-300/70 mt-1">Browse and manage upcoming church events · {events.length} total</p>
+          <PageHeader title={t('ev.title')} subtitle={t('ev.sub').replace('{n}', String(events.length))} />
         </div>
         {canWrite && (
         <div className="flex items-center gap-2">
@@ -320,10 +367,10 @@ export default function Events() {
             onClick={() => setShowImport(true)}
             className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold text-church-800 dark:text-brass-200 bg-parchment-100 dark:bg-ink-800/80 border border-parchment-300/60 dark:border-brass-900/30 hover:bg-parchment-200 dark:hover:bg-ink-800 transition-colors"
           >
-            <Upload size={15} /> Import CSV
+            <Upload size={15} /> {t('ev.importCsv')}
           </button>
           <AnimatedButton onClick={openAdd} className="flex items-center gap-2 bg-church-900 hover:bg-church-700 dark:bg-church-800 dark:hover:bg-church-700 text-parchment-50 px-4 py-2 rounded-lg text-sm font-medium transition-colors">
-            <Plus size={16} /> Add Event
+            <Plus size={16} /> {t('ev.add')}
           </AnimatedButton>
         </div>
         )}
@@ -331,7 +378,7 @@ export default function Events() {
 
       <motion.div variants={itemVariants} className="relative mb-4">
         <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-ink-400" />
-        <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search by title, division, location..." className="w-full pl-9 pr-4 py-2 border border-parchment-300/70 dark:border-brass-900/40 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-church-500 bg-parchment-50 dark:bg-ink-900 text-ink-900 dark:text-parchment-50 placeholder-ink-400 dark:placeholder-parchment-400/50 transition-shadow duration-200 focus:shadow-md" />
+        <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder={t('ev.searchPh')} className="w-full pl-9 pr-4 py-2 border border-parchment-300/70 dark:border-brass-900/40 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-church-500 bg-parchment-50 dark:bg-ink-900 text-ink-900 dark:text-parchment-50 placeholder-ink-400 dark:placeholder-parchment-400/50 transition-shadow duration-200 focus:shadow-md" />
       </motion.div>
 
       {/* Table or empty state — "no matches" during a search stays a
@@ -350,22 +397,23 @@ export default function Events() {
       )}
 
       {initialLoading ? (
-        <div className="flex justify-center py-16"><Loader2 size={22} className="animate-spin text-brass-600" aria-label="Loading events" /></div>
+        <div className="flex justify-center py-16"><Loader2 size={22} className="animate-spin text-brass-600" aria-label={t('events.loadingAria')} /></div>
       ) : !eventsFailed && !search && events.length === 0 ? (
         <EmptyState
           illustration={EventsIllustration}
-          title="No events yet"
-          body="Events are services, feast days, meetings, and one-offs. Add your first and assign members so everyone knows who's responsible."
-          action={canWrite ? { label: 'Add your first event', onClick: openAdd } : null}
+          title={t('events.emptyYet')}
+          body={t('events.deskEmptyBody')}
+          action={canWrite ? { label: t('events.addFirst'), onClick: openAdd } : null}
         />
       ) : (
-      <motion.div variants={itemVariants} className="bg-parchment-50 dark:bg-ink-900 rounded-xl border border-parchment-300/60 dark:border-brass-900/30 overflow-hidden shadow-card">
-        <div className="overflow-x-auto">
-        <table className="w-full text-sm min-w-[52rem]">
+      <motion.div variants={itemVariants} className="bg-parchment-50 dark:bg-ink-900 rounded-xl border border-parchment-300/60 dark:border-brass-900/30 overflow-hidden print:overflow-visible shadow-card">
+        <p data-testid="table-scroll-hint" className="sm:hidden print:hidden px-4 pt-3 text-[11px] text-ink-500 dark:text-parchment-300/70">{t('table.swipeHint')}</p>
+        <div className="overflow-x-auto print:overflow-visible" tabIndex={0} role="region" aria-label={t('ev.tableRegion')}>
+        <table className="w-full text-sm min-w-[52rem] print:min-w-0">
           <thead className="bg-parchment-100 dark:bg-ink-800/60 border-b border-parchment-300/60 dark:border-brass-900/30">
             <tr>
-              {['Title', 'Service Division', 'Season', 'Date', 'Time', 'Location', 'Members', ''].map((h) => (
-                <th key={h} className="text-left px-4 py-3 text-xs font-semibold text-ink-500 dark:text-parchment-300/70 uppercase tracking-wider">{h}</th>
+              {[['title', 'ev.col.title'], ['division', 'ev.col.division'], ['season', 'ev.col.season'], ['date', 'ev.col.date'], ['time', 'ev.col.time'], ['location', 'ev.col.location'], ['members', 'ev.col.members'], ['actions', '']].map(([id, key]) => (
+                <th key={id} className="text-left px-4 py-3 text-xs font-semibold text-ink-500 dark:text-parchment-300/70 uppercase tracking-wider">{key ? t(key) : ''}</th>
               ))}
             </tr>
           </thead>
@@ -393,7 +441,7 @@ export default function Events() {
                       {ev.liturgical_season ? (
                         <span className={`inline-flex items-center gap-1.5 text-xs font-semibold px-2 py-0.5 rounded-full border ${COLOR_TEXT[ev.liturgical_color] ?? COLOR_TEXT.White}`}>
                           <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${COLOR_DOT[ev.liturgical_color] ?? LIT_COLOR_DOT_NONE}`} />
-                          {ev.feast_name || ev.liturgical_season}
+                          {ev.feast_name || seasonLabel(t, ev.liturgical_season)}
                         </span>
                       ) : '—'}
                     </td>
@@ -406,12 +454,12 @@ export default function Events() {
                       ) : (
                         <div className="flex -space-x-1.5" title={assigned.map(m => m.name).join(', ')}>
                           {assigned.slice(0, 3).map(m => (
-                            <span key={m.id} className="w-6 h-6 rounded-full bg-church-900 dark:bg-church-700 flex items-center justify-center text-parchment-50 text-[9px] font-bold ring-2 ring-parchment-50 dark:ring-ink-900">
+                            <span key={m.id} className="w-6 h-6 rounded-full bg-church-900 dark:bg-church-700 flex items-center justify-center text-parchment-50 text-[11px] font-bold ring-2 ring-parchment-50 dark:ring-ink-900">
                               {initials(m.name)}
                             </span>
                           ))}
                           {assigned.length > 3 && (
-                            <span className="w-6 h-6 rounded-full bg-parchment-200 dark:bg-ink-700 flex items-center justify-center text-ink-600 dark:text-parchment-200 text-[9px] font-bold ring-2 ring-parchment-50 dark:ring-ink-900">
+                            <span className="w-6 h-6 rounded-full bg-parchment-200 dark:bg-ink-700 flex items-center justify-center text-ink-600 dark:text-parchment-200 text-[11px] font-bold ring-2 ring-parchment-50 dark:ring-ink-900">
                               +{assigned.length - 3}
                             </span>
                           )}
@@ -453,28 +501,28 @@ export default function Events() {
       <AnimatePresence>
         {showForm && (
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className={sheetOverlayCls}>
-            <motion.div initial={{ opacity: 0, scale: 0.95, y: 16 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 8 }} transition={{ duration: 0.2, ease: 'easeOut' }} className={sheetPanelCls}>
+            <motion.div {...dialogMotionNow()} className={sheetPanelCls}>
               <MobileSheetGrip />
               <div className="flex items-center justify-between px-6 py-4 border-b border-parchment-300/60 dark:border-brass-900/30">
-                <h2 className="font-semibold text-ink-900 dark:text-parchment-50">{editing ? 'Edit Event' : 'Add Event'}</h2>
-                <motion.button transition={{ duration: 0.15 }} onClick={() => setShowForm(false)} className="-m-2 p-2 text-ink-400 hover:text-ink-700 dark:hover:text-parchment-50"><X size={18} /></motion.button>
+                <h2 className="font-display text-2xl font-semibold text-ink-900 dark:text-parchment-50 leading-snug">{editing ? t('events.editTitle') : t('events.addTitle')}</h2>
+                <motion.button transition={{ duration: 0.15 }} onClick={closeForm} className="-m-2 p-2 text-ink-400 hover:text-ink-700 dark:hover:text-parchment-50"><X size={18} /></motion.button>
               </div>
               <form onSubmit={save} className="p-6 space-y-4 overflow-y-auto">
                 <div>
-                  <label className="block text-xs font-medium text-ink-700 dark:text-parchment-200 mb-1">Title *</label>
-                  <input value={form.title} onChange={field('title')} placeholder="Event title" aria-label="Event title" className={inputCls} required />
+                  <label className="block text-xs font-medium text-ink-700 dark:text-parchment-200 mb-1">{t('events.titleReq')}</label>
+                  <input value={form.title} onChange={field('title')} placeholder={t('events.titlePh')} aria-label={t('events.aria_title')} className={inputCls} required />
                 </div>
                 <div>
-                  <label className="block text-xs font-medium text-ink-700 dark:text-parchment-200 mb-1">Service Division</label>
-                  <input value={form.service_division} onChange={field('service_division')} placeholder="e.g. Youth, Worship, Outreach" aria-label="e.g. Youth, Worship, Outreach" className={inputCls} />
+                  <label className="block text-xs font-medium text-ink-700 dark:text-parchment-200 mb-1">{t('ev.col.division')}</label>
+                  <input value={form.service_division} onChange={field('service_division')} placeholder={t('events.categoryPh')} aria-label={t('events.aria_category')} className={inputCls} />
                 </div>
                 <div className="grid grid-cols-2 gap-3">
                   <div>
-                    <label className="block text-xs font-medium text-ink-700 dark:text-parchment-200 mb-1">Date</label>
+                    <label className="block text-xs font-medium text-ink-700 dark:text-parchment-200 mb-1">{t('events.date')}</label>
                     <input type="date" value={form.date} onChange={field('date')} className={inputCls} />
                   </div>
                   <div>
-                    <label className="block text-xs font-medium text-ink-700 dark:text-parchment-200 mb-1">Time</label>
+                    <label className="block text-xs font-medium text-ink-700 dark:text-parchment-200 mb-1">{t('events.time')}</label>
                     <input type="time" value={form.time} onChange={field('time')} className={inputCls} />
                   </div>
                 </div>
@@ -482,21 +530,21 @@ export default function Events() {
                   <div className={`flex items-center gap-3 px-3 py-2.5 rounded-lg border text-xs font-medium ${COLOR_TEXT[form.liturgical_color] ?? COLOR_TEXT.White}`}>
                     <Feather size={13} className="shrink-0 opacity-70" />
                     <div className="flex-1">
-                      <span className="font-semibold">{form.liturgical_season}</span>
+                      <span className="font-semibold">{seasonLabel(t, form.liturgical_season)}</span>
                       {form.feast_name && <span className="ml-1 opacity-75">· {form.feast_name}</span>}
                     </div>
                     <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${COLOR_DOT[form.liturgical_color] ?? LIT_COLOR_DOT_NONE}`} />
                   </div>
                 )}
                 <div>
-                  <label className="block text-xs font-medium text-ink-700 dark:text-parchment-200 mb-1">Location</label>
-                  <input value={form.location} onChange={field('location')} placeholder="e.g. Main Hall, Room 3" aria-label="e.g. Main Hall, Room 3" className={inputCls} />
+                  <label className="block text-xs font-medium text-ink-700 dark:text-parchment-200 mb-1">{t('events.location')}</label>
+                  <input value={form.location} onChange={field('location')} placeholder={t('events.locationPh')} aria-label={t('events.aria_location')} className={inputCls} />
                 </div>
 
                 {/* Assigned members */}
                 <div>
                   <label className="flex items-center gap-1.5 text-xs font-medium text-ink-700 dark:text-parchment-200 mb-1.5">
-                    <Users size={12} /> Assigned Members
+                    <Users size={12} /> {t('events.assigned_members')}
                   </label>
                   {membersFailed && (
                     <p role="status" className="mb-1.5 text-[11px] text-amber-700 dark:text-amber-400">
@@ -511,7 +559,7 @@ export default function Events() {
                     onChange={(ids) => setForm(f => ({ ...f, member_ids: ids }))}
                   />
                   <p className="mt-1.5 text-[11px] text-ink-500 dark:text-parchment-300/70">
-                    Tasks assigned to these members will auto-sync to this event.
+                    {t('events.tasks_assigned_to_these_members')}
                   </p>
                 </div>
 
@@ -522,10 +570,10 @@ export default function Events() {
                   <label className="flex items-start justify-between gap-3 cursor-pointer">
                     <div className="min-w-0 flex-1">
                       <p className="text-sm font-semibold text-ink-900 dark:text-parchment-50">
-                        Make public
+                        {t('events.make_public')}
                       </p>
                       <p className="text-[11px] text-ink-500 dark:text-parchment-300/70 mt-0.5 leading-snug">
-                        Show on your church's public events page. Members + assignments stay private either way.
+                        {t('events.show_on_your_church_s')}
                       </p>
                     </div>
                     <button
@@ -553,7 +601,7 @@ export default function Events() {
                   <div className="pt-2 border-t border-parchment-300/60 dark:border-brass-900/30">
                     <div className="flex items-center gap-1.5 mb-2">
                       <Link2 size={13} className="text-church-700 dark:text-brass-300" />
-                      <h3 className="text-xs font-semibold text-ink-700 dark:text-parchment-200">Linked Tasks</h3>
+                      <h3 className="text-xs font-semibold text-ink-700 dark:text-parchment-200">{t('events.linkedTasks')}</h3>
                     </div>
                     <LinkedTasks eventId={editing} />
                   </div>
@@ -570,9 +618,9 @@ export default function Events() {
                 )}
 
                 <div className="flex justify-end gap-3 pt-2">
-                  <AnimatedButton type="button" onClick={() => setShowForm(false)} className="px-4 py-2 text-sm text-ink-600 dark:text-parchment-300 hover:text-ink-900 dark:hover:text-parchment-50 transition-colors">Cancel</AnimatedButton>
+                  <AnimatedButton type="button" onClick={closeForm} className="px-4 py-2 text-sm text-ink-600 dark:text-parchment-300 hover:text-ink-900 dark:hover:text-parchment-50 transition-colors">{t('events.cancel')}</AnimatedButton>
                   <AnimatedButton type="submit" disabled={loading} className="px-5 py-2 bg-church-900 hover:bg-church-700 dark:bg-church-800 dark:hover:bg-church-700 text-parchment-50 text-sm font-medium rounded-lg transition-colors disabled:opacity-50">
-                    {loading ? 'Saving...' : editing ? 'Save Changes' : 'Add Event'}
+                    {loading ? t('events.saving') : editing ? t('events.save') : t('events.addTitle')}
                   </AnimatedButton>
                 </div>
               </form>

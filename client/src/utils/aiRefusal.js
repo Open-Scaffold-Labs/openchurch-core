@@ -1,6 +1,6 @@
 // Server AI refusals carry a machine-readable code (server/src/ai/gate.js);
 // the copy is ours, in the user's language, never the server's sentence.
-const CODES = new Set(['ai_disabled', 'ai_forbidden', 'ai_unsupported_provider', 'ai_input_too_large', 'ai_unavailable', 'org_type_forbidden', 'ai_failed'])
+const CODES = new Set(['ai_disabled', 'ai_forbidden', 'ai_unsupported_provider', 'ai_key_required', 'ai_input_too_large', 'ai_unavailable', 'org_type_forbidden', 'ai_failed', 'ai_excluded', 'ai_consent_required', 'ai_consent_unknown'])
 
 export function aiRefusalMessage(t, data, fallbackKey) {
   const code = data?.code

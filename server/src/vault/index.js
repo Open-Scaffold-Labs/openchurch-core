@@ -229,7 +229,14 @@ function summarise(cascaded, relinks) {
 // When a caller passes `conn`, it owns BEGIN, COMMIT, ROLLBACK and release;
 // this function does none of them. It still throws on failure, which is how
 // the caller learns to roll back.
-export async function captureAndDeleteMany({ kind, ids, orgId, user = null, reason = null, conn: external = null }) {
+// Test seam for controlled-concurrency regressions. Null in production.
+export const vaultTestHooks = { afterLock: null }
+
+// `underLock(conn, roots)` runs on the SAME connection after the roots are
+// locked FOR UPDATE, and that lock is held through capture and DELETE. A
+// refusal that must not race a concurrent writer belongs here, not in a
+// precheck on another connection.
+export async function captureAndDeleteMany({ kind, ids, orgId, user = null, reason = null, conn: external = null, underLock = null }) {
   const spec = PROTECTED[kind]
   if (!spec) throw new VaultError('not_protected', `${kind} is not a protected kind`, 500)
 
@@ -262,6 +269,8 @@ export async function captureAndDeleteMany({ kind, ids, orgId, user = null, reas
 
     const rootIds = roots.map(r => r.id)
     if (kind === 'event') await refuseEventIfAttendance(conn, rootIds, orgId)
+    if (underLock) await underLock(conn, roots)
+    if (vaultTestHooks.afterLock) await vaultTestHooks.afterLock({ kind, rootIds })
     const { cascaded, relinks } = await walk(conn, spec.table, rootIds, orgId)
     const summary = { ...summarise(cascaded, relinks), roots: roots.length }
 
@@ -321,8 +330,8 @@ export async function captureAndDeleteMany({ kind, ids, orgId, user = null, reas
 
 // The single-row spelling, which is most deletes. Kept as its own export
 // so the six protected routes read the way they always did.
-export async function captureAndDelete({ kind, id, orgId, user = null, reason = null }) {
-  return captureAndDeleteMany({ kind, ids: [id], orgId, user, reason })
+export async function captureAndDelete({ kind, id, orgId, user = null, reason = null, underLock = null }) {
+  return captureAndDeleteMany({ kind, ids: [id], orgId, user, reason, underLock })
 }
 
 // ── restore ──────────────────────────────────────────────────────────────

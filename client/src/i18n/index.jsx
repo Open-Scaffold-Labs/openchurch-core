@@ -35,6 +35,13 @@ function localeDict(locale) {
 
 const LocaleContext = createContext(null)
 
+const LOCALE_FADE_MS = 150
+
+function localeFadeWelcome() {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return false
+  return !window.matchMedia('(prefers-reduced-motion: reduce)').matches
+}
+
 export function LocaleProvider({ children }) {
   const { user } = useAuth()
   const [override, setOverride] = useState(() => {
@@ -73,11 +80,24 @@ export function LocaleProvider({ children }) {
   const tradition = user?.organization?.tradition || 'general'
 
   const setLocale = (l) => {
-    setOverride(l || '')
-    try {
-      if (l) localStorage.setItem('ochr_locale', l)
-      else localStorage.removeItem('ochr_locale')
-    } catch { /* private mode — the choice just won't persist */ }
+    const apply = () => {
+      setOverride(l || '')
+      try {
+        if (l) localStorage.setItem('ochr_locale', l)
+        else localStorage.removeItem('ochr_locale')
+      } catch { /* private mode — the choice just won't persist */ }
+    }
+    // Switching language softly fades the page and brings it back in the
+    // other language, so the layout never jumps and nothing remounts (half-
+    // typed forms survive). V1.5, study #7. Instant for reduce-motion, for
+    // a browser that cannot say, and when the language is not changing.
+    if ((l || '') === override || !localeFadeWelcome()) return apply()
+    const root = document.documentElement
+    root.setAttribute('data-locale-swap', '')
+    setTimeout(() => {
+      apply()
+      requestAnimationFrame(() => root.removeAttribute('data-locale-swap'))
+    }, LOCALE_FADE_MS)
   }
 
   // Stable identity. Public pages put this in a useCallback/useEffect load

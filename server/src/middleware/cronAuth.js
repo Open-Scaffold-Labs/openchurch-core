@@ -15,7 +15,17 @@
 // surfaces a misconfigured deploy as a real failure rather than
 // looking like a permissions bug.
 
+import crypto from 'node:crypto'
 import { monitor } from '../monitoring/index.js'
+
+// Constant-time compare (Argus R427). Both sides are hashed first so the
+// buffers are always the same length: timingSafeEqual throws on unequal
+// lengths, and an early length check would itself leak the secret's length.
+function sameSecret(got, want) {
+  const a = crypto.createHash('sha256').update(String(got)).digest()
+  const b = crypto.createHash('sha256').update(String(want)).digest()
+  return crypto.timingSafeEqual(a, b)
+}
 
 export function requireCronAuth(req, res, next) {
   const expected = process.env.CRON_SECRET
@@ -24,7 +34,7 @@ export function requireCronAuth(req, res, next) {
     return res.status(503).json({ error: 'Cron not configured' })
   }
   const got = req.headers.authorization
-  if (got !== `Bearer ${expected}`) {
+  if (typeof got !== 'string' || !sameSecret(got, `Bearer ${expected}`)) {
     return res.status(401).json({ error: 'Unauthorized' })
   }
   next()

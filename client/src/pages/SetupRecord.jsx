@@ -180,7 +180,7 @@ export default function SetupRecord() {
           )}
         </section>
 
-        <footer className="mt-8 pt-3 border-t border-parchment-300 text-[11.5px] leading-relaxed text-ink-500">
+        <footer className="mt-8 pt-3 border-t border-parchment-300 text-[11px] leading-relaxed text-ink-500">
           {t('settled.recordFooter')}
         </footer>
       </article>

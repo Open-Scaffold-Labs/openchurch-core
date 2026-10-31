@@ -52,7 +52,7 @@ function bookRoutes(path = '/mass-intentions') {
     <MemoryRouter initialEntries={[path]}>
       <LocaleProvider>
         <Routes>
-          <Route path="/mass-intentions" element={<ToastProvider><MassIntentions /></ToastProvider>} />
+          <Route path="/mass-intentions" element={<ToastProvider><ConfirmProvider><MassIntentions /></ConfirmProvider></ToastProvider>} />
           <Route path="/mass-intentions/print" element={<SacristySheet />} />
         </Routes>
       </LocaleProvider>
@@ -321,11 +321,13 @@ describe('Golden Journey 2 — member list counts', () => {
     }))
   }
 
-  it('CONTROL: finite counts render, including zero growth', async () => {
+  it('CONTROL: finite counts render, and Growth-% is not a Members tile', async () => {
     stubClients({ stats: () => ok({ total: 2, newWeek: 0, active: 2, growth: 0 }) })
     renderMembers()
     expect(await screen.findByText('Sample Member')).toBeInTheDocument()
-    expect(screen.getByText('0%')).toBeInTheDocument()
+    // Quiet craft 2: no Growth-% tile (login: nothing here counts).
+    expect(screen.queryByText('0%')).not.toBeInTheDocument()
+    expect(screen.queryByText(STRINGS.en['mem.growth'])).not.toBeInTheDocument()
     expect(screen.queryByText(STATS_LIE)).not.toBeInTheDocument()
     expect(screen.queryByText(STRINGS.en['mem.statsFailed'])).not.toBeInTheDocument()
   })
@@ -342,8 +344,8 @@ describe('Golden Journey 2 — member list counts', () => {
     ['a 500', () => httpError(500)],
     ['a malformed body', malformed],
     ['a 200 object with no counts', () => ok({})],
-    ['a 200 missing growth', () => ok({ total: 4, newWeek: 1, active: 4 })],
-    ['a 200 whose growth is not a number', () => ok({ total: 4, newWeek: 1, active: 4, growth: 'up' })],
+    ['a 200 missing active', () => ok({ total: 4, newWeek: 1 })],
+    ['a 200 whose active is not a number', () => ok({ total: 4, newWeek: 1, active: 'many' })],
   ]) {
     it(`${label} is unavailable counts, not undefined%`, async () => {
       stubClients({ stats: () => response() })
@@ -354,6 +356,15 @@ describe('Golden Journey 2 — member list counts', () => {
       expect(screen.queryByRole('heading', { name: /no members yet/i })).not.toBeInTheDocument()
     })
   }
+
+  it('a 200 without growth still shows membership counts (Growth tile removed)', async () => {
+    stubClients({ stats: () => ok({ total: 4, newWeek: 1, active: 4 }) })
+    renderMembers()
+    expect(await screen.findByText('Sample Member')).toBeInTheDocument()
+    expect(screen.queryByText(STRINGS.en['mem.statsFailed'])).not.toBeInTheDocument()
+    expect(screen.queryByText(STRINGS.en['mem.growth'])).not.toBeInTheDocument()
+    expect(screen.queryByText(STATS_LIE)).not.toBeInTheDocument()
+  })
 
   it('a rejected member list is not an empty parish', async () => {
     stubClients({

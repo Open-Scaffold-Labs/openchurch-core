@@ -1,6 +1,7 @@
 // SP-014..022: what a Viewer may READ.
 //
-// The Help role table gives Viewers Dashboard, Schedule and Members (view),
+// The Help role table gives Viewers Dashboard, Schedule, Members (view) and
+// Mass Intentions (read-only on Schedule + weekly sheet),
 // plus their own profile, preferences and support tickets, the Getting
 // settled card (sanitised), and the notification bell, which for a Viewer
 // is an EMPTY parish feed while Events/Tasks are closed (routes/
@@ -27,6 +28,7 @@ export const VIEWER_READ_ALLOW = [
   '/api/push/vapid-key$',      // own push subscription
   '/api/support-tickets/mine', // own reports (Help > Report a problem)
   '/api/assistant/status$',    // the Assistant (Help role table)
+  '/api/ai/native-access$',    // native shell AI agreement (exact; not /api/ai)
   '/api/search',               // members only for Viewers (routes/search.js)
   // Exception (TARS R288-1, within José's delegated scope): the Getting
   // settled card is shown to every role. For a Viewer, routes/setup.js
@@ -36,6 +38,10 @@ export const VIEWER_READ_ALLOW = [
   // withheld. Exact path only; /api/setup/record stays admin-only. Remove
   // this line to close it.
   '/api/setup$',
+  // José Oct 28 2026 PM PT: Viewers may SEE Mass Intentions (read-only).
+  // Covers the Schedule modal weekly fetch and the sacristy weekly sheet.
+  // The full book editor page stays closed (VIEWER_PAGES); writes stay gated.
+  '/api/mass-intentions',
 ]
 
 // The two open Viewer decisions (DECISIONS-FOR-JOSE item 12). Flip one
@@ -61,7 +67,7 @@ const OPTIONAL_PAGES = {
 }
 
 // Pages a Viewer can open (exact paths, plus /clients/:id).
-export const VIEWER_PAGES = ['/', '/clients', '/schedule', '/getting-settled', '/preferences']
+export const VIEWER_PAGES = ['/', '/clients', '/schedule', '/getting-settled', '/preferences', '/mass-intentions/print']
 
 function enabled(table, options) {
   return Object.entries(table).flatMap(([k, list]) => (options?.[k] ? list : []))
@@ -74,7 +80,7 @@ export const VIEWER_READ_DENY = [
   /^\/api\/clients\/[^/]+\/checkins(\/|$)/,   // R288-2: a member's attendance (event titles, times)
 ]
 
-export const VIEWER_SCOPE_ERROR = 'Viewers can see Dashboard, Schedule and Members only.'
+export const VIEWER_SCOPE_ERROR = 'Viewers can see Dashboard, Schedule, Members and Mass Intentions only.'
 
 function stripQuery(url) {
   const i = url.indexOf('?')

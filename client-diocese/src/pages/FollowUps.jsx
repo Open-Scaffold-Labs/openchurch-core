@@ -120,7 +120,7 @@ export default function FollowUps() {
                   <Link to={`/care/${f.parish_org_id}`} className="text-[13px] font-semibold text-church-700 hover:underline">
                     {f.parish_name}
                   </Link>
-                  <p className="text-[13.5px] text-ink-800 leading-snug mt-0.5">{f.next_action}</p>
+                  <p className="text-sm text-ink-800 leading-snug mt-0.5">{f.next_action}</p>
                   <p className="text-[12px] text-ink-500 leading-snug mt-0.5">
                     {[f.context,
                       f.owner_name ? `with ${f.owner_name}` : 'unassigned',
@@ -152,12 +152,12 @@ export default function FollowUps() {
                   <div className="flex items-center gap-1 shrink-0">
                     <button onClick={() => { setSettling({ id: f.id, state: 'done' }); setNote('') }}
                       disabled={busy === f.id}
-                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[12.5px] text-ink-700 hover:bg-parchment-200 disabled:opacity-50">
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs text-ink-700 hover:bg-parchment-200 disabled:opacity-50">
                       <Check size={13} /> Done
                     </button>
                     <button onClick={() => { setSettling({ id: f.id, state: 'let_go' }); setNote('') }}
                       disabled={busy === f.id}
-                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[12.5px] text-ink-500 hover:bg-parchment-200 disabled:opacity-50">
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs text-ink-500 hover:bg-parchment-200 disabled:opacity-50">
                       <X size={13} /> Let it go
                     </button>
                   </div>
@@ -172,7 +172,7 @@ export default function FollowUps() {
                   <label htmlFor={`owner-${f.id}`} className="sr-only">Who is looking after this</label>
                   <select id={`owner-${f.id}`} value={f.owner_user_id ?? ''} disabled={busy === f.id}
                     onChange={e => patch(f.id, { owner_user_id: e.target.value ? Number(e.target.value) : null })}
-                    className="px-2 py-1 text-[12.5px] rounded-lg border border-parchment-300 bg-parchment-50 text-ink-700 focus:outline-none focus:ring-2 focus:ring-brass-400">
+                    className="px-2 py-1 text-xs rounded-lg border border-parchment-300 bg-parchment-50 text-ink-700 focus:outline-none focus:ring-2 focus:ring-brass-400">
                     <option value="">No one yet</option>
                     {team.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
                   </select>

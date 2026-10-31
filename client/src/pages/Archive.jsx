@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { LifeBuoy, Loader2, Undo2, Church } from 'lucide-react'
-import PageWrapper, { itemVariants } from '../components/PageWrapper'
+import PageWrapper, { PageHeader, itemVariants } from '../components/PageWrapper'
 import EmptyState from '../components/EmptyState'
 import { motion } from 'framer-motion'
 import { useToast } from '../components/ToastProvider'
@@ -141,11 +141,11 @@ export default function Archive() {
   }
 
   if (error) {
-    return <PageWrapper><p className="text-sm text-ink-600 dark:text-parchment-300/80">{error}</p></PageWrapper>
+    return <PageWrapper type="list"><p className="text-sm text-ink-600 dark:text-parchment-300/80">{error}</p></PageWrapper>
   }
   if (!data) {
     return (
-      <PageWrapper>
+      <PageWrapper type="list">
         <div className="flex justify-center py-24">
           <Loader2 size={22} className="animate-spin text-brass-500" aria-hidden="true" />
         </div>
@@ -156,9 +156,9 @@ export default function Archive() {
   const entries = data.entries ?? []
 
   return (
-    <PageWrapper>
+    <PageWrapper type="list">
       <motion.header variants={itemVariants} className="mb-7">
-        <h1 className="font-display text-3xl font-bold text-ink-900 dark:text-parchment-50">{t('vault.title')}</h1>
+        <PageHeader title={t('vault.title')} />
         <p className="mt-2 text-sm leading-relaxed text-ink-600 dark:text-parchment-300/80 max-w-2xl">
           {t('vault.lede')}
         </p>
@@ -177,7 +177,7 @@ export default function Archive() {
           {(data.protected_kinds ?? []).map(k => (
             <li
               key={k.kind}
-              className="px-2.5 py-1 rounded-lg text-[12.5px] font-medium bg-parchment-200/70 dark:bg-ink-800 text-ink-700 dark:text-parchment-200"
+              className="px-2.5 py-1 rounded-lg text-xs font-medium bg-parchment-200/70 dark:bg-ink-800 text-ink-700 dark:text-parchment-200"
             >
               {KIND_WORDS[k.kind] ?? k.noun}
             </li>
@@ -198,7 +198,7 @@ export default function Archive() {
         </h2>
         <button
           onClick={() => setShowRestored(v => !v)}
-          className="tap-reach text-[12.5px] font-medium text-ink-500 dark:text-parchment-300/70 hover:text-church-700 dark:hover:text-brass-300 transition-colors"
+          className="tap-reach text-xs font-medium text-ink-500 dark:text-parchment-300/70 hover:text-church-700 dark:hover:text-brass-300 transition-colors"
         >
           {showRestored ? t('vault.hideRestored') : t('vault.showRestored')}
         </button>
@@ -234,23 +234,23 @@ export default function Archive() {
                       {KIND_WORDS[e.kind] ?? e.kind}
                     </p>
                     <p className="mt-0.5 font-medium text-ink-900 dark:text-parchment-50 break-words">{e.label}</p>
-                    <p className="mt-1 text-[12.5px] text-ink-500 dark:text-parchment-300/70">
+                    <p className="mt-1 text-xs text-ink-500 dark:text-parchment-300/70">
                       {day(e.deleted_at)}
                       {e.deleted_by_name ? ` · ${t('vault.removedBy', { name: e.deleted_by_name })}` : ''}
                     </p>
                     {cascaded > 0 && (
-                      <p className="mt-1 text-[12.5px] text-ink-500 dark:text-parchment-300/70">
+                      <p className="mt-1 text-xs text-ink-500 dark:text-parchment-300/70">
                         {t(cascaded === 1 ? 'vault.alsoIncluded' : 'vault.alsoIncluded_plural', { n: cascaded })}
                         {relinked > 0 && ` ${t(relinked === 1 ? 'vault.reconnects' : 'vault.reconnects_plural', { n: relinked })}`}
                       </p>
                     )}
                     {e.restored_at ? (
-                      <p className="mt-1.5 text-[12.5px] font-medium text-brass-700 dark:text-brass-300">
+                      <p className="mt-1.5 text-xs font-medium text-brass-700 dark:text-brass-300">
                         {t('vault.restoredTitle')} · {day(e.restored_at)}
                         {e.restored_by_name ? ` · ${t('vault.restoredBy', { name: e.restored_by_name })}` : ''}
                       </p>
                     ) : (
-                      <p className="mt-1.5 text-[12.5px] text-ink-500 dark:text-parchment-300/70">
+                      <p className="mt-1.5 text-xs text-ink-500 dark:text-parchment-300/70">
                         {t('vault.keptUntil', { date: day(e.retention_until) })}
                       </p>
                     )}
@@ -275,7 +275,7 @@ export default function Archive() {
       )}
 
       {!isAdmin && entries.length > 0 && (
-        <motion.p variants={itemVariants} className="mt-4 text-[12.5px] leading-relaxed text-ink-500 dark:text-parchment-300/70">
+        <motion.p variants={itemVariants} className="mt-4 text-xs leading-relaxed text-ink-500 dark:text-parchment-300/70">
           {t('vault.adminOnly')}
         </motion.p>
       )}

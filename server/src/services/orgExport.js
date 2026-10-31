@@ -42,6 +42,7 @@ const ORG_IDENTITY_COLUMNS = [
   'id', 'name', 'slug', 'org_type', 'is_demo',
   'address', 'tax_id', 'signatory_name', 'signatory_title', 'statement_letterhead',
   'tagline', 'about', 'service_times', 'page_published',
+  'public_display_name', 'public_logo_url', 'public_accent_hex',
   'reminder_lead_hours', 'timezone', 'tradition', 'locale',
   'created_at',
 ]

@@ -67,7 +67,7 @@ describe('SP-065 how to mark an intention fulfilled', () => {
   it('a Spanish session shows the Spanish how-to and not the English one', () => {
     localStorage.setItem('ochr_locale', 'es')
     mount()
-    fireEvent.click(screen.getByRole('button', { name: 'Intentions' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Intenciones' }))
     const guide = screen.getByTestId('help-fulfill-howto')
     expect(guide).toHaveTextContent(es[TITLE])
     expect(guide).toHaveTextContent(es[BODY])
@@ -82,5 +82,19 @@ describe('SP-065 how to mark an intention fulfilled', () => {
     mount()
     fireEvent.change(screen.getByPlaceholderText(en['help.searchPh']), { target: { value: 'does not change the offering' } })
     expect(screen.getByText(en[TITLE])).toBeInTheDocument()
+  })
+
+  // SP-086: "mark said" found nothing, and the FAQ only described Edit.
+  it('search for "mark said" finds the how-to, and it names the bulk path', () => {
+    expect(en[BODY]).toContain(`"${en['mi.pastScheduledFilter']}"`)
+    expect(en[BODY]).toContain(en['mi.markSaidOpen'])
+    expect(es[BODY]).toContain(`"${es['mi.pastScheduledFilter']}"`)
+    expect(es[BODY]).toContain(es['mi.markSaidOpen'])
+    for (const q of ['mark said', 'bulk', 'Review and mark said']) {
+      const { unmount } = mount()
+      fireEvent.change(screen.getByPlaceholderText(en['help.searchPh']), { target: { value: q } })
+      expect(screen.getByText(en[TITLE])).toBeInTheDocument()
+      unmount()
+    }
   })
 })

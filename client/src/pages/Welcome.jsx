@@ -3,6 +3,8 @@ import { motion } from 'framer-motion'
 import { Users, Calendar, CheckSquare, Feather, ArrowRight } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
 import { useLocale } from '../i18n'
+import { showWelcomeStudio } from '../native/aiGate'
+import { useNativeAi } from '../native/NativeAiContext'
 
 // One-time welcome screen shown immediately after signup. Intentionally
 // minimal — no sidebar, no header — so first impression is focus, not
@@ -35,6 +37,7 @@ export default function Welcome() {
   const { user } = useAuth()
   const navigate = useNavigate()
   const { t } = useLocale()
+  const { kind: nativeAiKind } = useNativeAi()
   const orgName  = user?.organization?.name || t('welcome.orgFallback')
   const name = firstName(user?.name)
 
@@ -76,7 +79,7 @@ export default function Welcome() {
             {t('welcome.inside')}
           </p>
           <div className="grid sm:grid-cols-2 gap-5">
-            {orientation(t).map(({ id, icon: Icon, title, body }) => (
+            {orientation(t).filter(card => card.id !== 'studio' || showWelcomeStudio(nativeAiKind)).map(({ id, icon: Icon, title, body }) => (
               <div key={id} className="flex gap-3">
                 <div className="shrink-0 w-9 h-9 rounded-lg bg-church-50 dark:bg-church-900/40 flex items-center justify-center text-church-800 dark:text-brass-300">
                   <Icon size={17} />

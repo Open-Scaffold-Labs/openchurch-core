@@ -39,7 +39,7 @@ import {
 } from 'workbox-strategies'
 import { ExpirationPlugin } from 'workbox-expiration'
 import { CacheableResponsePlugin } from 'workbox-cacheable-response'
-import { createCachePolicy } from './swPolicy.js'
+import { createCachePolicy, isRuntimeApiCacheable } from './swPolicy.js'
 import { resolveCachedShellUrl, SHELL_NAV_DENYLIST } from './swShell.js'
 
 // 1. Precache — built fingerprinted assets emitted by Vite.
@@ -146,7 +146,7 @@ const { onlyWhenOffline, generationGuard } = policy
 // is what makes the pairing safe under concurrency.
 
 registerRoute(
-  ({ url }) => url.pathname.startsWith('/api/'),
+  ({ url }) => isRuntimeApiCacheable(url.pathname),
   new NetworkFirst({
     cacheName: 'ochr-api',
     networkTimeoutSeconds: 3,

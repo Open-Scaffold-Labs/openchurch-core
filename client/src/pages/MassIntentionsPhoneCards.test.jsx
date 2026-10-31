@@ -5,6 +5,7 @@
 // DOM. jsdom does not evaluate CSS, so this asserts structure via a stubbed
 // matchMedia; no visual claim is made here.
 import { ToastProvider } from '../components/ToastProvider'
+import { ConfirmProvider } from '../components/ConfirmProvider'
 import { render, screen, within, fireEvent, act, waitFor } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
@@ -25,6 +26,7 @@ const LONG_REQUESTER = 'The Hernández-Villalobos family of Saint Brigid'
 const ROWS = [
   { id: 15, intention: 'For a safe journey', note: 'Grandparents travelling', requested_by: LONG_REQUESTER, requested_by_client_id: null, mass_date: '2027-03-07', mass_title: 'Sunday Mass', mass_time: '10:00', status: 'scheduled', stipend: '15.00' },
   { id: 16, intention: 'For the parish', requested_by: null, requester_name: 'Synthetic Linked', requested_by_client_id: 7, mass_date: null, mass_title: null, status: 'fulfilled', stipend: null },
+  { id: 17, intention: 'For vocations', requested_by: 'Synthetic Three', requested_by_client_id: null, mass_date: null, mass_title: null, status: 'open', stipend: null }, // SP-133: no offering, so delete is offered
 ]
 
 let mqListeners, mqMatches
@@ -47,7 +49,7 @@ function stubFetch() {
   }))
   return calls
 }
-const book = () => render(<MemoryRouter initialEntries={['/mass-intentions']}><LocaleProvider><ToastProvider><Routes><Route path="/mass-intentions" element={<MassIntentions />} /></Routes></ToastProvider></LocaleProvider></MemoryRouter>)
+const book = () => render(<MemoryRouter initialEntries={['/mass-intentions']}><LocaleProvider><ToastProvider><ConfirmProvider><Routes><Route path="/mass-intentions" element={<MassIntentions />} /></Routes></ConfirmProvider></ToastProvider></LocaleProvider></MemoryRouter>)
 const { en } = STRINGS
 
 beforeEach(() => { vi.unstubAllGlobals(); localStorage.removeItem('ochr_locale'); authState.canWrite = true; authState.role = 'admin' })
@@ -78,9 +80,12 @@ describe('SP-057 phone card list', () => {
     vi.stubGlobal('confirm', () => true)
     book()
     const cards = await screen.findAllByTestId('mi-card')
-    for (const c of cards) {
+    for (const [i, c] of cards.entries()) {
       expect(within(c).getByRole('button', { name: en['mi.edit'] })).toBeInTheDocument()
-      expect(within(c).getByRole('button', { name: en['mi.delete'] })).toBeInTheDocument()
+      // Decision 8 (2026-10-19): a fulfilled row is history and offers no delete.
+      // SP-133 (2026-10-23): a recorded offering also offers no delete.
+      if (ROWS[i].status === 'fulfilled' || ROWS[i].stipend != null) expect(within(c).queryByRole('button', { name: en['mi.delete'] })).not.toBeInTheDocument()
+      else expect(within(c).getByRole('button', { name: en['mi.delete'] })).toBeInTheDocument()
     }
     expect(screen.getAllByRole('button', { name: en['mi.edit'] })).toHaveLength(ROWS.length)
     fireEvent.click(within(cards[0]).getByRole('button', { name: en['mi.edit'] }))
@@ -125,8 +130,8 @@ describe('SP-057 phone card list', () => {
 describe('R312-1 phone card is bounded for unbroken stored text', () => {
   const UNBROKEN_REQ = 'TheHernandezVillalobosMontenegroFamilyOfSaintBrigidParishRequestingThisMass'
   const UNBROKEN_TITLE = 'SolemnHighMassOfThanksgivingForTheFeastOfSaintBrigidOfKildareAndAllTheSaintsOfIreland'
-  const LONG = [{ id: 31, intention: 'For the repose of Synthetic One', requested_by: UNBROKEN_REQ, requested_by_client_id: null, mass_date: '2027-02-01', mass_title: UNBROKEN_TITLE, mass_time: '10:00', status: 'scheduled', stipend: '15.00' },
-    { id: 32, intention: 'For a safe journey', requested_by: 'Synthetic Two', requested_by_client_id: null, mass_date: null, mass_title: null, status: 'open', stipend: '10.00' }]
+  const LONG = [{ id: 31, intention: 'For the repose of Synthetic One', requested_by: UNBROKEN_REQ, requested_by_client_id: null, mass_date: '2027-02-01', mass_title: UNBROKEN_TITLE, mass_time: '10:00', status: 'scheduled', stipend: null },
+    { id: 32, intention: 'For a safe journey', requested_by: 'Synthetic Two', requested_by_client_id: null, mass_date: null, mass_title: null, status: 'open', stipend: null }]
   function stubLong() {
     const calls = []
     vi.stubGlobal('fetch', vi.fn(async (url, init = {}) => {
@@ -168,7 +173,9 @@ describe('R312-1 phone card is bounded for unbroken stored text', () => {
     stubMatchMedia(true); const calls = stubLong()
     book()
     const card = (await screen.findAllByTestId('mi-card')).find(c => within(c).queryByText('For a safe journey'))
-    await act(async () => { fireEvent.click(within(card).getByRole('button', { name: en['mi.delete'] })) })
+    fireEvent.click(within(card).getByRole('button', { name: en['mi.delete'] }))
+    const dialog = await screen.findByRole('alertdialog')
+    await act(async () => { fireEvent.click(within(dialog).getByRole('button', { name: en['mi.deleteConfirm'] })) })
     await waitFor(() => expect(calls.filter(c => c.init.method === 'DELETE')).toHaveLength(1))
     expect(calls.find(c => c.init.method === 'DELETE').u).toMatch(/\/api\/mass-intentions\/32$/)
   })

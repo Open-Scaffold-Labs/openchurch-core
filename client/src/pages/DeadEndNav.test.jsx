@@ -169,6 +169,6 @@ describe('Worship planner Packet hop', () => {
       </MemoryRouter>
     )
     const link = await screen.findByRole('link', { name: /sunday packet/i })
-    expect(link.getAttribute('href')).toBe('/packet?date=2026-09-13&from=planner')
+    expect(link.getAttribute('href')).toBe('/packet?date=2026-09-13&plan=9&from=planner')
   })
 })

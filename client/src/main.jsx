@@ -1,4 +1,5 @@
 import { StrictMode } from 'react'
+import { reportWindowError, reportUnhandledRejection } from './monitoring/clientCapture.js'
 import { createRoot } from 'react-dom/client'
 import { MotionConfig } from 'framer-motion'
 // Self-hosted design-system fonts. Weights here MUST stay in lockstep with
@@ -35,15 +36,23 @@ import { installFetchInterceptor } from './auth/fetchInterceptor'
 // very first page-load fetches (e.g. /api/auth/me for rehydration) carry it.
 installFetchInterceptor()
 
+// Capacitor plugins stay out of the hosted bundle. Vite removes this
+// branch when VITE_CAPACITOR is not exactly '1', which is every web deploy.
+if (import.meta.env.VITE_CAPACITOR === '1') {
+  import('./native/shell.js').then((mod) => mod.initNativeShell()).catch((error) => {
+    console.warn('[native] shell did not start', error?.name || 'error')
+  })
+}
+
 // Window-level handlers catch async failures the React ErrorBoundary
 // can't see — rejected promises, setTimeout throws, etc. Logging here
 // surfaces them in dev tools and (eventually) any monitoring SDK we
 // wire up via the same call site.
 window.addEventListener('error', (e) => {
-  console.error('[window.onerror]', { message: e.message, filename: e.filename, lineno: e.lineno, error: e.error })
+  reportWindowError(e)
 })
 window.addEventListener('unhandledrejection', (e) => {
-  console.error('[unhandledrejection]', { reason: e.reason })
+  reportUnhandledRejection(e)
 })
 
 createRoot(document.getElementById('root')).render(

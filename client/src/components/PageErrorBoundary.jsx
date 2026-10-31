@@ -1,6 +1,7 @@
 import { Component } from 'react'
 import { AlertTriangle, RotateCw } from 'lucide-react'
 import { useOptionalLocale } from '../i18n'
+import { reportBoundary } from '../monitoring/clientCapture.js'
 
 // Per-page error boundary. Different from the root ErrorBoundary in
 // two ways:
@@ -77,11 +78,7 @@ export default class PageErrorBoundary extends Component {
     // Same structured log shape as the root ErrorBoundary so log
     // aggregation (once we wire one) can coalesce them.
     // eslint-disable-next-line no-console
-    console.error(`[PageErrorBoundary:${this.props.scope || 'unknown'}]`, {
-      message: error?.message,
-      stack:   error?.stack,
-      componentStack: info?.componentStack,
-    })
+    reportBoundary(`[PageErrorBoundary:${this.props.scope || 'unknown'}]`, error, info, this.props.scope || 'unknown')
   }
 
   handleRetry = () => {

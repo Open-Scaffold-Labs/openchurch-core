@@ -348,7 +348,7 @@ export default function Assessments() {
               }`}>
               <span className="font-serif font-bold text-church-600">{y.fiscal_year}</span>
               <span className="ml-2 text-ink-500">{ladderPhrase(y)}</span>
-              <span className={`ml-2 inline-block px-2 py-0.5 rounded-full text-[10px] font-semibold ${STATUS_CLS[y.status] ?? ''}`}>{y.status}</span>
+              <span className={`ml-2 inline-block px-2 py-0.5 rounded-full text-[11px] font-semibold ${STATUS_CLS[y.status] ?? ''}`}>{y.status}</span>
               <span className="block text-[11px] text-ink-500 mt-0.5">{fmtMoney(y.total_paid)} of {fmtMoney(y.total_assessed)} collected</span>
             </button>
           ))}

@@ -1,8 +1,9 @@
 // SP-052: optionally link a Mass intention's requester to a member of THIS
 // parish. The free-text "Requested by" stays; this link is additive.
-// The search goes to GET /api/clients/picker, which returns only {id, name}
-// for the session's parish (no contact fields are downloaded). The server re-checks the id on save; this picker
-// is convenience, not the control.
+// The search goes to GET /api/clients/picker, which returns {id, name, status}
+// for the session's parish (no contact fields are downloaded). Inactive
+// members are hidden until Show inactive is on. The server re-checks the
+// id on save; this picker is convenience, not the control.
 import { useEffect, useId, useState } from 'react'
 import { apiUrl } from '../api'
 import { loadList } from '../utils/format'
@@ -12,19 +13,26 @@ export default function RequesterMemberLink({ memberId, memberName, onChange, t,
   const [q, setQ] = useState('')
   const [hits, setHits] = useState([])
   const [failed, setFailed] = useState(false)
+  const [showInactive, setShowInactive] = useState(false)
 
   useEffect(() => {
     const term = q.trim()
     if (memberId != null || term.length < 2) { setHits([]); setFailed(false); return undefined }
     let live = true
     const timer = setTimeout(async () => {
-      const { ok, data } = await loadList(apiUrl(`/api/clients/picker?${new URLSearchParams({ search: term, limit: '8' })}`))
+      const params = new URLSearchParams({ search: term, limit: '8' })
+      if (showInactive) params.set('include_inactive', '1')
+      const { ok, data } = await loadList(apiUrl(`/api/clients/picker?${params}`))
       if (!live) return
       setFailed(!ok)
-      setHits(ok && Array.isArray(data) ? data.filter(m => Number.isInteger(m?.id) && m.id > 0).map(m => ({ id: m.id, name: m.name || '' })) : [])
+      setHits(ok && Array.isArray(data) ? data.filter(m => Number.isInteger(m?.id) && m.id > 0).map(m => ({
+        id: m.id,
+        name: m.name || '',
+        status: typeof m.status === 'string' ? m.status : null,
+      })) : [])
     }, 250)
     return () => { live = false; clearTimeout(timer) }
-  }, [q, memberId])
+  }, [q, memberId, showInactive])
 
   if (memberId != null) {
     return (
@@ -39,12 +47,26 @@ export default function RequesterMemberLink({ memberId, memberName, onChange, t,
       <label htmlFor={`${id}-search`} className="block text-[11px] font-semibold text-ink-500 dark:text-parchment-300/70 mb-1">{t('mi.linkMember')}</label>
       <input id={`${id}-search`} type="search" value={q} onChange={e => setQ(e.target.value)}
         placeholder={t('mi.linkMemberPlaceholder')} className={inputCls} autoComplete="off" />
+      <button
+        type="button"
+        aria-pressed={showInactive}
+        data-testid="mi-show-inactive"
+        onClick={() => setShowInactive(v => !v)}
+        className={`mt-1 px-2 py-1 text-[11px] rounded-lg border focus:outline-none focus:ring-2 focus:ring-church-500 ${showInactive
+          ? 'border-church-700 bg-church-50 text-church-900 dark:border-brass-700 dark:bg-church-900/40 dark:text-parchment-50'
+          : 'border-parchment-300/70 dark:border-brass-900/40 bg-parchment-100 dark:bg-ink-800 text-ink-700 dark:text-parchment-200'}`}
+      >
+        {t('mi.showInactive')}
+      </button>
       {failed && <p role="alert" className="text-xs mt-1">{t('mi.linkMemberFailed')}</p>}
       {hits.length > 0 && (
         <ul className="mt-1 border rounded text-sm" aria-label={t('mi.linkMember')}>
           {hits.map(m => (
             <li key={m.id}>
-              <button type="button" className="w-full text-left px-2 py-1" onClick={() => { onChange(m.id, m.name); setQ('') }}>{m.name}</button>
+              <button type="button" className="w-full text-left px-2 py-1" onClick={() => { onChange(m.id, m.name); setQ('') }}>
+                {m.name}
+                {m.status === 'inactive' && <span className="text-ink-500 dark:text-parchment-300/70"> · {t('mi.inactiveMember')}</span>}
+              </button>
             </li>
           ))}
         </ul>

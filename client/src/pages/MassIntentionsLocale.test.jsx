@@ -5,10 +5,11 @@
 // failure sentence makes the Spanish case go red.
 
 import { ToastProvider } from '../components/ToastProvider'
+import { ConfirmProvider } from '../components/ConfirmProvider'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, within } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { LocaleProvider } from '../i18n'
@@ -38,7 +39,7 @@ const ROW = {
   requested_by: 'The family',
   mass_date: '2026-09-16',
   status: 'open',
-  stipend: 10,
+  stipend: null, // SP-133: a recorded offering hides delete
 }
 
 const ok = (body, status = 200) => ({ ok: status >= 200 && status < 300, status, json: async () => body })
@@ -49,7 +50,7 @@ function renderBook(path = '/mass-intentions') {
     <MemoryRouter initialEntries={[path]}>
       <LocaleProvider>
         <Routes>
-          <Route path="/mass-intentions" element={<ToastProvider><MassIntentions /></ToastProvider>} />
+          <Route path="/mass-intentions" element={<ToastProvider><ConfirmProvider><MassIntentions /></ConfirmProvider></ToastProvider>} />
         </Routes>
       </LocaleProvider>
     </MemoryRouter>,
@@ -58,6 +59,12 @@ function renderBook(path = '/mass-intentions') {
 
 function copy(locale, key) {
   return STRINGS[locale][key]
+}
+
+async function confirmDelete(locale) {
+  fireEvent.click(await screen.findByRole('button', { name: copy(locale, 'mi.delete') }))
+  const dialog = await screen.findByRole('alertdialog')
+  fireEvent.click(within(dialog).getByRole('button', { name: copy(locale, 'mi.deleteConfirm') }))
 }
 
 beforeEach(() => {
@@ -289,7 +296,7 @@ for (const locale of ['en', 'es']) {
         return ok({ intentions: [ROW] })
       }))
       renderBook()
-      fireEvent.click(await screen.findByRole('button', { name: copy(locale, 'mi.delete') }))
+      await confirmDelete(locale)
       expect(await screen.findByRole('alert')).toHaveTextContent(DELETE_ORACLE[locale])
       expect(screen.getByText('For a safe journey')).toBeInTheDocument()
     })
@@ -302,7 +309,7 @@ for (const locale of ['en', 'es']) {
         return ok({ intentions: [ROW] })
       }))
       renderBook()
-      fireEvent.click(await screen.findByRole('button', { name: copy(locale, 'mi.delete') }))
+      await confirmDelete(locale)
       const alert = await screen.findByRole('alert')
       expect(alert).toHaveTextContent(DELETE_ORACLE[locale])
       expect(alert).not.toHaveTextContent('Failed to fetch')
@@ -321,7 +328,7 @@ for (const locale of ['en', 'es']) {
         return ok({ intentions: [ROW] })
       }))
       renderBook()
-      fireEvent.click(await screen.findByRole('button', { name: copy(locale, 'mi.delete') }))
+      await confirmDelete(locale)
       const alert = await screen.findByRole('alert')
       expect(alert).toHaveTextContent(DELETE_ORACLE[locale])
       expect(alert).not.toHaveTextContent(server)

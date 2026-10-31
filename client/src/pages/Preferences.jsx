@@ -3,9 +3,11 @@ import { motion } from 'framer-motion'
 import { useNavigate } from 'react-router-dom'
 import { UserCircle, Languages, KeyRound, Eye, EyeOff, LogOut, UserX } from 'lucide-react'
 import { useLocale } from '../i18n'
-import PageWrapper from '../components/PageWrapper'
+import NativeAiConsentCard from '../native/NativeAiConsentCard'
+import PageWrapper, { PageHeader } from '../components/PageWrapper'
 import NotificationPrefs from '../components/NotificationPrefs'
 import PushSubscriptionToggle from '../components/PushSubscriptionToggle'
+import IosPushFoundation from '../native/IosPushFoundation'
 import AvatarUploader from '../components/AvatarUploader'
 import TextField from '../components/TextField'
 import { useAuth } from '../context/AuthContext'
@@ -40,6 +42,7 @@ import { apiUrl } from '../api'
 function ProfileCard() {
   const { user, updateUser } = useAuth()
   const toast = useToast()
+  const { t } = useLocale()
   const [saving, setSaving] = useState(false)
 
   async function handleAvatarChange(dataUrl) {
@@ -52,13 +55,13 @@ function ProfileCard() {
       })
       if (!res.ok) {
         const data = await res.json().catch(() => ({}))
-        throw new Error(data.error || `Save failed (${res.status})`)
+        throw new Error(data.error || t('prefs.avatarSaveFailed', { status: res.status }))
       }
       const data = await res.json()
       updateUser({ avatar: data.avatar })
-      toast.success(dataUrl ? 'Profile picture updated' : 'Profile picture removed')
+      toast.success(dataUrl ? t('prefs.avatarUpdated') : t('prefs.avatarRemoved'))
     } catch (err) {
-      toast.error(err.message || 'Could not update profile picture')
+      toast.error(err.message || t('prefs.avatarFailed'))
     } finally {
       setSaving(false)
     }
@@ -67,8 +70,8 @@ function ProfileCard() {
   return (
     <div className="bg-parchment-50 dark:bg-ink-900/90 rounded-2xl border border-parchment-300/50 dark:border-brass-900/30 shadow-sm overflow-hidden">
       <div className="px-5 py-4 border-b border-parchment-300/50 dark:border-brass-900/25 flex items-center gap-2">
-        <UserCircle size={15} className="text-brass-600 dark:text-brass-300" />
-        <h2 className="font-semibold text-ink-900 dark:text-parchment-50">Profile picture</h2>
+        <UserCircle size={15} aria-hidden="true" className="text-brass-600 dark:text-brass-300" />
+        <h2 className="font-semibold text-ink-900 dark:text-parchment-50">{t('prefs.profilePicture')}</h2>
       </div>
       <div className="px-5 py-5">
         <AvatarUploader
@@ -99,7 +102,9 @@ function LanguageCard() {
   const stored = (() => {
     try { return localStorage.getItem('ochr_locale') || '' } catch { return '' }
   })()
-  const langName = t(orgLocale === 'es' ? 'prefs.spanish' : 'prefs.english')
+  // Inside a sentence the language is named in the reader's language
+  // ("configurada en inglés"), not by its autonym on the buttons above.
+  const langName = t(orgLocale === 'es' ? 'prefs.langInline.es' : 'prefs.langInline.en')
   return (
     <div className="bg-parchment-50 dark:bg-ink-900/90 rounded-2xl border border-parchment-300/50 dark:border-brass-900/30 shadow-warm overflow-hidden">
       <div className="px-5 py-4 border-b border-parchment-300/50 dark:border-brass-900/25 flex items-center gap-2">
@@ -482,13 +487,112 @@ export function CloseLoginCard() {
   )
 }
 
+// Deletes this login. Distinct from closing it: personal profile,
+// sessions, push tokens, and notification choices are deleted. The
+// sacramental register and the financial ledger stay. A 409 means the
+// login was not deleted. A 200 whose body says the personal login was
+// deleted signs this device out. Anything else stays on this page.
+export function DeleteLoginCard() {
+  const { t } = useLocale()
+  const { logout } = useAuth()
+  const ask = useConfirm()
+  const navigate = useNavigate()
+  const [password, setPassword] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  async function handleDelete() {
+    setError('')
+    if (!password) {
+      setError(t('prefs.delete.passwordRequired'))
+      return
+    }
+    const ok = await ask({
+      title: t('prefs.delete.confirmTitle'),
+      body: t('prefs.delete.confirmBody'),
+      confirmLabel: t('prefs.delete.confirm'),
+      cancelLabel: t('prefs.delete.cancel'),
+      tone: 'destructive',
+    })
+    if (!ok) return
+    setBusy(true)
+    try {
+      const opened = await fetch(apiUrl('/api/auth/deletion-request'), { method: 'POST' })
+      if (opened.status !== 201 && opened.status !== 200) {
+        setError(t('prefs.delete.failed'))
+        return
+      }
+      const res = await fetch(apiUrl('/api/auth/deletion-request/confirm'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password }),
+      })
+      if (res.status === 409) {
+        setError(t('prefs.delete.lastAdmin'))
+        return
+      }
+      if (res.status === 403) {
+        setError(t('prefs.delete.passwordWrong'))
+        return
+      }
+      let body = null
+      try { body = await res.json() } catch { body = null }
+      if (res.status === 200 && body?.personal_login_deleted === true) {
+        await logout()
+        navigate('/login', { replace: true })
+        return
+      }
+      setError(t('prefs.delete.failed'))
+    } catch {
+      setError(t('prefs.delete.failed'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="bg-parchment-50 dark:bg-ink-900/90 rounded-2xl border border-parchment-300/50 dark:border-brass-900/30 shadow-warm overflow-hidden">
+      <div className="px-5 py-4 border-b border-parchment-300/50 dark:border-brass-900/25 flex items-center gap-2">
+        <UserX size={15} className="text-brass-600 dark:text-brass-300" aria-hidden="true" />
+        <h2 className="font-semibold text-ink-900 dark:text-parchment-50">{t('prefs.delete.title')}</h2>
+      </div>
+      <div className="px-5 py-5 space-y-4">
+        <p className="text-sm text-ink-600 dark:text-parchment-300/80 leading-relaxed">
+          {t('prefs.delete.help')}
+        </p>
+        <TextField
+          label={t('prefs.delete.password')}
+          type="password"
+          autoComplete="current-password"
+          value={password}
+          onChange={e => setPassword(e.target.value)}
+        />
+        {error && (
+          <p role="alert" className="text-sm text-rose-700 dark:text-rose-300">
+            {error}
+          </p>
+        )}
+        <button
+          type="button"
+          onClick={handleDelete}
+          disabled={busy}
+          aria-busy={busy || undefined}
+          className="px-4 py-2 min-h-[44px] rounded-lg text-sm font-semibold bg-church-800 hover:bg-church-900 text-parchment-50 border border-church-800 transition-colors focus:outline-none focus:ring-2 focus:ring-brass-400 disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {busy ? t('prefs.delete.saving') : t('prefs.delete.submit')}
+        </button>
+      </div>
+    </div>
+  )
+}
+
 export default function Preferences() {
   const { t } = useLocale()
   return (
-    <PageWrapper>
+    <PageWrapper type="list">
       <div className="max-w-3xl mx-auto space-y-6">
         <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }}>
-          <h1 className="font-display text-3xl font-semibold text-ink-900 dark:text-parchment-50 tracking-tight">{t('prefs.title')}</h1>
+          <PageHeader title={t('prefs.title')} />
           <p className="text-sm text-ink-500 dark:text-parchment-300/70 mt-1">
             {t('prefs.sub')}
           </p>
@@ -497,6 +601,8 @@ export default function Preferences() {
         <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}>
           <LanguageCard />
         </motion.div>
+
+        <NativeAiConsentCard />
 
         <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}>
           <ProfileCard />
@@ -518,6 +624,10 @@ export default function Preferences() {
           <CloseLoginCard />
         </motion.div>
 
+        <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}>
+          <DeleteLoginCard />
+        </motion.div>
+
         <motion.div
           initial={{ opacity: 0, y: 8 }}
           animate={{ opacity: 1, y: 0 }}
@@ -533,6 +643,8 @@ export default function Preferences() {
         >
           <PushSubscriptionToggle />
         </motion.div>
+
+        <IosPushFoundation />
       </div>
     </PageWrapper>
   )

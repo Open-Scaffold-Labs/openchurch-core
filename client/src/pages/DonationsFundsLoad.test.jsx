@@ -53,7 +53,7 @@ function mount() {
 
 async function openFunds() {
   mount()
-  const button = await screen.findByRole('button', { name: /funds/i })
+  const button = await screen.findByRole('button', { name: /funds|fondos/i })
   fireEvent.click(button)
 }
 

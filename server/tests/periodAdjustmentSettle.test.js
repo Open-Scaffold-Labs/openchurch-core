@@ -68,6 +68,9 @@ async function affiliatedPair(tag) {
 }
 
 async function chargedGift(par, amount, date) {
+  const mapped = await request(server).put('/api/finance/mappings').set(auth(par.token))
+    .send({ mappings: [{ source_type: 'donation_category', source_key: 'General', account_code: '4420' }] })
+  expect(mapped.status).toBeLessThan(300)
   const res = await request(server).post('/api/donations').set(auth(par.token))
     .send({ donor_name: 'Frozen Donor', amount, date, category: 'General', method: 'cash' })
   expect(res.status).toBe(201)

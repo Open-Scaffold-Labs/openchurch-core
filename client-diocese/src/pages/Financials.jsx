@@ -128,7 +128,7 @@ export default function Financials() {
                 {data.groups.map((g, i) => (
                   <tr key={i} className="border-t first:border-t-0 border-parchment-300/40 text-ink-800">
                     <td className="py-1.5 pr-2">{g.rollup_group}
-                      <span className="ml-2 text-[10px] uppercase tracking-wider text-ink-400">{g.acct_type}</span>
+                      <span className="ml-2 text-[11px] uppercase tracking-wider text-ink-400">{g.acct_type}</span>
                     </td>
                     <td className="py-1.5 text-right whitespace-nowrap font-medium">{fmtMoney(g.total)}</td>
                   </tr>

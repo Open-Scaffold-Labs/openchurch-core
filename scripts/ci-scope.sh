@@ -6,8 +6,8 @@
 # run=true|false to $GITHUB_OUTPUT. Reads GITHUB_EVENT_NAME.
 #
 # The rule (see the comment on the Scope step for why docs are not inert):
-# a pull_request skips only when EVERY changed path is docs/** or a
-# top-level *.md AND no changed file's basename appears in code, tests,
+# a pull_request skips only when EVERY changed path is docs/**, .cursor/**
+# or a top-level *.md AND no changed file's basename appears in code, tests,
 # scripts or workflows. Every other event, and any error, means FULL.
 #
 # ERREXIT. GitHub runs `shell: bash` as `bash --noprofile --norc -eo
@@ -44,9 +44,9 @@ printf '%s\n' "$files" | sed 's/^/  /'
 
 CODE_PATHS=(client client-diocese server scripts api tools .github vercel.json package.json)
 while IFS= read -r f; do
-  # docs/** or a top-level *.md only. A .md inside client/, server/ etc.
-  # counts as code.
-  if ! [[ "$f" =~ ^docs/ || "$f" =~ ^[^/]+\.md$ ]]; then
+  # docs/**, .cursor/** (editor/agent config, never read by CI) or a
+  # top-level *.md only. A .md inside client/, server/ etc. counts as code.
+  if ! [[ "$f" =~ ^docs/ || "$f" =~ ^\.cursor/ || "$f" =~ ^[^/]+\.md$ ]]; then
     full "Not a docs file: $f"
   fi
   b=$(basename "$f")

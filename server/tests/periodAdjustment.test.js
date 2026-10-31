@@ -81,6 +81,9 @@ async function affiliatedPair(tag) {
 
 /** A gift that looks like it was charged through the provider, so it can be refunded. */
 async function chargedGift(par, amount, date, donorName = 'Frozen Donor') {
+  const mapped = await request(server).put('/api/finance/mappings').set(auth(par.token))
+    .send({ mappings: [{ source_type: 'donation_category', source_key: 'General', account_code: '4420' }] })
+  expect(mapped.status).toBeLessThan(300)
   const res = await request(server).post('/api/donations').set(auth(par.token))
     .send({ donor_name: donorName, amount, date, category: 'General', method: 'cash' })
   expect(res.status).toBe(201)

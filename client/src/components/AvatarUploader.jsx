@@ -2,6 +2,7 @@ import { useRef, useState } from 'react'
 import { Camera, Loader2, Trash2 } from 'lucide-react'
 import UserAvatar from './UserAvatar'
 import { useToast } from './ToastProvider'
+import { useLocale } from '../i18n'
 
 // Controlled profile-picture picker. Used both for the signed-in
 // user's own avatar (Preferences) and for a member's avatar (the
@@ -23,17 +24,25 @@ import { useToast } from './ToastProvider'
 const OUTPUT_SIZE = 256
 const JPEG_QUALITY = 0.82
 
+// Rejections carry an i18n key, not an English sentence, so the toast
+// follows the parish language.
+function keyedError(key) {
+  const err = new Error(key)
+  err.i18nKey = key
+  return err
+}
+
 function fileToSquareDataUrl(file) {
   return new Promise((resolve, reject) => {
     if (!file.type.startsWith('image/')) {
-      reject(new Error('Please choose an image file'))
+      reject(keyedError('avatar.notImage'))
       return
     }
     const reader = new FileReader()
-    reader.onerror = () => reject(new Error('Could not read that file'))
+    reader.onerror = () => reject(keyedError('avatar.readFailed'))
     reader.onload = () => {
       const img = new Image()
-      img.onerror = () => reject(new Error("That file isn't a valid image"))
+      img.onerror = () => reject(keyedError('avatar.invalidImage'))
       img.onload = () => {
         // Center-crop the longest side to a square, then downscale.
         const min = Math.min(img.width, img.height)
@@ -56,6 +65,7 @@ export default function AvatarUploader({ value, name, onChange, busy = false }) 
   const fileRef = useRef(null)
   const [processing, setProcessing] = useState(false)
   const toast = useToast()
+  const { t } = useLocale()
 
   const disabled = busy || processing
 
@@ -69,7 +79,7 @@ export default function AvatarUploader({ value, name, onChange, busy = false }) 
       const dataUrl = await fileToSquareDataUrl(file)
       onChange(dataUrl)
     } catch (err) {
-      toast.error(err.message || 'Could not process that image')
+      toast.error(t(err?.i18nKey || 'avatar.processFailed'))
     } finally {
       setProcessing(false)
     }
@@ -105,8 +115,8 @@ export default function AvatarUploader({ value, name, onChange, busy = false }) 
           onClick={() => fileRef.current?.click()}
           className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg bg-church-900 dark:bg-church-700 text-parchment-50 text-xs font-semibold shadow-warm hover:bg-church-800 dark:hover:bg-church-600 transition-colors disabled:opacity-50"
         >
-          <Camera size={13} />
-          {value ? 'Change photo' : 'Upload photo'}
+          <Camera size={13} aria-hidden="true" />
+          {value ? t('avatar.change') : t('avatar.upload')}
         </button>
         {value && (
           <button
@@ -115,7 +125,7 @@ export default function AvatarUploader({ value, name, onChange, busy = false }) 
             onClick={() => onChange(null)}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-ink-500 dark:text-parchment-300/70 hover:text-rose-700 dark:hover:text-rose-300 transition-colors disabled:opacity-50"
           >
-            <Trash2 size={12} /> Remove
+            <Trash2 size={12} aria-hidden="true" /> {t('avatar.remove')}
           </button>
         )}
         {/* ink-500, not ink-400. At 11px on parchment, ink-400 measures
@@ -124,7 +134,7 @@ export default function AvatarUploader({ value, name, onChange, busy = false }) 
               beside it already used ink-500 and passed, which is what made
               the difference visible. */}
           <p className="text-[11px] text-ink-500 dark:text-parchment-300/70 leading-snug max-w-[12rem]">
-          Square works best. Large photos are automatically resized.
+          {t('avatar.help')}
         </p>
       </div>
     </div>
