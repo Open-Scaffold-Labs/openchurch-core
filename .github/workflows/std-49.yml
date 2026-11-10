@@ -14,5 +14,7 @@ permissions:
 jobs:
   no-raw-card-numbers:
     uses: Open-Scaffold-Labs/openscaffold-core/.github/workflows/std-49-no-raw-card-numbers.yml@d5dda90c87ee856de847bd79d0f003b46f3a399d
+    with:
+      checker_ref: d5dda90c87ee856de847bd79d0f003b46f3a399d
     secrets:
       ecosystem-token: ${{ secrets.OSL_ECOSYSTEM_TOKEN }}
