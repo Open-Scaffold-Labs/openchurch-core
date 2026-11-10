@@ -21,8 +21,8 @@ const PROSE = [
   'Contact ada@parish.test',
   'phone 555-123-4567',
   'intl +44 20 7946 0958',
-  'card 4111111111111111',
-  'grouped 4111 1111 1111 1111',
+  'card 4111111111111111', // osl-allow-test-pan
+  'grouped 4111 1111 1111 1111', // osl-allow-test-pan
   `uuid ${UUID}`,
   `auth Bearer ${JWT}`,
   'key sk_live_51AbcDEF1234567',
@@ -43,8 +43,8 @@ const PROSE_REDACTED = [
   'Contact [email]',
   'phone [phone]',
   'intl [phone]',
-  'card [number]',
-  'grouped [number]',
+  'card [number]', // osl-allow-test-pan
+  'grouped [number]', // osl-allow-test-pan
   'uuid [uuid]',
   'auth [token]',
   'key [token]',
@@ -118,7 +118,7 @@ describe('Sentry free-text redaction', () => {
     expect(asObject.message).toEqual({
       message: 'sent %s on 2026/10/25',
       formatted: 'sent [email] on 2026/10/25',
-      params: ['[email]', '500', '23505', '2026/10/25', 500, '[number]'],
+      params: ['[email]', '500', '23505', '2026/10/25', 500, '[number]'], // osl-allow-test-pan
     })
   })
 
@@ -127,13 +127,13 @@ describe('Sentry free-text redaction', () => {
       logentry: {
         message: 'sent %s on 2026/10/25',
         formatted: 'sent ada@parish.test on 2026/10/25',
-        params: ['ada@parish.test', '404', '22P02', '10/25/2026', 404, '4111111111111111'],
+        params: ['ada@parish.test', '404', '22P02', '10/25/2026', 404, '4111111111111111'], // osl-allow-test-pan
       },
     })
     expect(out.logentry).toEqual({
       message: 'sent %s on 2026/10/25',
       formatted: 'sent [email] on 2026/10/25',
-      params: ['[email]', '404', '22P02', '10/25/2026', 404, '[number]'],
+      params: ['[email]', '404', '22P02', '10/25/2026', 404, '[number]'], // osl-allow-test-pan
     })
   })
 
