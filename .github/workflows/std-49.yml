@@ -1,6 +1,9 @@
 # STD-49: never send or store a full card number.
-# Pin a commit of the shared reusable workflow; do not copy the script.
-# See Open-Scaffold-Labs/openscaffold-core/docs/STD-49-NO-RAW-CARD-NUMBERS.md.
+# openchurch-core is public and cannot call the private openscaffold-core
+# reusable workflow, even at a7939e565bacbeee48e6f404ca0a3fc7f394c842
+# (inlined checker, no token). This job runs a vendored copy of
+# scripts/check-no-raw-card-numbers.sh from that commit.
+# No secrets or tokens are used.
 name: STD-49 no raw card numbers
 
 on:
@@ -13,8 +16,10 @@ permissions:
 
 jobs:
   no-raw-card-numbers:
-    uses: Open-Scaffold-Labs/openscaffold-core/.github/workflows/std-49-no-raw-card-numbers.yml@a7939e565bacbeee48e6f404ca0a3fc7f394c842
-    with:
-      checker_ref: d5dda90c87ee856de847bd79d0f003b46f3a399d
-    secrets:
-      ecosystem-token: ${{ secrets.OSL_ECOSYSTEM_TOKEN }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Run the vendored STD-49 checker
+        run: bash scripts/check-no-raw-card-numbers.sh
