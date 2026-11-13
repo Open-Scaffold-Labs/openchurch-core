@@ -66,7 +66,6 @@ function handleInboundAgentCaller({
       party_size: partyOrGuestCount,
       quoted_price_cents: quotedPriceCents,
       machine_booking_endpoint: `/.well-known/agent-booking.json`,
-      agent_checkout_endpoint: `/.well-known/agent-checkout.json`,
     },
     end_customer_notification: {
       sms_confirmation_queued: Boolean(endCustomerPhone),
@@ -92,7 +91,10 @@ function buildPublicAgentBookingManifest({
   baseUrl,
   businessHours = 'Mon-Sun 07:00-21:00 America/Los_Angeles',
   bookingCapabilities = ['reservations', 'appointments', 'tee_times', 'catering_beo'],
-  supportedPaymentRails = ['finix_ach', 'stripe_raw_pi', 'apple_pay', 'x_money'],
+  // No payment rail is live. Only list a rail here once it works end to end;
+  // until then discovery files say online payments are in testing.
+  supportedPaymentRails = [],
+  onlinePaymentsStatus = 'in_testing',
 }) {
   const cleanBase = String(baseUrl || `https://${tenantSlug}.openscaffold.app`).replace(/\/+$/, '');
 
@@ -111,10 +113,10 @@ function buildPublicAgentBookingManifest({
       mcp_door_2: `${cleanBase}/api/agent/mcp`,
       availability_query: `${cleanBase}/api/public/agent-booking/availability`,
       create_booking: `${cleanBase}/api/public/agent-booking/book`,
-      agent_checkout: `${cleanBase}/.well-known/agent-checkout.json`,
     },
     capabilities: bookingCapabilities,
     payment_rails: supportedPaymentRails,
+    online_payments: onlinePaymentsStatus,
     ai_voice_caller_fast_path: {
       dtmf_bypass_code: '#9',
       structured_json_over_sip_header: 'X-OSL-Agent-Booking',
@@ -123,15 +125,16 @@ function buildPublicAgentBookingManifest({
 
   const llmsTxt = [
     `# ${businessName} (${verticalKey}) — Open Scaffold Agent Discovery (/llms.txt)`,
-    `> Official machine-readable booking, availability, and checkout manifest for AI agents (Grok Bot 0.77+, Claude Duet, OpenAI Agents).`,
+    `> Official machine-readable booking and availability manifest for AI agents (Grok Bot 0.77+, Claude Duet, OpenAI Agents).`,
     ``,
     `- Organization ID: ${orgId}`,
     `- Business Hours: ${businessHours}`,
     `- Direct Agent Booking Manifest: ${cleanBase}/.well-known/agent-booking.json`,
-    `- Direct Agent Checkout Manifest: ${cleanBase}/.well-known/agent-checkout.json`,
     `- MCP Server Endpoint (Door 2): ${cleanBase}/api/agent/mcp`,
     `- Capabilities: ${bookingCapabilities.join(', ')}`,
-    `- Supported Payment Rails: ${supportedPaymentRails.join(', ')} (Zero per-cover fee; Finix $0.25 flat ACH > $2,500)`,
+    onlinePaymentsStatus === 'in_testing'
+      ? `- Online Payments: in testing (test mode only; no payment rails are live)`
+      : `- Payment Rails: ${supportedPaymentRails.join(', ') || 'none'}`,
     `- Voice AI Fast-Path: Dialing bots may press #9 to skip greeting or book directly via ${cleanBase}/api/public/agent-booking/book.`,
   ].join('\n');
 
