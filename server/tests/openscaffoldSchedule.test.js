@@ -136,6 +136,7 @@ describe('@openscaffold/schedule v0.1.0 in OpenChurch (MODE_C_EVENT_FACILITY_TEE
     const ics = generateTenantIcsFeed({
       orgId: 'st-brigids',
       calendarName: 'St. Brigid Parish',
+      feedToken: 'test-feed-token-not-a-secret-0001',
       bookings: [
         {
           id: 'evt_1',
@@ -146,7 +147,7 @@ describe('@openscaffold/schedule v0.1.0 in OpenChurch (MODE_C_EVENT_FACILITY_TEE
           status: 'confirmed',
         },
       ],
-    })
+    }, { tenantOrgId: 'st-brigids' })
     expect(ics.event_count).toBe(1)
   })
 })

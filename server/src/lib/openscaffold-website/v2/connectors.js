@@ -5,10 +5,10 @@
  * Bridges the public website directly to the tenant's live operational modules:
  * 1. @openscaffold/scheduling (Mode A-G live slots, tee times, dining turns)
  * 2. @openscaffold/menu (live menus, wine lists, automatic real-time 86'd filter)
- * 3. @openscaffold/billing + @openscaffold/shop + @openscaffold/gift-cards (Mode A0 direct checkout & $0.20 ACH)
+ * 3. @openscaffold/billing + @openscaffold/shop + @openscaffold/gift-cards (online payments in testing)
  * 4. @openscaffold/crm + @openscaffold/messaging (lead capture -> CRM household/deal + bot notification)
  * 5. @openscaffold/tour (360° virtual tours + completed job-to-portfolio promotion)
- * 6. @openscaffold/ticketing (zero-fee community/parish/venue events)
+ * 6. @openscaffold/ticketing (community/parish/venue events)
  * 7. @openscaffold/documents (public HOA CC&Rs, weekly bulletins, board packets)
  * 8. @openscaffold/esign (digital client/patient intake packets)
  */
@@ -27,7 +27,7 @@ const LIVE_CONNECTOR_MANIFEST = Object.freeze([
   {
     id: 'billing_shop',
     module: '@openscaffold/billing + @openscaffold/shop + @openscaffold/gift-cards',
-    description: 'Zero-markup Stripe Connect Mode A0 checkout, flat $0.20 wholesale ACH dues/giving/deposits, and gift card issuance.',
+    description: 'Online payments: in testing (test mode only). Gift card issuance is available when configured.',
   },
   {
     id: 'crm_messaging',

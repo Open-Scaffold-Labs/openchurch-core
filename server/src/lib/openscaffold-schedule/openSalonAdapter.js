@@ -7,6 +7,7 @@
  */
 
 const { computeStylistBusyRanges, computeRecallRebookingWindow } = require('./modes');
+const { version: SCHEDULE_PACKAGE_VERSION } = require('./package.json');
 
 const OPENSALON_DOMAIN_IP_PRESERVED = Object.freeze([
   {
@@ -44,7 +45,7 @@ const OPENSALON_SHARED_MODULE_REPLACEMENTS = Object.freeze([
       'client/src/components/calendar/WeekList.jsx',
       'client/src/components/calendar/MovePanel.jsx',
     ],
-    target_shared_module: '@openscaffold/schedule v0.1.0 (@openscaffold/core/schedule)',
+    target_shared_module: `@openscaffold/schedule v${SCHEDULE_PACKAGE_VERSION} (@openscaffold/core/schedule)`,
     action: 'HARVEST_AND_PROMOTE_TO_SHARED',
     migration_notes:
       'Matt’s hs_stylist_busy_ranges split-time processing gap SQL, single-statement timezone-aware AVAILABILITY_SQL, WeekList phone view, and WCAG 2.5.7 MovePanel are promoted into @openscaffold/schedule Mode A so OpenSalon, OpenDentist, and all 12 verticals share one battle-tested engine.',
@@ -73,7 +74,7 @@ const OPENSALON_SHARED_MODULE_REPLACEMENTS = Object.freeze([
     target_shared_module: '@openscaffold/books Phase 2 (open-salon preset)',
     action: 'REPLACE_WITH_SHARED_MODULE',
     migration_notes:
-      'Replaces bespoke revenue summary queries with double-entry journal automation: booth-rental vs. sliding-scale commission stylist splits, 1099-NEC tracking, backbar chemical COGS (from waste.js) vs. retail COGS, and QuickBooks 30d/60d $0.00 Variance parallel proof.',
+      'Replaces bespoke revenue summary queries with double-entry journal automation: booth-rental vs. sliding-scale commission stylist splits, 1099-NEC tracking, backbar chemical COGS (from waste.js) vs. retail COGS, and external-ledger 30d/60d $0.00 Variance parallel proof.',
   },
   {
     opensalon_files: ['server/src/lib/consent.js'],

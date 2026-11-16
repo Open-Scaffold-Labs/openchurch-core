@@ -20,12 +20,12 @@ const SECTION_BLOCK_CATALOG = Object.freeze([
   { id: 'hero_split', label: 'Editorial Split Hero & Trust Strip', category: 'core', module: '@openscaffold/design' },
   { id: 'live_booking_widget', label: 'Live Appointment, Chair & Table Booking', category: 'commerce', module: '@openscaffold/scheduling' },
   { id: 'live_menu_grid', label: 'Live Menu, Wine List & 86-Filter', category: 'hospitality', module: '@openscaffold/menu' },
-  { id: 'tee_sheet_widget', label: '8-Minute Golf Tee Sheet (Zero Barter)', category: 'golf', module: '@openscaffold/scheduling' },
+  { id: 'tee_sheet_widget', label: '8-Minute Golf Tee Sheet', category: 'golf', module: '@openscaffold/scheduling' },
   { id: 'before_after_gallery', label: 'Before & After Project Portfolio', category: 'field', module: '@openscaffold/tour' },
   { id: 'virtual_tour_360', label: '360° Interactive Spatial Walkthrough', category: 'spatial', module: '@openscaffold/tour' },
   { id: 'services_pricing_matrix', label: 'Service Tiers & Transparent Pricing', category: 'core', module: '@openscaffold/crm' },
-  { id: 'event_ticketing_calendar', label: 'Zero-Fee Community & Venue Events', category: 'events', module: '@openscaffold/ticketing' },
-  { id: 'donation_dues_portal', label: 'Online Giving, Fund Drive & Dues ($0.20 ACH)', category: 'payments', module: '@openscaffold/billing' },
+  { id: 'event_ticketing_calendar', label: 'Community & Venue Events', category: 'events', module: '@openscaffold/ticketing' },
+  { id: 'donation_dues_portal', label: 'Online Giving, Fund Drive & Dues', category: 'payments', module: '@openscaffold/billing' },
   { id: 'public_documents_vault', label: 'Public Bulletins, CC&Rs & Board Packets', category: 'governance', module: '@openscaffold/documents' },
   { id: 'shop_gift_cards', label: 'Pro Shop, Retail Catalog & Instant Gift Cards', category: 'commerce', module: '@openscaffold/shop' },
   { id: 'catering_beo_inquiry', label: 'Banquet, Outing & Catering Package Builder', category: 'hospitality', module: '@openscaffold/catering' },
@@ -113,7 +113,7 @@ function renderSectionBlock(block = {}, liveData = {}) {
       return `<section class="os-web-block os-block-tee-sheet" data-block="tee_sheet_widget">
         <div class="os-block-header">
           <h2 class="os-web-h2">${esc(block.title || 'Book Direct Tee Times (Best Rate Guaranteed)')}</h2>
-          <span class="os-live-pill">8-Min Interval Live Tee Sheet · $0 Booking Fee</span>
+          <span class="os-live-pill">8-Min Interval Live Tee Sheet</span>
         </div>
         <div class="os-tee-grid">
           ${teeTimes.map((t) => `<div class="os-tee-card">
@@ -175,7 +175,7 @@ function renderSectionBlock(block = {}, liveData = {}) {
           ${events.map((ev) => `<article class="os-event-card">
             <strong>${esc(ev.title)}</strong>
             <span>${esc(ev.date || '')}</span>
-            <span>${esc(ev.price || 'Free RSVP')} (All-In Price · $0 Platform Markup)</span>
+            <span>${esc(ev.price || 'Free RSVP')} (All-In Price)</span>
           </article>`).join('')}
         </div>
       </section>`;
@@ -184,7 +184,7 @@ function renderSectionBlock(block = {}, liveData = {}) {
     case 'donation_dues_portal': {
       return `<section class="os-web-block os-block-giving" data-block="donation_dues_portal">
         <h2 class="os-web-h2">${esc(block.title || 'Online Stewardship, Dues & Direct ACH Payments')}</h2>
-        <p>${esc(block.description || 'Pay securely via flat $0.20 wholesale bank transfer (ACH) or card — 100% credited directly to your account ledger.')}</p>
+        <p>${esc(block.description || 'Online payments: in testing (test mode only).')}</p>
         <a href="${esc(block.portalUrl || '/pay')}" class="os-button os-button-primary">${esc(block.ctaText || 'Pay or Give Online')}</a>
       </section>`;
     }
@@ -218,7 +218,7 @@ function renderSectionBlock(block = {}, liveData = {}) {
     case 'catering_beo_inquiry': {
       return `<section class="os-web-block os-block-catering" data-block="catering_beo_inquiry">
         <h2 class="os-web-h2">${esc(block.title || 'Private Events, Outings & Catering Packages')}</h2>
-        <p>${esc(block.description || 'Build your custom event menu or tournament outing package with transparent per-guest pricing and $0.20 ACH milestone deposits.')}</p>
+        <p>${esc(block.description || 'Build your custom event menu or tournament outing package with transparent per-guest pricing.')}</p>
       </section>`;
     }
 

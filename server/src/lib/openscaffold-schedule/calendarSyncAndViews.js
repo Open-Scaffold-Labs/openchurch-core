@@ -26,9 +26,10 @@ function generateTenantIcsFeed({
   orgId,
   calendarName = 'Open Scaffold Schedule',
   timezone = 'America/Los_Angeles',
-  feedToken = 'tok_demo',
+  feedToken,
   bookings = [],
 }) {
+  if (!feedToken) throw new Error('feedToken is required');
   const tokenSha256 = crypto.createHash('sha256').update(`${orgId}:${feedToken}`).digest('hex');
   const dtstamp = formatIcsUtcTimestamp(new Date().toISOString());
 
@@ -39,13 +40,13 @@ function generateTenantIcsFeed({
     'CALSCALE:GREGORIAN',
     'METHOD:PUBLISH',
     `X-WR-CALNAME:${escapeIcsText(calendarName)}`,
-    `X-WR-TIMEZONE:${timezone}`,
+    `X-WR-TIMEZONE:${escapeIcsText(timezone)}`,
     `X-OSL-TENANT:${escapeIcsText(orgId)}`,
   ];
 
   for (const b of bookings) {
     if (b.status === 'canceled' || b.status === 'cancelled') continue;
-    const uid = `${b.id || crypto.randomUUID()}@${orgId}.openscaffold.org`;
+    const uid = escapeIcsText(`${b.id || crypto.randomUUID()}@${orgId}.openscaffold.org`);
     const summary = b.service_name
       ? `${b.customer_name || b.client_name} — ${b.service_name}`
       : `${b.customer_name || b.client_name} (${b.booking_kind || 'Booking'})`;
@@ -292,6 +293,195 @@ function buildMovePanelOptions({
   };
 }
 
+/**
+ * IDEA-2026-10-25-04: Grok Bot iOS Phone Apps Integration
+ * (MobileReadCalendar, MobileWriteCalendar, IOSReadReminders, IOSWriteReminders, MobileReadContacts, DeviceGetLocation, Messages)
+ * Generates a per-booking RFC 5545 .ics invite attachment (METHOD:REQUEST) with embedded tokenized
+ * one-tap reschedule/cancel URLs (X-OSL-RESCHEDULE-URL, X-OSL-CANCEL-URL, X-OSL-AGENT-BOOKING-ENDPOINT,
+ * and structured DESCRIPTION + URL properties) plus a companion @openscaffold/messaging SMS confirmation
+ * payload so a customer's personal Grok Bot reading their iPhone Calendar or Messages can immediately
+ * reschedule, cancel, or check status via the URL/MCP endpoint.
+ */
+function buildBookingIcsInviteAndSmsConfirmation({
+  orgId,
+  tenantSlug = "lumina-salon",
+  businessName = "Lumina Salon",
+  verticalKey = "open-salon",
+  baseUrl = null,
+  booking,
+  customerPhone = null,
+  customerEmail = null,
+  locationAddress = null,
+  tokenSecret,
+}) {
+  if (!tokenSecret || String(tokenSecret).length < 32) throw new Error("tokenSecret (32+ chars, from the host secret store) is required");
+  if (!orgId || !booking || !booking.id || !booking.starts_at || !booking.ends_at) {
+    throw new Error("orgId and booking (id, starts_at, ends_at) are required");
+  }
+
+  const cleanBase = String(baseUrl || `https://${tenantSlug}.openscaffold.app`).replace(/\/+$/, "");
+  const actionToken = crypto
+    .createHmac("sha256", tokenSecret)
+    .update(`${orgId}:${booking.id}:${booking.starts_at}`)
+    .digest("hex")
+    .slice(0, 24);
+
+  const rescheduleUrl = `${cleanBase}/b/${booking.id}/reschedule?tok=${actionToken}`;
+  const cancelUrl = `${cleanBase}/b/${booking.id}/cancel?tok=${actionToken}`;
+  const statusUrl = `${cleanBase}/b/${booking.id}?tok=${actionToken}`;
+  const agentBookingEndpoint = `${cleanBase}/.well-known/agent-booking.json`;
+  const mcpEndpoint = `${cleanBase}/api/agent/mcp`;
+
+  const customerName = booking.customer_name || booking.client_name || "Valued Guest";
+  const serviceName = booking.service_name || booking.booking_kind || "Appointment";
+  const providerName = booking.resource_name || booking.stylist_name || businessName;
+  const uid = `${booking.id}@${orgId}.openscaffold.org`;
+  const dtstamp = formatIcsUtcTimestamp(new Date().toISOString());
+
+  const descriptionLines = [
+    `${businessName} — ${serviceName} with ${providerName}`,
+    `Booking ID: ${booking.id}`,
+    `Status: ${booking.status || "confirmed"}`,
+    `Reschedule (1-Tap / Agent): ${rescheduleUrl}`,
+    `Cancel (1-Tap / Agent): ${cancelUrl}`,
+    `Agent Booking Manifest: ${agentBookingEndpoint}`,
+    `Agent MCP Endpoint: ${mcpEndpoint}`,
+  ];
+
+  const icsLines = [
+    "BEGIN:VCALENDAR",
+    "VERSION:2.0",
+    "PRODID:-//Open Scaffold Labs//@openscaffold/schedule v0.2.0//EN",
+    "CALSCALE:GREGORIAN",
+    "METHOD:REQUEST",
+    "BEGIN:VEVENT",
+    `UID:${uid}`,
+    `DTSTAMP:${dtstamp}`,
+    `DTSTART:${formatIcsUtcTimestamp(booking.starts_at)}`,
+    `DTEND:${formatIcsUtcTimestamp(booking.ends_at)}`,
+    `SUMMARY:${escapeIcsText(`${businessName}: ${serviceName} (${providerName})`)}`,
+    locationAddress ? `LOCATION:${escapeIcsText(locationAddress)}` : null,
+    `URL:${statusUrl}`,
+    `DESCRIPTION:${escapeIcsText(descriptionLines.join("\n"))}`,
+    `X-OSL-ORG-ID:${escapeIcsText(orgId)}`,
+    `X-OSL-BOOKING-ID:${escapeIcsText(String(booking.id))}`,
+    `X-OSL-RESCHEDULE-URL:${rescheduleUrl}`,
+    `X-OSL-CANCEL-URL:${cancelUrl}`,
+    `X-OSL-AGENT-BOOKING-ENDPOINT:${agentBookingEndpoint}`,
+    `X-OSL-AGENT-MCP-ENDPOINT:${mcpEndpoint}`,
+    "STATUS:CONFIRMED",
+    "END:VEVENT",
+    "END:VCALENDAR",
+  ].filter(Boolean);
+
+  const smsBody = [
+    `${businessName}: Confirmed ${serviceName} w/ ${providerName} on ${booking.starts_at}.`,
+    `Manage/Reschedule: ${rescheduleUrl}`,
+    `Cancel: ${cancelUrl}`,
+  ].join(" ");
+
+  return {
+    idea_id: "IDEA-2026-10-25-04",
+    org_id: orgId,
+    vertical_key: verticalKey,
+    booking_id: booking.id,
+    action_token: actionToken,
+    urls: {
+      status_url: statusUrl,
+      reschedule_url: rescheduleUrl,
+      cancel_url: cancelUrl,
+      agent_booking_endpoint: agentBookingEndpoint,
+      mcp_endpoint: mcpEndpoint,
+    },
+    ics_invite_attachment: {
+      filename: `booking-${booking.id}.ics`,
+      content_type: "text/calendar; method=REQUEST; charset=UTF-8",
+      ics_body: icsLines.join("\r\n"),
+    },
+    sms_confirmation_payload: {
+      compatible_package: "@openscaffold/messaging",
+      to_phone: customerPhone || booking.customer_phone || null,
+      to_email: customerEmail || booking.customer_email || null,
+      customer_name: customerName,
+      body: smsBody,
+      grok_bot_ios_interop: {
+        supported_ios_tools: [
+          "MobileReadCalendar",
+          "MobileWriteCalendar",
+          "IOSReadReminders",
+          "IOSWriteReminders",
+          "MobileReadContacts",
+          "DeviceGetLocation",
+        ],
+        reschedule_url: rescheduleUrl,
+        cancel_url: cancelUrl,
+        agent_booking_endpoint: agentBookingEndpoint,
+      },
+    },
+  };
+}
+
+/**
+ * IDEA-2026-10-25-04: STD-22 Dual-Channel Apple App Store iOS AppIntents & AppShortcutsProvider Descriptor
+ * Exposes BookAppointmentIntent, CheckNextAppointmentIntent, RescheduleAppointmentIntent, and
+ * CancelAppointmentIntent across all com.openscaffold.* iOS apps so App Intents, Shortcuts, and
+ * Grok Bot iOS can invoke OSL booking actions natively on-device.
+ */
+function buildStd22IosAppIntentsDescriptor({
+  verticalKey = "open-salon",
+  bundleId = "com.openscaffold.opensalon",
+  appName = "OpenSalon",
+  mcpEndpoint = "https://opensalon.vercel.app/api/agent/mcp",
+} = {}) {
+  return {
+    standard: "STD-22",
+    idea_id: "IDEA-2026-10-25-04",
+    vertical_key: verticalKey,
+    bundle_id: bundleId,
+    app_name: appName,
+    frameworks: ["AppIntents", "AppShortcutsProvider", "EventKit", "CoreLocation"],
+    grok_bot_ios_bridge_tools: [
+      "MobileReadCalendar",
+      "MobileWriteCalendar",
+      "IOSReadReminders",
+      "IOSWriteReminders",
+      "MobileReadContacts",
+      "DeviceGetLocation",
+    ],
+    mcp_endpoint: mcpEndpoint,
+    intents: [
+      {
+        intent_name: "BookAppointmentIntent",
+        title: `Book ${appName} Appointment`,
+        maps_to_mcp_tool: "schedule.book_slot",
+        parameters: ["serviceName", "preferredStartIso", "providerName", "partySize"],
+        opens_app_when_run: false,
+      },
+      {
+        intent_name: "CheckNextAppointmentIntent",
+        title: `Check Next ${appName} Appointment`,
+        maps_to_mcp_tool: "schedule.check_availability",
+        parameters: ["customerPhoneOrEmail"],
+        opens_app_when_run: false,
+      },
+      {
+        intent_name: "RescheduleAppointmentIntent",
+        title: `Reschedule ${appName} Appointment`,
+        maps_to_mcp_tool: "schedule.move_or_cascade",
+        parameters: ["bookingId", "newStartIso", "actionToken"],
+        opens_app_when_run: false,
+      },
+      {
+        intent_name: "CancelAppointmentIntent",
+        title: `Cancel ${appName} Appointment`,
+        maps_to_mcp_tool: "schedule.fill_waitlist",
+        parameters: ["bookingId", "actionToken", "reason"],
+        opens_app_when_run: false,
+      },
+    ],
+  };
+}
+
 module.exports = {
   generateTenantIcsFeed,
   processExternalCalendarWebhook,
@@ -299,4 +489,6 @@ module.exports = {
   buildWeekListMobileViewModel,
   buildMonthViewSummaryGrid,
   buildMovePanelOptions,
+  buildBookingIcsInviteAndSmsConfirmation,
+  buildStd22IosAppIntentsDescriptor,
 };

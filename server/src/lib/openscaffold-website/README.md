@@ -1,7 +1,7 @@
 # @openscaffold/website (vendored, libraries only)
 
 Pinned from `Open-Scaffold-Labs/openscaffold-website` commit
-`8a42e47073d910d2e8edee4600b5ce0c965c6885` (`@openscaffold/website` 2.0.0).
+`8138724378c055de4f1c38bc2e3c55cc3f4987a3` (`@openscaffold/website` 2.0.0).
 
 OpenChurch OC-WEB-1 (Atlas libraries-only plan + Dale #342 answers):
 

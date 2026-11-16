@@ -351,7 +351,7 @@ function evaluateModeCFacilityOrTeeBooking({
       calendar_mode: 'MODE_C_EVENT_FACILITY_TEE',
       booking_subtype: bookingSubtype,
       allowed: pacing.allowed,
-      per_cover_fee_cents: 0, // Zero OpenTable cover tax!
+      per_cover_fee_cents: 0, // No per-cover reservation fee
       pacing,
     };
   }

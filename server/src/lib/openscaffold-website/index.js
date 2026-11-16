@@ -1,7 +1,7 @@
 /**
  * @openscaffold/website — libraries only (OpenChurch OC-WEB-1).
  *
- * Upstream: Open-Scaffold-Labs/openscaffold-website @ 8a42e47073d910d2e8edee4600b5ce0c965c6885
+ * Upstream: Open-Scaffold-Labs/openscaffold-website @ 8138724378c055de4f1c38bc2e3c55cc3f4987a3
  * Package: @openscaffold/website 2.0.0
  *
  * Consumed as vendored source (same pattern as openscaffold-schedule).
@@ -20,7 +20,7 @@ module.exports = {
   UPSTREAM: Object.freeze({
     name: '@openscaffold/website',
     version: '2.0.0',
-    commit: '8a42e47073d910d2e8edee4600b5ce0c965c6885',
+    commit: '8138724378c055de4f1c38bc2e3c55cc3f4987a3',
     surface: 'v2-libraries-only',
   }),
 };
