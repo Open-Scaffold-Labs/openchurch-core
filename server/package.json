@@ -22,7 +22,8 @@
     "jsonwebtoken": "^9.0.2",
     "openai": "^6.46.0",
     "pg": "^8.22.0",
-    "web-push": "^3.6.7"
+    "web-push": "^3.6.7",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@babel/parser": "^7.29.7",

@@ -52,8 +52,12 @@ const DAY_ORDER = `CASE day_of_week
 // Static SAMPLE RFC 5545 feed (not tokenized, not parish data). The org
 // label is fixed; query parameters are ignored so callers cannot inject
 // a parish name into a calendar that looks official.
+// The vendored feed builder validates strictly and wants the caller's tenant
+// plus a feed token; both are fixed, public placeholders here (no real feed
+// is addressed and the token never appears in the output).
 const SAMPLE_ICS = generateTenantIcsFeed({
   orgId: 'sample',
+  feedToken: 'oc-sample-static-feed-not-a-secret',
   calendarName: 'OpenChurch sample schedule (static demo, not parish data)',
   bookings: [
     {
@@ -62,7 +66,7 @@ const SAMPLE_ICS = generateTenantIcsFeed({
       service_name: 'Sample: Sunday Morning Worship',
       starts_at: '2026-10-25T16:00:00.000Z',
       ends_at: '2026-10-25T17:30:00.000Z',
-      status: 'tentative',
+      status: 'requested',
     },
     {
       id: 'oc-sample-fellowship-dinner',
@@ -70,10 +74,10 @@ const SAMPLE_ICS = generateTenantIcsFeed({
       service_name: 'Sample: Wednesday Fellowship Hall Dinner',
       starts_at: '2026-10-28T00:30:00.000Z',
       ends_at: '2026-10-28T02:30:00.000Z',
-      status: 'tentative',
+      status: 'requested',
     },
   ],
-})
+}, { tenantOrgId: 'sample' })
 publicScheduleRouter.get('/feed.ics', (_req, res) => {
   res.setHeader('Content-Type', 'text/calendar; charset=utf-8')
   res.setHeader('X-OpenChurch-Sample', 'true')

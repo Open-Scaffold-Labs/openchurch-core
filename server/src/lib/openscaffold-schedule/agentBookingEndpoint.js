@@ -95,8 +95,26 @@ function buildPublicAgentBookingManifest({
   // until then discovery files say online payments are in testing.
   supportedPaymentRails = [],
   onlinePaymentsStatus = 'in_testing',
+  // Host-served booking/MCP URLs. Omitted from defaults so discovery files
+  // do not advertise /api/agent/mcp or /api/public/agent-booking/* unless
+  // the host actually serves them.
+  endpoints = {},
+  mcpUrl = null,
+  bookingApiBase = null,
 }) {
   const cleanBase = String(baseUrl || `https://${tenantSlug}.openscaffold.app`).replace(/\/+$/, '');
+  const hostEndpoints = endpoints && typeof endpoints === 'object' ? endpoints : {};
+  const mcp = mcpUrl || hostEndpoints.mcp_door_2 || hostEndpoints.mcpUrl || null;
+  const bookingBase = String(bookingApiBase || hostEndpoints.bookingApiBase || '').replace(/\/+$/, '');
+  const availability = hostEndpoints.availability_query || (bookingBase ? `${bookingBase}/availability` : null);
+  const createBooking = hostEndpoints.create_booking || (bookingBase ? `${bookingBase}/book` : null);
+  const endpointMap = {
+    well_known_manifest: `${cleanBase}/.well-known/agent-booking.json`,
+    llms_txt: `${cleanBase}/llms.txt`,
+  };
+  if (mcp) endpointMap.mcp_door_2 = mcp;
+  if (availability) endpointMap.availability_query = availability;
+  if (createBooking) endpointMap.create_booking = createBooking;
 
   const wellKnownAgentBookingJson = {
     schema_version: '2026-10-25',
@@ -107,13 +125,7 @@ function buildPublicAgentBookingManifest({
     vertical_key: verticalKey,
     business_hours: businessHours,
     zero_commission_direct_booking: true,
-    endpoints: {
-      well_known_manifest: `${cleanBase}/.well-known/agent-booking.json`,
-      llms_txt: `${cleanBase}/llms.txt`,
-      mcp_door_2: `${cleanBase}/api/agent/mcp`,
-      availability_query: `${cleanBase}/api/public/agent-booking/availability`,
-      create_booking: `${cleanBase}/api/public/agent-booking/book`,
-    },
+    endpoints: endpointMap,
     capabilities: bookingCapabilities,
     payment_rails: supportedPaymentRails,
     online_payments: onlinePaymentsStatus,
@@ -130,13 +142,15 @@ function buildPublicAgentBookingManifest({
     `- Organization ID: ${orgId}`,
     `- Business Hours: ${businessHours}`,
     `- Direct Agent Booking Manifest: ${cleanBase}/.well-known/agent-booking.json`,
-    `- MCP Server Endpoint (Door 2): ${cleanBase}/api/agent/mcp`,
+    mcp ? `- MCP Server Endpoint (Door 2): ${mcp}` : null,
     `- Capabilities: ${bookingCapabilities.join(', ')}`,
     onlinePaymentsStatus === 'in_testing'
       ? `- Online Payments: in testing (test mode only; no payment rails are live)`
       : `- Payment Rails: ${supportedPaymentRails.join(', ') || 'none'}`,
-    `- Voice AI Fast-Path: Dialing bots may press #9 to skip greeting or book directly via ${cleanBase}/api/public/agent-booking/book.`,
-  ].join('\n');
+    createBooking
+      ? `- Voice AI Fast-Path: Dialing bots may press #9 to skip greeting or book directly via ${createBooking}.`
+      : `- Voice AI Fast-Path: Dialing bots may press #9 to skip greeting.`,
+  ].filter(Boolean).join('\n');
 
   return {
     wellKnownAgentBookingJson,

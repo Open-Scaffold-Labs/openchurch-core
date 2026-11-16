@@ -86,4 +86,37 @@ describe('vendored openscaffold-schedule public manifest defaults', () => {
     ).toBe(true)
     expect(stillTesting.llmsTxt.includes('example_rail')).toBe(false)
   })
+
+  it('omits MCP and booking URLs unless the host passes them (openscaffold-schedule #5)', () => {
+    const { wellKnownAgentBookingJson, llmsTxt } = defaultManifest()
+    const json = JSON.stringify(wellKnownAgentBookingJson)
+    expect(json).not.toMatch(/api\/agent\/mcp|agent-booking\/(availability|book)/)
+    expect(llmsTxt).not.toMatch(/api\/agent\/mcp|agent-booking\/(availability|book)/)
+    expect(wellKnownAgentBookingJson.endpoints.mcp_door_2).toBeUndefined()
+    expect(wellKnownAgentBookingJson.endpoints.availability_query).toBeUndefined()
+    expect(wellKnownAgentBookingJson.endpoints.create_booking).toBeUndefined()
+    expect(wellKnownAgentBookingJson.endpoints.well_known_manifest).toBe(
+      'https://bistro.openscaffold.app/.well-known/agent-booking.json'
+    )
+  })
+
+  it('lists MCP and booking URLs when the host passes them', () => {
+    const { wellKnownAgentBookingJson, llmsTxt } = buildPublicAgentBookingManifest({
+      orgId: 'org_rest_1',
+      tenantSlug: 'bistro-open',
+      businessName: 'Bistro Open',
+      verticalKey: 'open-restaurant',
+      baseUrl: 'https://bistro.openscaffold.app',
+      mcpUrl: 'https://bistro.openscaffold.app/host/mcp',
+      bookingApiBase: 'https://bistro.openscaffold.app/host/booking/',
+    })
+    expect(wellKnownAgentBookingJson.endpoints.mcp_door_2).toBe('https://bistro.openscaffold.app/host/mcp')
+    expect(wellKnownAgentBookingJson.endpoints.availability_query).toBe(
+      'https://bistro.openscaffold.app/host/booking/availability'
+    )
+    expect(wellKnownAgentBookingJson.endpoints.create_booking).toBe(
+      'https://bistro.openscaffold.app/host/booking/book'
+    )
+    expect(llmsTxt.includes('https://bistro.openscaffold.app/host/mcp')).toBe(true)
+  })
 })
